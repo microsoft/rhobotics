@@ -59,7 +59,7 @@ dependencies = [
     "torch>=2.8.0",
     "torchcodec==0.6.0; sys_platform != 'win32' and (sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l')) and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
     "torchvision==0.23.0",
-    "transformers==4.57.6",
+    "transformers==5.0.0rc3",
     "wandb>=0.23.0",
     "scipy==1.15.3",
     "backoff>=2.1.0",
@@ -75,7 +75,7 @@ dependencies = [
 
 [project.optional-dependencies]
 pi0 = [
-    "transformers==4.53.2",
+    "transformers==5.0.0rc3",
     "sentencepiece>=0.2.0",
     "filelock>=3.16.1",
     "typing-extensions>=4.12.2",

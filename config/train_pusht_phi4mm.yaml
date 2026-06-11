@@ -1,0 +1,61 @@
+# Training configuration for PushT dataset with Phi4MM Policy
+# Usage: python -m rho.training.train --config config/train_pusht_phi4mm.yaml
+
+# WandB logging configuration
+wandb:
+  project: "rho_pusht_phi4mm"  # Project name for WandB
+  username: "msrx-eai"  # Team entity - can be overridden
+  tags: ["pusht", "phi4mm", "training"]
+  group: "pusht_experiments"
+  notes: "Phi4MM training on PushT dataset"
+  enabled: true
+
+# Dataset configuration (same as pusht.yaml)
+dataset: !include datasets/pusht.yaml
+
+# Policy configuration (Phi4MM Policy)
+policy:
+  <<: !include policies/phi4mm.yaml
+  lr_scheduler:
+    type: "cosine_decay_with_warmup"
+    num_warmup_steps: 2500
+    peak_lr: 1e-4
+    decay_lr: 5e-6
+    decay_start_step: 5000
+    num_decay_steps: 10000
+
+# Environment configuration for evaluation during training
+environment:
+  type: "GymEnvironment"
+  env_name: "gym_pusht/PushT-v0"
+  obs_type: "pixels_agent_pos"
+  max_episode_steps: 100
+  n_envs: 10
+  seed: 42
+  observation_mapping:
+    agent_pos: "observation.state"
+    pixels: "observation.image"
+  default_task: "Push the T-shaped block to the target location"
+
+# Training parameters
+batch_size: 4
+num_workers: 8
+learning_rate: 1e-4
+steps: 50000  # Total training steps
+
+# Checkpoint and output settings
+output_dir: "outputs/training_phi4mm"  # Different output directory for phi4mm policy
+save_checkpoint_every: 1000  # Save checkpoint every N steps
+logging_interval: 100  # Log metrics every N steps
+mixed_precision: "no"  # Options: "no", "fp16", "bf16"
+gradient_accumulation_steps: 1
+
+# Evaluation settings
+record_videos: true  # Record videos during evaluation
+eval_interval: 1000  # Evaluate policy every N steps
+eval_num_episodes: 50
+eval_mode: "standard"  # Options: "standard", "rtc"
+
+# Resume training settings
+resume: false
+pretrained_checkpoint: null

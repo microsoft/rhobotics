@@ -1,0 +1,20 @@
+
+pretrained_checkpoint: "/data/tess_tmp/results/training_phi4mm/0304_025133/checkpoints/checkpoint_step_0050000.pt"
+
+environment:
+  type: "ur5e_server"
+  port: 9999
+  input_action_type: "POSITION"
+  output_action_type: "EE_QUAT_POS_XYZW"
+
+policy_interface_cfg:
+  observation_mapping:
+    joint_positions: observation.state
+    zed_scene_bgr: observation.image.agentview
+    zed_wrist_left_bgr: observation.image.left_wrist
+    zed_wrist_right_bgr: observation.image.right_wrist
+    tactile: observation.force
+
+# eval_mode: rtc
+# inference_delay: 8
+# beta: 10

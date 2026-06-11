@@ -1,0 +1,35 @@
+# Temporary test multieval config for auto_finetune quick validation
+# Based on multieval_libero_rhoalpha.yaml with n_envs=2, max_episode_steps=10, eval_num_episodes=2
+eval_configs:
+  - <<: !include eval_libero_rhoalpha.yaml
+    name: "libero_spatial"
+    environment:
+      type: "libero"
+      episodes_per_task: 10
+      task_suite_name: "libero_spatial"
+      n_envs: 10
+      max_episode_steps: 220
+  - <<: !include eval_libero_rhoalpha.yaml
+    name: "libero_object"
+    environment:
+      type: "libero"
+      episodes_per_task: 10
+      task_suite_name: "libero_object"
+      n_envs: 10
+      max_episode_steps: 280
+  - <<: !include eval_libero_rhoalpha.yaml
+    name: "libero_goal"
+    environment:
+      type: "libero"
+      episodes_per_task: 10
+      task_suite_name: "libero_goal"
+      n_envs: 10
+      max_episode_steps: 300
+  - <<: !include eval_libero_rhoalpha.yaml
+    name: "libero_10"
+    environment:
+      type: "libero"
+      task_suite_name: "libero_10"
+      episodes_per_task: 10
+      n_envs: 10
+      max_episode_steps: 520

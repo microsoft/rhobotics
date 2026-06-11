@@ -1,0 +1,32 @@
+# Evaluation configuration for a pretrained RhoAlpha policy on the Libero environment
+# Usage: python environments/libero/eval.py --config_path=environments/libero/configs/eval_libero_rhoalpha.yaml --pretrained_checkpoint=${PATH_TO_CHECKPOINT}
+
+pretrained_checkpoint: null
+
+# This is the number of episodes to run PER TASK_ID in environment.task_suite_name
+eval_num_episodes: 10
+record_videos: true
+output_dir: null
+device: "cuda"
+
+# Environment settings
+environment:
+  type: "libero"
+  task_suite_name: "libero_spatial"
+  n_envs: 2
+  max_episode_steps: 300
+
+# Recommended max_episode_steps based on task_suite_name:
+# "libero_spatial": 220
+# "libero_object": 280
+# "libero_goal": 300
+# "libero_10": 520
+# "libero_90": 400
+
+policy:
+  type: "rhoalpha"
+  scheduler_decay_steps: 60000
+  freeze_vision_encoder: false
+  train_expert_only: false
+
+seed: 42

@@ -1,0 +1,27 @@
+# Reusable across different training runs and experiments
+repo_id: "lerobot/libero"  # Custom dataset repository ID
+root_dir: null  # Will use default cache location
+use_imagenet_stats: false
+observation_mapping:  # Map observation keys to dataset format
+  "observation.images.image": "observation.image.agentview"
+  "observation.images.image2": "observation.image.wrist"
+
+features:
+  observation.image.agentview:
+    type: VISUAL
+    shape: (3,256,256)
+  observation.image.wrist:
+    type: VISUAL
+    shape: (3,256,256)
+  observation.state:
+    type: STATE
+    shape: (8,)
+  action:
+    type: ACTION
+    shape: (7,)
+
+normalization_mapping:
+  VISUAL: IDENTITY
+  ENV: QUANTILE
+  STATE: QUANTILE
+  ACTION: QUANTILE

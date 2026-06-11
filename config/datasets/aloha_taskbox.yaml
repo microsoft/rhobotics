@@ -1,0 +1,57 @@
+# Multi-dataset configuration for all Aloha taskbox datasets
+# Stats are loaded from each dataset's meta/stats.json (computed via two-pass method)
+#
+# Set ALOHA_TASKBOX_DATA_ROOT to the parent directory containing the dataset folders.
+# Default local path: /data/mobile_aloha/lerobot_v3
+# Azure blob path: aloha_lerobot_datasets/ (various subfolders)
+
+datasets:
+  - dataset:
+      <<: !include aloha/aloha_taskbox_base_meanstd.yaml
+      repo_id: "AlohaTaskbox/random_taskbox_phase_1"
+      root_dir: "${ALOHA_TASKBOX_DATA_ROOT}/taskbox_march_april_2025_lerobot_v3/random_taskbox_phase_1"
+    weight: 1.0
+  - dataset:
+      <<: !include aloha/aloha_taskbox_base_meanstd.yaml
+      repo_id: "AlohaTaskbox/random_taskbox_v2"
+      root_dir: "${ALOHA_TASKBOX_DATA_ROOT}/taskbox_august_sept_2025_lerobot_v3/random_taskbox_v2"
+    weight: 1.0
+  - dataset:
+      <<: !include aloha/aloha_taskbox_base_meanstd.yaml
+      repo_id: "AlohaTaskbox/random_taskbox_v2_phase_2"
+      root_dir: "${ALOHA_TASKBOX_DATA_ROOT}/taskbox_april_july_2025_lerobot_v3/random_taskbox_v2_phase_2"
+    weight: 1.0
+  - dataset:
+      <<: !include aloha/aloha_taskbox_base_meanstd.yaml
+      repo_id: "AlohaTaskbox/busybox_wave3_combined"
+      root_dir: "${ALOHA_BUSYBOX_DATA_ROOT}/aloha-busybox_lerobot_v3_wave3_combined"
+    weight: 1.0
+
+features:
+  observation.image.0:
+    type: VISUAL
+    shape: (3,224,224)
+  observation.image.1:
+    type: VISUAL
+    shape: (3,224,224)
+  observation.image.2:
+    type: VISUAL
+    shape: (3,224,224)
+  observation.state:
+    type: STATE
+    shape: (14,)
+  action:
+    type: ACTION
+    shape: (14,)
+
+observation_whitelist:
+  - "observation.state"
+  - "action"
+  - "observation.image.0"
+  - "observation.image.1"
+  - "observation.image.2"
+  - "task"
+  - "task_index"
+  - "frame_index"
+
+shuffle_buffer_size: 100

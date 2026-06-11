@@ -1,0 +1,56 @@
+## Phi4MM Policy configuration
+# Reusable configuration for Phi4MM policy experiments
+type: "phi4mm"
+
+# Phi4MM model architecture configuration
+embed_dim: 3072
+num_heads: 8
+ff_dim: 4096
+hidden_state_idx: 12  # which layer embedding to select [0,33]
+num_blocks: 8
+max_seq_len: 6144  # 2048*3
+device: "cuda"
+
+# Input / output structure
+n_obs_steps: 1
+chunk_size: 50
+n_action_steps: 50
+
+# Maximum dimensions for padding
+max_state_dim: 32
+max_action_dim: 32
+
+# HD (High Definition) multi-crop image processing
+use_hd_transform: true  # Set to false for faster, lower-memory training
+dynamic_hd: 36  # Number of crops when use_hd_transform=true
+
+# Empty cameras configuration
+empty_cameras: 0
+
+# Action processing
+use_delta_joint_actions_aloha: false
+
+# Tokenizer configuration
+tokenizer_max_length: 48
+
+# Decoding configuration
+num_steps: 10
+
+# Attention settings
+use_cache: true
+attention_implementation: "flash_attention_2"  # options: eager, fa2, flex
+
+# Finetuning settings
+freeze_vision_encoder: true
+train_expert_only: true
+
+# Training presets - optimizer
+optimizer_lr: 2.5e-5
+optimizer_betas: [0.9, 0.95]
+optimizer_eps: 1.0e-8
+optimizer_weight_decay: 1.0e-10
+
+# Training presets - scheduler
+scheduler_warmup_steps: 1000
+scheduler_decay_steps: 30000
+scheduler_decay_lr: 2.5e-6

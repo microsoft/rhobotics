@@ -1,0 +1,7 @@
+datasets:
+  - dataset: !include pusht.yaml
+    weight: 1.5
+  - dataset: !include pusht.yaml
+    weight: 0.25
+  - dataset: !include pusht.yaml
+    weight: 0.6666666

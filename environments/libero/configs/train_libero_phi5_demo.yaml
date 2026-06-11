@@ -1,0 +1,58 @@
+# Demo training configuration for Libero with the Phi5 backbone
+# Uses the official lerobot/libero HuggingFace dataset for easier access
+# Usage: python environments/libero/train.py --config_path=environments/libero/configs/train_libero_phi5_demo.yaml
+
+# WandB logging configuration
+wandb:
+  project: "rho"
+  username: "msrx-eai"
+  tags: ["libero", "phi5", "training", "demo"]
+  group: "libero_experiments"
+  notes: "Phi5 demo training on Libero dataset (HuggingFace)"
+  enabled: true
+
+# Dataset configuration — uses the public HuggingFace lerobot/libero dataset
+dataset: !include "libero_dataset.yaml"
+
+environment:
+    type: "libero"
+    n_envs: 2
+    episodes_per_task: 2
+    max_episode_steps: 300
+    task_suite_name: "libero_spatial"
+
+# Policy configuration — Phi5 backbone with small embedding for demo use
+policy:
+  type: "phi4mm"
+  vlm_backend: phi5
+  hidden_state_idx: 12
+  embed_dim: 1024
+  n_obs_steps: 1
+  chunk_size: 16
+  n_action_steps: 8
+  scheduler_decay_steps: 240000
+  freeze_vision_encoder: true
+  freeze_vision_transformer: true
+  freeze_vision_projector: true
+  train_expert_only: true
+  resize_imgs_with_padding: [224, 224]
+
+# Training parameters
+batch_size: 4
+num_workers: 4
+learning_rate: 1e-4
+steps: 100000
+
+# Checkpoint and output settings
+output_dir: "outputs/training_phi5_demo"
+save_checkpoint_every: 10000
+logging_interval: 200
+mixed_precision: "no"
+gradient_accumulation_steps: 1
+record_videos: true
+eval_num_episodes: 8
+eval_interval: 10000
+
+# Resume training settings
+resume: false
+pretrained_checkpoint: null

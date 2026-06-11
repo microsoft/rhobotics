@@ -1,0 +1,58 @@
+# Pi0.5 variant of transforms.yaml. Spatial augmentations are kept (Pi0 does no
+# spatial aug of its own), but color_jitter is dropped because Pi0's
+# _preprocess_observation_pytorch already applies brightness/contrast/saturation
+# jitter internally during train mode (see rho/policies/pi0/processing_pi0.py).
+"action":
+  - type: convert_to_6d_actions
+    action_key: "observation.state"
+    action_type: EE_QUAT_POS_XYZW
+    post_norm: False
+  - type: convert_to_6d_actions
+    action_key: "action"
+    action_type: EE_QUAT_POS_XYZW
+    post_norm: False
+  - type: delta_actions
+    action_key: "action"
+    state_key: "observation.state"
+    action_type: EE_6D_POS
+    relative_to_state: true
+    post_norm: False
+
+"observation.image.agentview":
+  - type: center_crop
+    height: 360
+    width: 360
+  - type: resize_with_padding
+    height: 448
+    width: 448
+  - type: random_resized_crop
+    height: 448
+    width: 448
+    scale: [0.85, 1.0]
+    ratio: [0.95, 1.05]
+
+"observation.image.left_wrist":
+  - type: center_crop
+    height: 360
+    width: 360
+  - type: resize_with_padding
+    height: 448
+    width: 448
+  - type: random_resized_crop
+    height: 448
+    width: 448
+    scale: [0.9, 1.0]
+    ratio: [0.98, 1.02]
+
+"observation.image.right_wrist":
+  - type: center_crop
+    height: 360
+    width: 360
+  - type: resize_with_padding
+    height: 448
+    width: 448
+  - type: random_resized_crop
+    height: 448
+    width: 448
+    scale: [0.9, 1.0]
+    ratio: [0.98, 1.02]

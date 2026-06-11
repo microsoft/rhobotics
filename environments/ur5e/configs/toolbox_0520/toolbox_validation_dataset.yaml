@@ -1,0 +1,10 @@
+# Validation split. No holdout episodes were recorded for toolbox yet, so
+# root_dir defaults to the training dataset; override on the launch script
+# once a real validation set exists.
+repo_id: "msr_custom"
+root_dir: "/data/msrx-eai/datasets/ur5e/ur5e_toolbox/ur5e_toolbox_0520"
+
+observation_mapping: !include observation_mapping.yaml
+transform_mapping: !include transforms.yaml
+
+<<: !include toolbox_train_features.yaml

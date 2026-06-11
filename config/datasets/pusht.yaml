@@ -1,0 +1,25 @@
+# Dataset configuration for PushT
+# Reusable across different training runs and experiments
+
+repo_id: "lerobot/pusht"  # PushT dataset from LeRobot
+root_dir: null  # Will use default cache location
+batch_size: 1
+num_workers: 2
+use_imagenet_stats: false
+prefetch_factor: 1
+
+features:
+  action:
+    shape: (2,)
+    type: ACTION
+  observation.image:
+    shape: (3,96,96)
+    type: VISUAL
+  observation.state:
+    shape: (2,)
+    type: STATE
+normalization_mapping:
+  ACTION: MIN_MAX #QUANTILE
+  ENV: MIN_MAX #QUANTILE
+  STATE: MIN_MAX #QUANTILE
+  VISUAL: MEAN_STD

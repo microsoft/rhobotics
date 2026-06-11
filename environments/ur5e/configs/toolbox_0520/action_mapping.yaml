@@ -1,0 +1,22 @@
+# Maps each action key in the parquet to (state_key, action_type) so the
+# chunk-stats recomputer can build relative-to-state action chunks before
+# computing min_chunk{N}/max_chunk{N}.
+#
+# Keys are the dataset-side names (what convert_hdf5_to_lerobot.py wrote),
+# NOT the post-observation_mapping training-side names.
+#
+# Toolbox was recorded with bimanual GELLO on ur5e_bimanual, so the
+# joint_position action IS present (unlike fr3_duo/cube_reach + glassware_stack
+# which were spacemouse-only).
+action.eef_quat_pos:
+  state_key: observations.eef_quat_pos
+  action_type: EE_QUAT_POS_XYZW
+action.eef_rpy:
+  state_key: observations.eef_rpy
+  action_type: EE_EULER_POS
+action.joint_position:
+  state_key: observations.joint_position
+  action_type: POSITION
+action.tcp_forces:
+  state_key: observations.tcp_forces
+  action_type: POSITION

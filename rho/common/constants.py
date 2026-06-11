@@ -1,0 +1,8 @@
+OBSERVATION_PREFIX = "observation"
+OBSERVATION_IMAGE = "observation.image"
+OBSERVATION_ENVIRONMENT_STATE = "observation.environment_state"
+OBSERVATION_STATE = "observation.state"
+OBSERVATION_TACTILE = "observation.force"
+OBSERVATION_LANG = "task"
+ACTION = "action"
+ACTION_TACTILE = "action.force"

@@ -38,7 +38,7 @@ classifiers = [
 dependencies = [
     "cmake>=3.29.0.1",
     "datasets>=4.0.0,<4.2.0",
-    "diffusers==0.34.0",
+    "diffusers==0.38.0",
     "draccus==0.10.0",
     "einops>=0.8.0",
     "flask>=3.0.3",

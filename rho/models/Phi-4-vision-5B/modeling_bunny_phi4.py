@@ -245,7 +245,6 @@ class Siglip2ImageProcessorNoUpscale(siglip2_ips.Siglip2ImageProcessor):
         self.max_num_patches = max_num_patches
         self.min_num_patches = min_num_patches
 
-    @siglip2_ips.filter_out_non_signature_kwargs()
     def preprocess(
         self,
         images,

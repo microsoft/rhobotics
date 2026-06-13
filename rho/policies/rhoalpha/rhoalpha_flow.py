@@ -8,7 +8,7 @@ import math
 
 import torch
 import torch.nn.functional as F  # noqa: N812
-from lerobot.utils.utils import get_safe_dtype
+from lerobot.utils.device_utils import get_safe_dtype
 from torch import Tensor, nn
 
 from rho.policies.rhoalpha.configuration_rhoalpha import RhoAlphaConfig

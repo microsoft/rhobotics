@@ -119,11 +119,6 @@ class RhoAlphaConfig(PolicyConfig):
     enable_gradient_checkpointing: bool = True
     # train_state_proj: bool = True # fixed to always to be true for now.
 
-    # Alternating freeze schedule: alternate between frozen and unfrozen VLM backbone
-    alternating_freeze: bool = False
-    alternating_freeze_steps: int = 80
-    alternating_unfreeze_steps: int = 20
-
     # Training presets
     optimizer_lr: float = 1e-4
     optimizer_betas: tuple[float, float] = (0.9, 0.95)
@@ -164,7 +159,6 @@ class RhoAlphaConfig(PolicyConfig):
 
     # ActionExpert Configs
     dropout_p: float = 0.1
-    use_output_dropout: bool = True
     pos_emb_method: str = "sinusoidal"  # ["learned", "sinusoidal"]
 
     # Multi-head training support
@@ -172,10 +166,6 @@ class RhoAlphaConfig(PolicyConfig):
         None  # List of training modes to support (defaults to [ROBOT_FLOWMATCH])
     )
     knowledge_insulation_alpha: float = 1.0  # Weight for flow loss in knowledge insulation (alpha in Eq. 4)
-    endstate_target_prefix: str | None = None
-    vl_loss_weight: float = 0.0
-    optimizer_lr_action_expert: float | None = None
-    log_hidden_state_stats: bool = False
 
     # TACTILE ONLY CONFIGS
     # Mask to select a subset of the tactile signal before passing to the policy.
@@ -193,7 +183,6 @@ class RhoAlphaConfig(PolicyConfig):
     baku_weight_init: bool = False  # use the weight init from BAKU
 
     monkeypatch_siglip_encoder: bool = False  # use the siglip encoder from monkeypatch
-    backbone_lr_multiplier: float | None = None
 
     def __post_init__(self):
         """Input validation (not exhaustive)."""

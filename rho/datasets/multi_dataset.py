@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.datasets.utils import dataset_to_policy_features
+from lerobot.utils.feature_utils import dataset_to_policy_features
 
 from rho.common.constants import ACTION, OBSERVATION_STATE
 from rho.common.serialization import serialize_to_dict

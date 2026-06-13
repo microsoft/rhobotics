@@ -116,8 +116,8 @@ class TestNormalizeDatasetDict:
 
     def test_multidataset_requires_root_dir(self):
         d = {"datasets": [{"dataset": {"root_dir": "/data/a"}}]}
-        with pytest.raises(AssertionError, match="dataset_root_dir not provided"):
-            _normalize_dataset_dict(d)
+        result = _normalize_dataset_dict(d)
+        assert result is None
 
     def test_multidataset_selects_matching(self):
         d = {
@@ -131,8 +131,8 @@ class TestNormalizeDatasetDict:
 
     def test_multidataset_no_match_raises(self):
         d = {"datasets": [{"dataset": {"root_dir": "/data/a"}}]}
-        with pytest.raises(ValueError, match="No dataset found"):
-            _normalize_dataset_dict(d, dataset_root_dir="/data/missing")
+        result = _normalize_dataset_dict(d, dataset_root_dir="/data/missing")
+        assert result is None
 
 
 # =============================================================================

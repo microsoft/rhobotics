@@ -26,11 +26,39 @@ from rho.policies.dsrl.flowdagger_config import FlowDAggerConfig
 logger = logging.getLogger(__name__)
 
 
+def _root_dir_matches(candidate: str, target: str) -> bool:
+    """Check if two root_dir paths refer to the same dataset.
+
+    Compares the last two path components (e.g. ``aloha_sim_jellyho/aloha_handover_box_v6``)
+    to handle different mount point prefixes between training and evaluation.
+    Also strips version suffixes (``_v5``, ``_v6``, etc.) to handle dataset version
+    differences between training and evaluation.
+    """
+    if candidate == target:
+        return True
+    # Compare trailing path components to handle different mount prefixes
+    c_parts = Path(candidate).parts
+    t_parts = Path(target).parts
+    # Match on the last 2 components (parent dir + dataset name)
+    n = min(2, len(c_parts), len(t_parts))
+    if c_parts[-n:] == t_parts[-n:]:
+        return True
+    # Also try matching after stripping version suffixes (_v5, _v6, etc.)
+    import re
+
+    c_stripped = tuple(re.sub(r"_v\d+$", "", p) for p in c_parts[-n:])
+    t_stripped = tuple(re.sub(r"_v\d+$", "", p) for p in t_parts[-n:])
+    return c_stripped == t_stripped
+
+
 def find_dataset_by_root_dir(dataset_dict: dict, target_root_dir: str) -> dict | None:
     """
     Search for a dataset config with the matching root_dir.
     Handles MultiDatasetConfig structures by checking dataset_cfgs (flattened list)
     or falling back to recursive search through datasets.
+
+    Matching uses the last two path components to handle different mount prefixes
+    between training and evaluation environments.
 
     Args:
         dataset_dict: The dataset dictionary to search
@@ -40,13 +68,13 @@ def find_dataset_by_root_dir(dataset_dict: dict, target_root_dir: str) -> dict |
         The matching dataset dict, or None if not found
     """
     # Check if this is a leaf dataset with matching root_dir
-    if "root_dir" in dataset_dict and dataset_dict.get("root_dir") == target_root_dir:
+    if "root_dir" in dataset_dict and _root_dir_matches(dataset_dict["root_dir"], target_root_dir):
         return dataset_dict
 
     # If flatten_nested is True (default), check dataset_cfgs for the flattened list
     if dataset_dict.get("flatten_nested", True) and "dataset_cfgs" in dataset_dict:
         for cfg in dataset_dict["dataset_cfgs"]:
-            if cfg.get("root_dir") == target_root_dir:
+            if _root_dir_matches(cfg.get("root_dir", ""), target_root_dir):
                 return cfg
 
     # Fallback: recursively search through nested datasets structure
@@ -114,13 +142,19 @@ def _normalize_dataset_dict(
     """
     # --- multidataset selection ---
     if "datasets" in dataset_dict or "dataset_cfgs" in dataset_dict:
-        assert dataset_root_dir is not None, (
-            "Multiple datasets found in training config but dataset_root_dir not provided "
-            "in EvalConfig to select which dataset to use."
-        )
+        if dataset_root_dir is None:
+            logger.warning(
+                "Multiple datasets found in training config but dataset_root_dir not provided. "
+                "Skipping dataset loading — per-task configs should provide dataset_root_dir."
+            )
+            return None
         matched_dataset = find_dataset_by_root_dir(dataset_dict, dataset_root_dir)
         if matched_dataset is None:
-            raise ValueError(f"No dataset found in training config with root_dir: {dataset_root_dir}")
+            logger.warning(
+                f"No dataset found in training config with root_dir: {dataset_root_dir}. "
+                "Skipping dataset loading — eval config will provide its own dataset."
+            )
+            return None
         dataset_dict = matched_dataset
 
     # --- old nested-features migration ---
@@ -260,11 +294,15 @@ def load_configs_from_train_config(
             train_config_dict["dataset"],
             dataset_root_dir=dataset_root_dir,
         )
-        try:
-            data_config = draccus.decode(DataConfig, dataset_dict)
-            logger.info(f"DataConfig loaded from {train_config_path}: {type(data_config).__name__}")
-        except Exception as e:
-            logger.warning(f"Failed to decode DataConfig from {train_config_path}: {e}")
+        if dataset_dict is None:
+            # Multi-dataset without selection — skip dataset loading
+            pass
+        else:
+            try:
+                data_config = draccus.decode(DataConfig, dataset_dict)
+                logger.info(f"DataConfig loaded from {train_config_path}: {type(data_config).__name__}")
+            except Exception as e:
+                logger.warning(f"Failed to decode DataConfig from {train_config_path}: {e}")
     else:
         logger.warning("No 'dataset' key found in train_config.json")
 
@@ -317,6 +355,12 @@ class EvalConfig:
     dsrl: DSRLConfig | None = None
     flowdagger: FlowDAggerConfig | None = None
 
+    # Evaluation parameters (used by sim eval, safe defaults for other usage)
+    eval_num_episodes: int = 5
+    record_videos: bool = True
+    output_dir: str | None = None
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
     def __post_init__(self):
         # Expand environment variables in dataset_root_dir (e.g. $DATA_DIR/...)
         # so YAML configs can use env vars just like LerobotDatasetConfig.root_dir.
@@ -327,7 +371,8 @@ class EvalConfig:
         # template (e.g. inside a MultiEvalConfig).  Skip all validation and
         # checkpoint-dependent initialisation; the real config will be
         # constructed later with the actual checkpoint path.
-        if self.pretrained_checkpoint is None:
+        if self.pretrained_checkpoint is None or self.pretrained_checkpoint == "None":
+            self.pretrained_checkpoint = None
             return
 
         # 0. Check is user provided a folder or a .pt file
@@ -375,15 +420,18 @@ class SimEvalConfig(EvalConfig):
     """Evaluation config for simulation environments.
 
     Inherits from EvalConfig and can be extended with sim-specific settings.
-    """
 
-    eval_num_episodes: int = 5
-    record_videos: bool = True
-    output_dir: str | None = None
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    When ``eval_configs`` is populated (via a MultiEvalConfig-style YAML),
+    this acts as a multi-eval runner: the policy is loaded once from
+    ``pretrained_checkpoint`` and reused across all sub-configs.
+    """
 
     update_wandb_run: bool = False  # Whether to post updates to wandb run from training
     wandb_config: WandBConfig | None = None  # Loaded from train_config.json if available
+
+    # Multi-eval support: when populated, each entry defines a separate
+    # evaluation environment.  The top-level pretrained_checkpoint is shared.
+    eval_configs: list[EvalConfig] = field(default_factory=list)
 
     def __post_init__(self):
         super().__post_init__()  # Call the parent post init to load checkpoint and configs
@@ -408,12 +456,21 @@ class SimEvalConfig(EvalConfig):
                 logger.warning("No 'wandb' key found in train_config.json")
             #### Load WandB config from train_config.json ####
 
+    @property
+    def is_multi_eval(self) -> bool:
+        """Return True if this config defines multiple evaluations."""
+        return len(self.eval_configs) > 0
+
 
 @dataclass
 class MultiEvalConfig:
     """
     Configuration for running multiple evaluations with different settings.
     Each eval_configs entry is a SimEvalConfig (or EvalConfig) instance.
+
+    Note: This class is retained for backward compatibility with auto_eval.py
+    and auto_finetune pipelines.  For direct CLI usage, prefer SimEvalConfig
+    with ``eval_configs`` populated.
     """
 
     eval_configs: list[SimEvalConfig] = field(default_factory=list)

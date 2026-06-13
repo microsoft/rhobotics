@@ -1,9 +1,11 @@
+import gc
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
 
 import draccus
+import torch
 import wandb
 
 from rho.common.wandb_logging import WandBLogger
@@ -15,6 +17,17 @@ from rho.policies import make_policy
 from rho.utils import init_logging
 
 logger = logging.getLogger(__name__)
+
+# Scalar keys to include in multieval summary
+EVAL_SCALAR_KEYS = {
+    "mean_success_rt",
+    "mean_reward",
+    "mean_steps",
+    "num_episodes",
+    "mean_subtask_progress",
+    "mean_failure_subtask_progress",
+}
+EVAL_META_KEYS = ("environment", "task_suite_name", "task_name")
 
 
 def init_wandb_from_training_run(cfg: SimEvalConfig) -> WandBLogger | None:
@@ -77,7 +90,6 @@ def log_eval_results(output_dir, results, cfg, wandb_logger: WandBLogger | None 
 
     # Save JSON for programmatic consumption (e.g. auto_finetune wandb logging)
     json_file = output_dir / "evaluation_results.json"
-    # Enrich results with environment metadata before writing
     results_with_meta = dict(results)
     results_with_meta["environment"] = cfg.environment.name
     if hasattr(cfg.environment, "task_suite_name"):
@@ -100,31 +112,66 @@ def log_eval_results(output_dir, results, cfg, wandb_logger: WandBLogger | None 
         logger.debug("No wandb logger available, skipping wandb logging")
 
 
-@draccus.wrap()
-def eval(cfg: SimEvalConfig) -> None:
+def _cleanup_gpu():
+    """Best-effort release of GPU memory between evaluation runs."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def write_multieval_summary(
+    summary_results: dict,
+    eval_output_dir: Path,
+    checkpoint_path: Path,
+    step: int | None,
+) -> Path:
+    """Write a multieval summary JSON and print a human-readable table.
+
+    Returns the path to the written summary file.
     """
-    Given a SimEvalConfig, this function will load a pretrained policy and
-    evaluate it on provided EnvironmentConfig
+    date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary_path = eval_output_dir / f"multieval_summary_{date_str}.json"
 
-    ALERT! Assuming there is a train_config.json at cfg.checkpoint_folder.parent,
-    it will overwrite the LeRobotDatasetConfig and PolicyConfig.
-    The idea is to always match the configs used in training, especially the
-    normalization mapping and stats that are populated through the LeRobotDatasetConfig
+    success_rates = [v["mean_success_rt"] for v in summary_results.values() if "mean_success_rt" in v]
+    summary = {
+        "pretrain_step": step,
+        "finetuned_checkpoint": str(checkpoint_path),
+        "date": date_str,
+        "aggregate": {
+            "num_tasks": len(summary_results),
+            "mean_success_rt": float(sum(success_rates) / len(success_rates)) if success_rates else 0.0,
+            "per_task_success_rates": {k: v.get("mean_success_rt", 0.0) for k, v in summary_results.items()},
+        },
+        "per_task": summary_results,
+    }
 
-    Logs metrics to wandb if there's an active run (e.g., from training).
-    Metrics are logged with prefix '<eval_name>/' to distinguish different eval configs.
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2, default=str)
+    logger.info(f"Multieval summary saved to: {summary_path}")
+
+    print(f"\n{'=' * 60}")
+    print(f"Multieval Summary (step {step})")
+    print(f"{'=' * 60}")
+    for task_name, task_results in summary_results.items():
+        sr = task_results.get("mean_success_rt", 0.0)
+        print(f"  {task_name:40s} {sr:.1%}")
+    if success_rates:
+        print(f"  {'AVERAGE':40s} {sum(success_rates) / len(success_rates):.1%}")
+    print(f"{'=' * 60}\n")
+
+    return summary_path
+
+
+def _run_single_eval(cfg: SimEvalConfig) -> dict | None:
+    """Run a single evaluation. Called by both eval() and multi_eval().
+
+    When called from multi_eval(), the policy is already loaded in cfg and
+    this function only creates the environment, evaluates, and cleans up.
+
+    Returns:
+        Evaluation metrics dict, or None on failure.
     """
-    # Initialize logging
-    init_logging(console_level=cfg.log_level)
-
-    logger.info("Starting policy evaluation...")
-    logger.info(f"Eval name: {cfg.name}")
-    logger.info(f"Checkpoint: {cfg.pretrained_checkpoint}")
-    logger.info(f"Device: {cfg.device}")
-    logger.info(f"Episodes: {cfg.eval_num_episodes}")
-    logger.info(f"Max steps per episode: {cfg.environment.max_episode_steps}")
-    logger.info(f"Record video: {cfg.record_videos}")
-
     # Initialize wandb from training run config if available
     wandb_logger = init_wandb_from_training_run(cfg)
 
@@ -134,14 +181,26 @@ def eval(cfg: SimEvalConfig) -> None:
     logger.info(f"  num_envs: {env.num_envs}")
     logger.info(f"  is_vectorized: {env.is_vectorized}")
 
-    # 2. Load the pretrained policy from provided checkpoint
-    logger.info("Creating policy from config...")
-    policy = make_policy(cfg.policy)
-    policy.load_from_pretrained(cfg.pretrained_checkpoint)
-    policy.eval()
+    # 2. Load or reuse the policy
+    # If cfg already has a loaded policy (from multi_eval), reuse it
+    if hasattr(cfg, "_loaded_policy") and cfg._loaded_policy is not None:
+        policy = cfg._loaded_policy
+        logger.info(f"Reusing pre-loaded policy: {type(policy).__name__}")
+    else:
+        logger.info("Creating policy from config...")
+        policy = make_policy(cfg.policy)
+        policy.load_from_pretrained(cfg.pretrained_checkpoint)
+        policy.eval()
 
-    logger.info(f"Policy loaded: {type(policy).__name__}")
-    logger.info(f"   Device: {policy.device}")
+        # Disable gradient checkpointing during eval — it's unnecessary
+        # and produces spurious warnings about reentrant checkpointing
+        if hasattr(policy, "model"):
+            for module in policy.model.modules():
+                if hasattr(module, "enable_gradient_checkpointing"):
+                    module.enable_gradient_checkpointing = False
+
+        logger.info(f"Policy loaded: {type(policy).__name__}")
+        logger.info(f"   Device: {policy.device}")
 
     # 3. Create PolicyInterface to wrap the policy with normalization/transforms
     logger.info("Creating PolicyInterface...")
@@ -158,15 +217,15 @@ def eval(cfg: SimEvalConfig) -> None:
 
     # 4. Determine output directory
     if cfg.output_dir is None or cfg.output_dir == "None":
-        step = Path(cfg.pretrained_checkpoint).stem.split("_")[-1]
+        step_str = Path(cfg.pretrained_checkpoint).stem.split("_")[-1]
         timestamp = datetime.now().strftime("%m%d_%H%M%S")
-        video_dir = Path(cfg.checkpoint_folder).parent / "manual_eval" / f"{step}" / timestamp
+        video_dir = Path(cfg.checkpoint_folder).parent / "manual_eval" / f"{step_str}" / timestamp
         video_dir.mkdir(parents=True, exist_ok=True)
     else:
         video_dir = Path(cfg.output_dir)
-    logger.info(f"Saving output videos to: {video_dir}")
+    logger.info(f"Saving output to: {video_dir}")
 
-    # 5. Run evaluation using the standalone evaluate_policy function
+    # 5. Run evaluation
     eval_metrics = evaluate_policy(
         env=env,
         policy_interface=policy_interface,
@@ -193,7 +252,6 @@ def eval(cfg: SimEvalConfig) -> None:
     # Finish wandb run if we initialized it
     if wandb_logger is not None and wandb.run is not None:
         logger.info("Syncing wandb data before closing...")
-        # Give wandb time to sync before finishing
         import time
 
         time.sleep(2)
@@ -203,7 +261,150 @@ def eval(cfg: SimEvalConfig) -> None:
     # Close environment
     env.close()
     logger.info("Environment closed.")
-    logger.info("Evaluation completed successfully!")
+
+    return eval_metrics
+
+
+@draccus.wrap()
+def eval(cfg: SimEvalConfig) -> None:
+    """Evaluate a pretrained policy on one or more environments.
+
+    When ``cfg.eval_configs`` is empty (standard SimEvalConfig YAML), runs a
+    single evaluation.  When ``cfg.eval_configs`` is populated (multieval YAML),
+    loads the policy ONCE and iterates through each sub-config, creating and
+    destroying environments while reusing the policy.
+
+    ALERT! Assuming there is a train_config.json at cfg.checkpoint_folder.parent,
+    it will overwrite the LeRobotDatasetConfig and PolicyConfig.
+    The idea is to always match the configs used in training, especially the
+    normalization mapping and stats that are populated through the LeRobotDatasetConfig
+
+    Logs metrics to wandb if there's an active run (e.g., from training).
+    Metrics are logged with prefix '<eval_name>/' to distinguish different eval configs.
+    """
+    # Initialize logging
+    init_logging(console_level=cfg.log_level)
+
+    if cfg.is_multi_eval:
+        _run_multi_eval(cfg)
+    else:
+        logger.info("Starting policy evaluation...")
+        logger.info(f"Eval name: {cfg.name}")
+        logger.info(f"Checkpoint: {cfg.pretrained_checkpoint}")
+        logger.info(f"Device: {cfg.device}")
+        logger.info(f"Episodes: {cfg.eval_num_episodes}")
+        logger.info(f"Max steps per episode: {cfg.environment.max_episode_steps}")
+        logger.info(f"Record video: {cfg.record_videos}")
+
+        _run_single_eval(cfg)
+        logger.info("Evaluation completed successfully!")
+
+
+def _run_multi_eval(cfg: SimEvalConfig) -> None:
+    """Run multiple evaluations with a shared policy from a single checkpoint.
+
+    The policy is loaded ONCE from ``cfg.pretrained_checkpoint`` and reused
+    across all eval configs.  For each config the environment is created,
+    evaluation runs, and the environment is torn down — but the policy stays
+    in memory.
+    """
+    checkpoint = cfg.pretrained_checkpoint
+    if checkpoint is None:
+        raise ValueError("pretrained_checkpoint must be set for multi-eval")
+
+    logger.info("=" * 80)
+    logger.info("Starting MULTI-EVAL")
+    logger.info(f"  Checkpoint: {checkpoint}")
+    logger.info(f"  Configs: {len(cfg.eval_configs)}")
+    logger.info("=" * 80)
+
+    # Load the policy ONCE — this is the key optimisation.
+    logger.info("Loading policy from checkpoint (once)...")
+    policy = make_policy(cfg.policy)
+    policy.load_from_pretrained(str(cfg.pretrained_checkpoint))
+    policy.eval()
+
+    # Disable gradient checkpointing during eval
+    if hasattr(policy, "model"):
+        for module in policy.model.modules():
+            if hasattr(module, "enable_gradient_checkpointing"):
+                module.enable_gradient_checkpointing = False
+
+    logger.info(f"Policy loaded: {type(policy).__name__}")
+
+    # Extract step from checkpoint name
+    step = None
+    try:
+        checkpoint_stem = Path(checkpoint).stem
+        if "step_" in checkpoint_stem:
+            step = int(checkpoint_stem.split("_")[-1])
+    except (ValueError, IndexError):
+        pass
+
+    # Determine base output directory
+    if cfg.output_dir and cfg.output_dir != "None":
+        eval_output_dir = Path(cfg.output_dir)
+    else:
+        base_output_dir = Path(cfg.checkpoint_folder).parent / "multieval"
+        timestamp = datetime.now().strftime("%m%d_%H%M%S")
+        eval_output_dir = (
+            base_output_dir / f"step_{step}" / timestamp if step else base_output_dir / timestamp
+        )
+
+    summary_results = {}
+
+    for i, eval_cfg in enumerate(cfg.eval_configs):
+        task_name = getattr(eval_cfg, "name", f"eval_{i}")
+        logger.info(f"\n--- Evaluation {i + 1}/{len(cfg.eval_configs)}: {task_name} ---")
+
+        # Build a SimEvalConfig for this specific evaluation, injecting the
+        # shared checkpoint so that EvalConfig.__post_init__ loads
+        # train_config.json and populates policy/dataset configs.
+        eval_cfg_copy = SimEvalConfig(
+            pretrained_checkpoint=str(checkpoint),
+            eval_num_episodes=getattr(eval_cfg, "eval_num_episodes", cfg.eval_num_episodes),
+            record_videos=getattr(eval_cfg, "record_videos", cfg.record_videos),
+            output_dir=str(eval_output_dir / task_name),
+            device=getattr(eval_cfg, "device", cfg.device),
+            name=task_name,
+            environment=eval_cfg.environment,
+            seed=getattr(eval_cfg, "seed", cfg.seed),
+            dataset_root_dir=getattr(eval_cfg, "dataset_root_dir", cfg.dataset_root_dir),
+        )
+
+        # Attach the pre-loaded policy so _run_single_eval reuses it
+        eval_cfg_copy._loaded_policy = policy
+
+        try:
+            _run_single_eval(eval_cfg_copy)
+
+            # Collect results for the summary
+            results_json = Path(eval_output_dir / task_name) / "evaluation_results.json"
+            if results_json.exists():
+                with open(results_json) as f:
+                    results = json.load(f)
+                summary_results[task_name] = {
+                    k: v for k, v in results.items() if k in EVAL_SCALAR_KEYS and isinstance(v, (int, float))
+                }
+                for meta_key in EVAL_META_KEYS:
+                    if meta_key in results:
+                        summary_results[task_name][meta_key] = results[meta_key]
+
+            logger.info(f"Completed: {task_name}")
+
+        except Exception as e:
+            logger.error(f"Failed: {task_name}: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+        _cleanup_gpu()
+
+    # Write multieval summary
+    if summary_results:
+        write_multieval_summary(summary_results, eval_output_dir, Path(checkpoint), step)
+
+    logger.info("Multi-eval completed!")
 
 
 if __name__ == "__main__":

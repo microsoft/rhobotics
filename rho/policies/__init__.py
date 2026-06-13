@@ -7,8 +7,8 @@ from rho.policies.BC.behavioral_cloning import BehavioralCloningPolicy
 from rho.policies.diffusion.diffusion import DiffusionPolicy
 from rho.policies.dsrl.dsrl_policy import DSRLPolicy, DSRLPolicyConfig
 from rho.policies.dsrl.flowdagger_policy import FlowDAggerPolicy, FlowDAggerPolicyConfig
-from rho.policies.pi0.modeling_pi0 import PI0Policy
-from rho.policies.pi0fast.pi0fast_policy import PI0FASTPolicy
+#from rho.policies.pi0.modeling_pi0 import PI0Policy
+#from rho.policies.pi0fast.pi0fast_policy import PI0FASTPolicy
 from rho.policies.rhoalpha.configuration_rhoalpha import RhoAlphaConfig
 from rho.policies.rhoalpha.rhoalpha_policy import RhoAlphaPolicy
 from rho.policies.rhoalpha.rhoalpha_tactile import RhoAlphaTactilePolicy
@@ -164,8 +164,8 @@ POLICY_REGISTRY["qwen3vl"] = RhoAlphaPolicy
 PolicyConfig.register_subclass("qwen25vl", RhoAlphaConfig)
 PolicyConfig.register_subclass("qwen3vl", RhoAlphaConfig)
 
-register_policy("pi0")(PI0Policy)
-register_policy("pi0fast")(PI0FASTPolicy)
+#register_policy("pi0")(PI0Policy)
+#register_policy("pi0fast")(PI0FASTPolicy)
 
 # Add more policies here as they are implemented:
 # register_policy("TransformerPolicy")(TransformerPolicy)
@@ -183,8 +183,8 @@ __all__ = [
     "FlowDAggerPolicyConfig",
     "RhoAlphaPolicy",
     "RhoAlphaTactilePolicy",
-    "PI0Policy",
-    "PI0FASTPolicy",
+#    "PI0Policy",
+#    "PI0FASTPolicy",
     "make_policy",
     "make_policy_from_checkpoint",
     "register_policy",

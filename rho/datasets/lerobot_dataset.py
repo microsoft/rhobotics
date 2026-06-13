@@ -11,7 +11,8 @@ from datasets import load_dataset
 from lerobot.datasets.factory import IMAGENET_STATS
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.datasets.streaming_dataset import StreamingLeRobotDataset
-from lerobot.datasets.utils import dataset_to_policy_features, get_hf_features_from_features
+from lerobot.utils.feature_utils import dataset_to_policy_features
+from lerobot.datasets.feature_utils import get_hf_features_from_features
 
 from rho.common.constants import ACTION, OBSERVATION_PREFIX, OBSERVATION_TACTILE
 from rho.common.types import FeatureType, NormalizationMode

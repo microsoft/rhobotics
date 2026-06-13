@@ -7,8 +7,8 @@ from pathlib import Path
 import draccus
 import torch
 from flask import json
-from lerobot.datasets.utils import cycle
-from lerobot.utils.utils import get_safe_torch_device
+from lerobot.utils.utils import cycle
+from lerobot.utils.device_utils import get_safe_torch_device
 from tqdm import tqdm
 
 from rho.common.transforms import ConsolidateTransform, TransformConfig

@@ -6,7 +6,7 @@ import draccus
 import torch
 import torch.distributed as dist
 from accelerate import Accelerator
-from lerobot.datasets.utils import cycle
+from lerobot.utils.utils import cycle
 from tqdm import tqdm
 
 from rho.common.wandb_logging import WandBLogger

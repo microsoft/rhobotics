@@ -1,0 +1,82 @@
+# Exclude output and data folders to speed up Docker build
+outputs/**
+outputs/
+training_data/**
+training_data/
+training_outputs/**
+training_outputs/
+test_outputs/**
+test_outputs/
+notebooks/data/**
+notebooks/data/
+
+# Exclude git and version control
+.git/
+.gitignore
+
+# Exclude Python cache and build artifacts
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.egg-info/
+**/.pytest_cache/
+**/build/
+**/dist/
+
+# Exclude virtual environments
+venv/
+env/
+.venv/
+.env
+
+# Exclude IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Exclude OS files
+.DS_Store
+Thumbs.db
+
+# Exclude documentation build artifacts
+docs/build/
+docs/_build/
+
+# Exclude large model files and datasets
+*.pt
+*.pth
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.bin
+*.safetensors
+
+# Exclude conda environments
+miniconda*/
+anaconda*/
+
+# Exclude Docker files themselves from context
+Dockerfile*
+!libero-minimal.docker
+!Dockerfile.lerobot-libero
+docker-compose*.yml
+
+# Exclude temporary files
+*.tmp
+*.temp
+*.log
+
+# Exclude any data directories that might be large
+**/data/
+datasets/
+**/checkpoints/
+**/weights/
+
+# But include lerobot source code datasets module
+!lerobot/lerobot/common/datasets/
+
+# Keep only essential files for the build
+# The COPY commands in Dockerfile will explicitly include what we need

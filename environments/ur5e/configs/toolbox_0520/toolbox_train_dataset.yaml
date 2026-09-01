@@ -1,9 +1,0 @@
-# Training split for the UR5e bimanual toolbox task.
-# root_dir is overridden on the launch command line (see train_ur5e_toolbox_phi5.yaml).
-repo_id: "msr_custom"
-root_dir: "/data/msrx-eai/datasets/ur5e/ur5e_toolbox/ur5e_toolbox_0520"
-
-observation_mapping: !include observation_mapping.yaml
-transform_mapping: !include transforms.yaml
-
-<<: !include toolbox_train_features.yaml

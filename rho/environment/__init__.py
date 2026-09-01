@@ -6,6 +6,7 @@ from rho.environment.env import EnvironmentConfig, EnvironmentWrapper, GymEnviro
 logger = logging.getLogger(__name__)
 
 ENV_REGISTRY: dict[str, type[EnvironmentWrapper]] = {}
+ENV_CONFIG_REGISTRY: dict[str, type[EnvironmentConfig]] = {}
 
 
 def register_environment(name: str):
@@ -17,8 +18,15 @@ def register_environment(name: str):
     """
 
     def decorator(cls: type[EnvironmentWrapper]):
+        try:
+            config_class = EnvironmentConfig.get_choice_class(name)
+        except KeyError:
+            raise ValueError(
+                f"Cannot register environment type {name!r} without a matching "
+                "EnvironmentConfig.register_subclass() registration"
+            ) from None
         ENV_REGISTRY[name] = cls
-        cls.name = name  # Set the name attribute on the class
+        ENV_CONFIG_REGISTRY[name] = config_class
         return cls
 
     return decorator
@@ -44,20 +52,33 @@ def make_environment(env_config: EnvironmentConfig) -> EnvironmentWrapper:
     if env_config is None:
         return None
 
-    if env_config.name is None:
-        raise ValueError("EnvironmentConfig.name must be specified")
+    environment_type = env_config.type
 
-    logger.info(f"EnvironmentConfig Subclass is {env_config.name}")
-    if env_config.name not in ENV_REGISTRY:
+    logger.info(f"EnvironmentConfig type is {environment_type}")
+    if environment_type not in ENV_REGISTRY:
         available_envs = list(ENV_REGISTRY.keys())
         raise ValueError(
-            f"Environment '{env_config.name}' not found in registry. Available environments: {available_envs}"
+            f"Environment type '{environment_type}' not found in registry. "
+            f"Available environments: {available_envs}"
         )
 
-    env_class = ENV_REGISTRY[env_config.name]
+    config_class = ENV_CONFIG_REGISTRY.get(environment_type)
+    if config_class is not None and not isinstance(env_config, config_class):
+        raise TypeError(
+            f"Environment type {environment_type!r} requires {config_class.__name__}, "
+            f"got {env_config.__class__.__name__}"
+        )
+
+    env_class = ENV_REGISTRY[environment_type]
     return env_class(env_config)
 
 
 register_environment("GymEnvironment")(GymEnvironment)
 register_environment("DatasetEnvironment")(DatasetEnvironment)
-__all__ = ["make_environment", "register_environment", "ENV_REGISTRY", "check_dataset_loading"]
+__all__ = [
+    "make_environment",
+    "register_environment",
+    "ENV_REGISTRY",
+    "ENV_CONFIG_REGISTRY",
+    "check_dataset_loading",
+]

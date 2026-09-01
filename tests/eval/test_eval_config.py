@@ -1,15 +1,117 @@
 """Tests for train_config.json parsing and config loading in rho.eval.eval_config."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
+from rho.eval.eval import (
+    _initialize_default_checkpoint,
+    _make_multi_eval_config,
+    _make_policy_interface_config,
+)
 from rho.eval.eval_config import (
     _normalize_dataset_dict,
     _normalize_policy_dict,
     find_dataset_by_root_dir,
     load_configs_from_train_config,
+    load_policy_config_from_json,
 )
+
+
+def test_sim_eval_wires_rtc_policy_interface_config():
+    dataset = object()
+    policy = object()
+    cfg = SimpleNamespace(
+        dataset=dataset,
+        device="cpu",
+        eval_mode="rtc",
+        inference_delay=9,
+        execution_horizon=16,
+        beta=15,
+        guidance_schedule="constant",
+    )
+
+    result = _make_policy_interface_config(cfg, policy)
+
+    assert result.data_config is dataset
+    assert result.policy is policy
+    assert result.execution_horizon == 16
+    assert result.guidance_schedule == "constant"
+
+
+def test_eval_uses_policy_default_checkpoint():
+    class Config:
+        pretrained_checkpoint = None
+        policy = SimpleNamespace(pretrained_repo_id="organization/rho-model")
+
+        def __init__(self):
+            self.post_init_source = None
+
+        def __post_init__(self):
+            self.post_init_source = self.pretrained_checkpoint
+
+    cfg = Config()
+
+    _initialize_default_checkpoint(cfg)
+
+    assert cfg.post_init_source == "organization/rho-model"
+
+
+def test_eval_requires_checkpoint_source():
+    cfg = SimpleNamespace(
+        pretrained_checkpoint=None,
+        policy=SimpleNamespace(pretrained_repo_id=None),
+    )
+
+    with pytest.raises(ValueError, match="No pretrained checkpoint"):
+        _initialize_default_checkpoint(cfg)
+
+
+def test_multi_eval_preserves_dataset_and_policy(monkeypatch, tmp_path):
+    dataset = object()
+    policy = object()
+    environment = object()
+    parent = SimpleNamespace(
+        eval_num_episodes=4,
+        record_videos=False,
+        device="cpu",
+        seed=42,
+        dataset=object(),
+        policy=object(),
+        dataset_root_dir=None,
+        eval_mode="standard",
+        inference_delay=6,
+        execution_horizon=None,
+        beta=10,
+        guidance_schedule="paper",
+    )
+    entry = SimpleNamespace(
+        environment=environment,
+        dataset=dataset,
+        policy=policy,
+    )
+    captured = {}
+
+    def capture_config(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr("rho.eval.eval.SimEvalConfig", capture_config)
+
+    result = _make_multi_eval_config(
+        parent,
+        entry,
+        tmp_path / "checkpoint",
+        tmp_path / "output",
+        "libero_spatial",
+    )
+
+    assert result.dataset is dataset
+    assert result.policy is policy
+    assert result.environment is environment
+    assert captured["output_dir"].endswith("libero_spatial")
+
 
 # =============================================================================
 # _normalize_policy_dict
@@ -20,19 +122,41 @@ class TestNormalizePolicyDict:
     """Tests for the _normalize_policy_dict helper."""
 
     def test_type_field_preserved(self):
-        d = {"type": "diffusion", "chunk_size": 16}
+        d = {"type": "rho", "chunk_size": 16}
         result = _normalize_policy_dict(d)
-        assert result["type"] == "diffusion"
+        assert result["type"] == "rho"
 
     def test_name_falls_back_to_type(self):
-        d = {"name": "diffusion", "chunk_size": 16}
+        d = {"name": "rho", "chunk_size": 16}
         result = _normalize_policy_dict(d)
-        assert result["type"] == "diffusion"
+        assert result["type"] == "rho"
 
-    def test_lr_scheduler_name_renamed_to_type(self):
-        d = {"type": "diffusion", "lr_scheduler": {"name": "cosine", "warmup_steps": 100}}
+    def test_lr_scheduler_type_migrated_from_legacy_name(self):
+        d = {"type": "rho", "lr_scheduler": {"name": "constant"}}
         result = _normalize_policy_dict(d)
-        assert result["lr_scheduler"]["type"] == "cosine"
+        assert result["lr_scheduler"]["type"] == "constant"
+        assert "name" not in result["lr_scheduler"]
+
+    def test_diffusers_algorithm_name_is_not_treated_as_registry_type(self):
+        d = {"type": "rho", "lr_scheduler": {"name": "cosine", "num_warmup_steps": 100}}
+        result = _normalize_policy_dict(d)
+        assert result["lr_scheduler"] == {
+            "type": "diffuser",
+            "schedule_name": "cosine",
+            "num_warmup_steps": 100,
+        }
+
+    def test_diffusers_algorithm_name_migrates_when_type_is_present(self):
+        d = {
+            "type": "rho",
+            "lr_scheduler": {
+                "type": "diffuser",
+                "name": "linear",
+                "num_warmup_steps": 100,
+            },
+        }
+        result = _normalize_policy_dict(d)
+        assert result["lr_scheduler"]["schedule_name"] == "linear"
         assert "name" not in result["lr_scheduler"]
 
     def test_missing_type_and_name_raises(self):
@@ -191,14 +315,14 @@ class TestLoadConfigsFromTrainConfig:
 
     def test_loads_policy_config(self, tmp_path):
         config = {
-            "policy": {"type": "diffusion", "name": "diffusion"},
+            "policy": {"type": "rho", "name": "rho"},
         }
         config_path = tmp_path / "train_config.json"
         config_path.write_text(json.dumps(config))
 
         policy, dataset = load_configs_from_train_config(config_path)
         assert policy is not None
-        assert policy.name == "diffusion"
+        assert policy.name == "rho"
         assert dataset is None
 
     def test_loads_dataset_config(self, tmp_path):
@@ -215,7 +339,7 @@ class TestLoadConfigsFromTrainConfig:
 
     def test_loads_both(self, tmp_path):
         config = {
-            "policy": {"type": "diffusion", "name": "diffusion"},
+            "policy": {"type": "rho", "name": "rho"},
             "dataset": {"batch_size": 64},
         }
         config_path = tmp_path / "train_config.json"
@@ -230,7 +354,7 @@ class TestLoadConfigsFromTrainConfig:
         """name→type fallback should be applied."""
         config = {
             "policy": {
-                "name": "diffusion",
+                "name": "rho",
             },
         }
         config_path = tmp_path / "train_config.json"
@@ -238,7 +362,46 @@ class TestLoadConfigsFromTrainConfig:
 
         policy, _ = load_configs_from_train_config(config_path)
         assert policy is not None
-        assert policy.name == "diffusion"
+        assert policy.name == "rho"
+
+    def test_ignores_unknown_policy_fields(self, tmp_path, caplog):
+        """Stale train_config.json policy fields should warn instead of failing decode."""
+        config = {
+            "policy": {
+                "type": "rho",
+                "name": "rho",
+                "old_field_a": True,
+                "old_field_b": 12,
+            },
+        }
+        config_path = tmp_path / "train_config.json"
+        config_path.write_text(json.dumps(config))
+
+        policy, _ = load_configs_from_train_config(config_path)
+
+        assert policy is not None
+        assert policy.name == "rho"
+        assert "old_field_a" in caplog.text
+        assert "old_field_b" in caplog.text
+        assert "Ignoring unsupported fields from train_config.json for policy" in caplog.text
+
+    def test_policy_only_loader_ignores_unknown_policy_fields(self, tmp_path, caplog):
+        """The policy-only loader used by auto-finetune should get the same compatibility."""
+        config = {
+            "policy": {
+                "type": "rho",
+                "name": "rho",
+                "removed_policy_field": True,
+            },
+        }
+        config_path = tmp_path / "train_config.json"
+        config_path.write_text(json.dumps(config))
+
+        policy = load_policy_config_from_json(config_path)
+
+        assert policy is not None
+        assert policy.name == "rho"
+        assert "removed_policy_field" in caplog.text
 
     def test_applies_backward_compat_to_dataset(self, tmp_path):
         """action_type uppercasing should be applied."""
@@ -251,6 +414,23 @@ class TestLoadConfigsFromTrainConfig:
         _, dataset = load_configs_from_train_config(config_path)
         assert dataset is not None
         assert dataset.action_type.value == "EE_6D_POS"
+
+    def test_ignores_unknown_dataset_fields(self, tmp_path, caplog):
+        """Stale train_config.json dataset fields should warn instead of failing decode."""
+        config = {
+            "dataset": {
+                "batch_size": 128,
+                "removed_dataset_field": "legacy",
+            },
+        }
+        config_path = tmp_path / "train_config.json"
+        config_path.write_text(json.dumps(config))
+
+        _, dataset = load_configs_from_train_config(config_path)
+
+        assert dataset is not None
+        assert dataset.batch_size == 128
+        assert "removed_dataset_field" in caplog.text
 
     def test_multidataset_selection(self, tmp_path):
         dir_a = tmp_path / "data_a"

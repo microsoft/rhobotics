@@ -2,7 +2,7 @@
 ## Moving it into a new file so we can begin modifying these
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
 
 
 class ActionType(str, Enum):
@@ -39,13 +39,19 @@ class NormalizationMode(str, Enum):
     ACTIONCHUNK_QUANTILE = "ACTIONCHUNK_QUANTILE"
 
 
-class TrainingMode(str, Enum):
-    ROBOT_FLOWMATCH = "ROBOT_FLOWMATCH"
-    ROBOT_AUTOREGRESSIVE = "ROBOT_AUTOREGRESSIVE"
-    ROBOT_KNOWLEDGE_INSULATION = "ROBOT_KNOWLEDGE_INSULATION"
-    VQA = "VQA"
-    BOUNDING_BOX = "BOUNDING_BOX"
-    POINTING = "POINTING"
+class TrainingMode(IntEnum):
+    # IntEnum so ``.value`` is an int that default_collate turns into an
+    # int64 tensor. That lets us broadcast the batch under accelerate's
+    # dispatch_batches=True path without the non-tensor-field crash that
+    # str-valued enums caused. Ordering is load-bearing: new modes go at
+    # the end so existing dataset stats / checkpoints keep their mapping.
+    ROBOT_FLOWMATCH = 0
+    ROBOT_AUTOREGRESSIVE = 1
+    ROBOT_KNOWLEDGE_INSULATION_FAST = 2
+    ROBOT_KNOWLEDGE_INSULATION_ENDSTATE = 3
+    VQA = 4
+    BOUNDING_BOX = 5
+    POINTING = 6
 
 
 @dataclass

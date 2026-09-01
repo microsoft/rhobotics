@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from rho.common.types import FeatureType, NormalizationMode, PolicyFeature
-from rho.datasets.data_config import DataConfig
+from rho.datasets.data_config import BaseDatasetConfig as DataConfig
 
 
 @pytest.fixture

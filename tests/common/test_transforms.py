@@ -3,7 +3,21 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from rho.common.transforms import AbsoluteActions, CombineKeys, DeltaActions
+from rho.common.constants import ACTION, OBSERVATION_STATE
+from rho.common.transforms import (
+    AbsoluteActions,
+    ColorJitter,
+    CombineKeys,
+    DeltaActions,
+    RandomFlipLeftRight,
+    RandomFlipUpDown,
+    RandomResizedCrop,
+    RandomRot90,
+    TaskDescriptionSelector,
+    build_key_padding_transform,
+    get_target_sequence_lengths,
+)
+from rho.common.types import ActionType, FeatureType, PolicyFeature
 from rho.datasets.data_config import TransformWrapper
 from rho.datasets.lerobot_dataset import LeRobotDatasetConfig
 
@@ -39,6 +53,152 @@ class TestTransformWrapper:
 
         mock_transform.assert_not_called()
         assert result == sample
+
+
+class TestKeyPaddingTransform:
+    def test_derives_model_shape_from_temporal_lookup_lengths(self):
+        lengths = get_target_sequence_lengths(
+            {
+                ACTION: [0, 4, 8, 12, 16],
+                OBSERVATION_STATE: [-2, -1, 0],
+                "observation.image.0": [-2, -1, 0],
+            }
+        )
+
+        assert lengths == {
+            FeatureType.ACTION: 5,
+            FeatureType.STATE: 3,
+            FeatureType.VISUAL: 3,
+        }
+
+    def test_pads_short_action_sequence_and_marks_tail(self):
+        transform = build_key_padding_transform(
+            features={ACTION: PolicyFeature(FeatureType.ACTION, (4,))},
+            target_sequence_lengths={FeatureType.ACTION: 5},
+        )
+        sample = {
+            ACTION: torch.tensor(
+                [
+                    [1.0, 2.0],
+                    [3.0, 4.0],
+                    [5.0, 6.0],
+                ]
+            ),
+            f"{ACTION}_is_pad": torch.tensor([False, True, False]),
+        }
+
+        result = transform(sample)
+
+        assert result[ACTION].shape == (5, 4)
+        assert torch.equal(result[ACTION][:3, :2], torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]))
+        assert torch.equal(result[ACTION][3:], torch.zeros(2, 4))
+        assert torch.equal(
+            result[f"{ACTION}_is_pad"],
+            torch.tensor([False, True, False, True, True]),
+        )
+        assert torch.equal(
+            result[f"{ACTION}_dim_is_pad"],
+            torch.tensor([False, False, True, True]),
+        )
+
+    def test_emits_all_false_dim_mask_for_full_width_action(self):
+        transform = build_key_padding_transform(
+            features={ACTION: PolicyFeature(FeatureType.ACTION, (4,))},
+            target_sequence_lengths={FeatureType.ACTION: 2},
+        )
+        sample = {ACTION: torch.ones(2, 4)}
+
+        result = transform(sample)
+
+        assert result[ACTION].shape == (2, 4)
+        assert torch.equal(result[f"{ACTION}_dim_is_pad"], torch.zeros(4, dtype=torch.bool))
+
+    def test_expands_existing_native_width_dim_mask(self):
+        transform = build_key_padding_transform(
+            features={ACTION: PolicyFeature(FeatureType.ACTION, (4,))},
+            target_sequence_lengths={FeatureType.ACTION: 2},
+        )
+        sample = {
+            ACTION: torch.ones(2, 2),
+            f"{ACTION}_dim_is_pad": torch.tensor([False, False]),
+        }
+
+        result = transform(sample)
+
+        assert result[ACTION].shape == (2, 4)
+        assert torch.equal(
+            result[f"{ACTION}_dim_is_pad"],
+            torch.tensor([False, False, True, True]),
+        )
+
+    def test_transformed_wider_action_dims_remain_real_through_nested_padding(self):
+        leaf_padding = build_key_padding_transform(
+            features={ACTION: PolicyFeature(FeatureType.ACTION, (16,))},
+            target_sequence_lengths={FeatureType.ACTION: 2},
+        )
+        parent_padding = build_key_padding_transform(
+            features={ACTION: PolicyFeature(FeatureType.ACTION, (20,))},
+            target_sequence_lengths={FeatureType.ACTION: 2},
+        )
+        sample = {ACTION: torch.ones(2, 20)}
+
+        result = parent_padding(leaf_padding(sample))
+
+        assert result[ACTION].shape == (2, 20)
+        assert torch.equal(result[f"{ACTION}_dim_is_pad"], torch.zeros(20, dtype=torch.bool))
+
+
+class TestTaskDescriptionSelector:
+    """Test task/subtask language selection."""
+
+    def test_selects_subtask_when_probability_one(self):
+        transform = TaskDescriptionSelector(subtask_probability=1.0)
+        sample = {"task": "assemble the kit", "subtask": "pick up the screw"}
+
+        result = transform(sample)
+
+        assert result["task"] == "pick up the screw"
+        assert "subtask" not in result
+
+    def test_keeps_task_when_probability_zero(self):
+        transform = TaskDescriptionSelector(subtask_probability=0.0)
+        sample = {"task": "assemble the kit", "subtask": "pick up the screw"}
+
+        result = transform(sample)
+
+        assert result["task"] == "assemble the kit"
+        assert "subtask" not in result
+
+    def test_falls_back_to_task_when_subtask_missing_or_empty(self):
+        transform = TaskDescriptionSelector(subtask_probability=1.0)
+
+        assert transform({"task": "assemble the kit"})["task"] == "assemble the kit"
+        assert transform({"task": "assemble the kit", "subtask": "  "})["task"] == "assemble the kit"
+
+    def test_uses_subtask_when_task_is_missing(self):
+        transform = TaskDescriptionSelector(subtask_probability=0.0)
+
+        result = transform({"subtask": "pick up the screw"})
+
+        assert result["task"] == "pick up the screw"
+        assert "subtask" not in result
+
+    def test_selector_runs_inside_dataset_transform_pipeline(self):
+        config = LeRobotDatasetConfig(
+            observation_whitelist=["task", "subtask"],
+            transform_mapping={
+                "task": [
+                    TaskDescriptionSelector(subtask_probability=1.0),
+                ]
+            },
+            features=None,
+            normalization_mapping=None,
+        )
+        transform = config.get_transforms()
+
+        result = transform({"task": "assemble the kit", "subtask": "pick up the screw", "ignored": "x"})
+
+        assert result == {"task": "pick up the screw"}
 
 
 class TestCombineKeys:
@@ -380,6 +540,56 @@ class TestDeltaActions:
         )
         assert torch.equal(result_false["action"], expected_false)
 
+    def test_ee_6d_delta_actions_can_keep_gripper_absolute(self):
+        """EE pose dims are state-relative while gripper dims stay absolute."""
+        identity_6d = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        state = torch.tensor(
+            [
+                [
+                    1.0,
+                    2.0,
+                    3.0,
+                    *identity_6d,
+                    0.10,
+                    10.0,
+                    20.0,
+                    30.0,
+                    *identity_6d,
+                    0.20,
+                ]
+            ]
+        )
+        actions = torch.tensor(
+            [
+                [
+                    [1.5, 2.5, 3.5, *identity_6d, 0.70, 11.0, 21.0, 31.0, *identity_6d, 0.80],
+                    [2.0, 3.0, 4.0, *identity_6d, 0.75, 12.0, 22.0, 32.0, *identity_6d, 0.85],
+                ]
+            ]
+        )
+        batch = {"observation.state": state, "action": actions.clone()}
+
+        delta_transform = DeltaActions(
+            action_type=ActionType.EE_6D_POS,
+            relative_to_state=True,
+            use_absolute_grippers=True,
+        )
+        result = delta_transform(batch)
+
+        assert torch.allclose(result["action"][..., 0:3], actions[..., 0:3] - state[:, None, 0:3])
+        assert torch.allclose(result["action"][..., 10:13], actions[..., 10:13] - state[:, None, 10:13])
+        assert torch.equal(result["action"][..., 9], actions[..., 9])
+        assert torch.equal(result["action"][..., 19], actions[..., 19])
+
+        absolute_transform = AbsoluteActions(
+            action_type=ActionType.EE_6D_POS,
+            relative_to_state=True,
+            use_absolute_grippers=True,
+        )
+        recovered = absolute_transform({"observation.state": state, "action": result["action"].clone()})
+
+        assert torch.allclose(recovered["action"], actions)
+
 
 class TestAbsoluteActions:
     """Test the AbsoluteActions transform."""
@@ -678,3 +888,71 @@ class TestAbsoluteActions:
 
         # Should perfectly recover original actions with relative_to_state=True for both transforms
         assert torch.equal(recovered_batch["action"], original_batch["action"])
+
+
+class TestDeterministicTransforms:
+    """Guards for the eval-time `deterministic()` contract.
+
+    Random augmentations must be neutralized when a policy is served, otherwise
+    inference silently jitters/crops its own inputs.
+    """
+
+    def test_base_transform_defaults_to_self(self):
+        """Transforms with no randomness are passed through unchanged."""
+        t = DeltaActions(relative_to_state=True)
+        assert t.deterministic() is t
+
+    def test_color_jitter_is_dropped(self):
+        assert ColorJitter(brightness=0.3, contrast=0.3).deterministic() is None
+
+    @pytest.mark.parametrize("cls", [RandomFlipLeftRight, RandomFlipUpDown, RandomRot90])
+    def test_random_flips_and_rotations_are_dropped(self, cls):
+        assert cls().deterministic() is None
+
+    def test_task_description_selector_prefers_primary_task(self):
+        t = TaskDescriptionSelector(subtask_probability=0.5)
+        det = t.deterministic()
+        assert det is not None
+        assert det.subtask_probability == 0.0
+
+    def test_random_resized_crop_becomes_deterministic_and_keeps_output_size(self):
+        rrc = RandomResizedCrop(height=224, width=224, scale=(0.9, 1.0), ratio=(0.98, 1.02))
+        det = rrc.deterministic()
+        img = torch.rand(3, 448, 448)
+
+        first, second = det(img), det(img)
+        assert first.shape == (3, 224, 224)
+        assert torch.equal(first, second), "eval crop must not vary between calls"
+
+    def test_random_resized_crop_preserves_training_field_of_view(self):
+        """The crop must honour `scale`; a full-frame resize would not."""
+        rrc = RandomResizedCrop(height=224, width=224, scale=(0.5, 0.5), ratio=(1.0, 1.0))
+        crop_h, crop_w = rrc.deterministic()._crop_size(448, 448)
+        area_fraction = (crop_h * crop_w) / (448 * 448)
+        assert area_fraction == pytest.approx(0.5, abs=1e-3)
+
+    def test_random_resized_crop_matches_torchvision_fallback(self):
+        """Non-square inputs use torchvision's central-crop fallback geometry."""
+        rrc = RandomResizedCrop(height=256, width=256, scale=(0.9, 1.0), ratio=(0.98, 1.02))
+        # 400x300 cannot satisfy ratio>=0.98, so torchvision clamps: w=300, h=round(300/0.98)
+        assert rrc.deterministic()._crop_size(400, 300) == (306, 300)
+
+    def test_eval_transforms_are_stable_end_to_end(self):
+        """Building transforms with training=False must yield repeatable output."""
+        config = LeRobotDatasetConfig(
+            root_dir="/tmp/does-not-exist",
+            transform_mapping={
+                "image.0": [
+                    RandomResizedCrop(height=224, width=224, scale=(0.9, 1.0)),
+                    ColorJitter(brightness=0.5, contrast=0.5),
+                ]
+            },
+        )
+        transforms = config.get_transforms(remap=False, training=False)
+
+        batch = {"image.0": torch.rand(3, 448, 448)}
+        first = transforms(dict(batch))["image.0"]
+        second = transforms(dict(batch))["image.0"]
+
+        assert first.shape == (3, 224, 224)
+        assert torch.equal(first, second), "serving must not randomly augment inputs"

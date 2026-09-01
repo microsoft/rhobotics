@@ -10,7 +10,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from rho.common.constants import ACTION, OBSERVATION_IMAGE, OBSERVATION_STATE
 from rho.common.types import NormalizationMode, PolicyFeature
-from rho.datasets.data_config import DataConfig
+from rho.datasets.data_config import BaseDatasetConfig as DataConfig
 from rho.datasets.lerobot_dataset import LeRobotDatasetConfig
 from rho.policies.base import PolicyConfig
 
@@ -181,9 +181,7 @@ def dummy_dataset_fixture(tmp_path):
         repo_id=repo_id, fps=10, root=root, robot_type="dummy_robot", features=features, use_videos=False
     )
 
-    # Create one episode with dummy data
-    # TODO: making a dataset this way with multiple episodes is broken in v3
-    # Need to check on this later to see if it is fixed
+    # LeRobot v3 does not currently support this multi-episode construction path.
     for episode_idx in range(2):
         task_name = mock_tasks[episode_idx % len(mock_tasks)]
 

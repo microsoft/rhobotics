@@ -8,6 +8,7 @@ import draccus
 import torch
 import wandb
 
+from rho.checkpoints import checkpoint_read_lease
 from rho.common.wandb_logging import WandBLogger
 from rho.environment import make_environment
 from rho.environment.env import evaluate_policy
@@ -28,6 +29,19 @@ EVAL_SCALAR_KEYS = {
     "mean_failure_subtask_progress",
 }
 EVAL_META_KEYS = ("environment", "task_suite_name", "task_name")
+
+
+def _make_policy_interface_config(cfg: SimEvalConfig, policy) -> PolicyInterfaceConfig:
+    return PolicyInterfaceConfig(
+        data_config=cfg.dataset,
+        policy=policy,
+        device=cfg.device,
+        eval_mode=cfg.eval_mode,
+        inference_delay=cfg.inference_delay,
+        execution_horizon=cfg.execution_horizon,
+        beta=cfg.beta,
+        guidance_schedule=cfg.guidance_schedule,
+    )
 
 
 def init_wandb_from_training_run(cfg: SimEvalConfig) -> WandBLogger | None:
@@ -204,14 +218,7 @@ def _run_single_eval(cfg: SimEvalConfig) -> dict | None:
 
     # 3. Create PolicyInterface to wrap the policy with normalization/transforms
     logger.info("Creating PolicyInterface...")
-    policy_interface_cfg = PolicyInterfaceConfig(
-        data_config=cfg.dataset,
-        policy=policy,
-        device=cfg.device,
-        eval_mode=cfg.eval_mode,
-        inference_delay=cfg.inference_delay,
-        beta=cfg.beta,
-    )
+    policy_interface_cfg = _make_policy_interface_config(cfg, policy)
     policy_interface = PolicyInterface(policy_interface_cfg)
     logger.info(f"PolicyInterface created with eval_mode: {cfg.eval_mode}")
 
@@ -265,6 +272,50 @@ def _run_single_eval(cfg: SimEvalConfig) -> dict | None:
     return eval_metrics
 
 
+def _initialize_default_checkpoint(cfg: SimEvalConfig) -> None:
+    """Resolve the policy's hosted default when no checkpoint override is set."""
+    if cfg.pretrained_checkpoint is not None:
+        return
+
+    default_checkpoint = getattr(cfg.policy, "pretrained_repo_id", None)
+    if default_checkpoint is None:
+        raise ValueError(
+            "No pretrained checkpoint was configured. Set pretrained_checkpoint "
+            "or use a policy with pretrained_repo_id."
+        )
+
+    cfg.pretrained_checkpoint = default_checkpoint
+    cfg.__post_init__()
+
+
+def _make_multi_eval_config(
+    cfg: SimEvalConfig,
+    eval_cfg,
+    checkpoint: Path,
+    output_dir: Path,
+    task_name: str,
+) -> SimEvalConfig:
+    """Build one multi-eval entry while preserving public dataset preprocessing."""
+    return SimEvalConfig(
+        pretrained_checkpoint=str(checkpoint),
+        eval_num_episodes=getattr(eval_cfg, "eval_num_episodes", cfg.eval_num_episodes),
+        record_videos=getattr(eval_cfg, "record_videos", cfg.record_videos),
+        output_dir=str(output_dir / task_name),
+        device=getattr(eval_cfg, "device", cfg.device),
+        name=task_name,
+        environment=eval_cfg.environment,
+        seed=getattr(eval_cfg, "seed", cfg.seed),
+        dataset=getattr(eval_cfg, "dataset", cfg.dataset),
+        policy=getattr(eval_cfg, "policy", cfg.policy),
+        dataset_root_dir=getattr(eval_cfg, "dataset_root_dir", cfg.dataset_root_dir),
+        eval_mode=getattr(eval_cfg, "eval_mode", cfg.eval_mode),
+        inference_delay=getattr(eval_cfg, "inference_delay", cfg.inference_delay),
+        execution_horizon=getattr(eval_cfg, "execution_horizon", cfg.execution_horizon),
+        beta=getattr(eval_cfg, "beta", cfg.beta),
+        guidance_schedule=getattr(eval_cfg, "guidance_schedule", cfg.guidance_schedule),
+    )
+
+
 @draccus.wrap()
 def eval(cfg: SimEvalConfig) -> None:
     """Evaluate a pretrained policy on one or more environments.
@@ -285,19 +336,22 @@ def eval(cfg: SimEvalConfig) -> None:
     # Initialize logging
     init_logging(console_level=cfg.log_level)
 
-    if cfg.is_multi_eval:
-        _run_multi_eval(cfg)
-    else:
-        logger.info("Starting policy evaluation...")
-        logger.info(f"Eval name: {cfg.name}")
-        logger.info(f"Checkpoint: {cfg.pretrained_checkpoint}")
-        logger.info(f"Device: {cfg.device}")
-        logger.info(f"Episodes: {cfg.eval_num_episodes}")
-        logger.info(f"Max steps per episode: {cfg.environment.max_episode_steps}")
-        logger.info(f"Record video: {cfg.record_videos}")
+    _initialize_default_checkpoint(cfg)
 
-        _run_single_eval(cfg)
-        logger.info("Evaluation completed successfully!")
+    with checkpoint_read_lease(cfg.pretrained_checkpoint):
+        if cfg.is_multi_eval:
+            _run_multi_eval(cfg)
+        else:
+            logger.info("Starting policy evaluation...")
+            logger.info(f"Eval name: {cfg.name}")
+            logger.info(f"Checkpoint: {cfg.pretrained_checkpoint}")
+            logger.info(f"Device: {cfg.device}")
+            logger.info(f"Episodes: {cfg.eval_num_episodes}")
+            logger.info(f"Max steps per episode: {cfg.environment.max_episode_steps}")
+            logger.info(f"Record video: {cfg.record_videos}")
+
+            _run_single_eval(cfg)
+            logger.info("Evaluation completed successfully!")
 
 
 def _run_multi_eval(cfg: SimEvalConfig) -> None:
@@ -360,16 +414,12 @@ def _run_multi_eval(cfg: SimEvalConfig) -> None:
         # Build a SimEvalConfig for this specific evaluation, injecting the
         # shared checkpoint so that EvalConfig.__post_init__ loads
         # train_config.json and populates policy/dataset configs.
-        eval_cfg_copy = SimEvalConfig(
-            pretrained_checkpoint=str(checkpoint),
-            eval_num_episodes=getattr(eval_cfg, "eval_num_episodes", cfg.eval_num_episodes),
-            record_videos=getattr(eval_cfg, "record_videos", cfg.record_videos),
-            output_dir=str(eval_output_dir / task_name),
-            device=getattr(eval_cfg, "device", cfg.device),
-            name=task_name,
-            environment=eval_cfg.environment,
-            seed=getattr(eval_cfg, "seed", cfg.seed),
-            dataset_root_dir=getattr(eval_cfg, "dataset_root_dir", cfg.dataset_root_dir),
+        eval_cfg_copy = _make_multi_eval_config(
+            cfg,
+            eval_cfg,
+            checkpoint,
+            eval_output_dir,
+            task_name,
         )
 
         # Attach the pre-loaded policy so _run_single_eval reuses it

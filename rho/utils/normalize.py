@@ -173,6 +173,13 @@ class RunningStats:
             self._histograms[i] += hist
 
 
+def quantile_stat_key(quantile: float) -> str:
+    percentile = int(round(quantile * 100))
+    if not np.isclose(quantile * 100, percentile):
+        raise ValueError(f"Only whole-percentile quantiles are supported, got {quantile}")
+    return f"q{percentile:02d}"
+
+
 class RunningStatsChunked:
     """Compute running statistics for chunked sequences.
 
@@ -188,6 +195,9 @@ class RunningStatsChunked:
         known_max: np.ndarray | None = None,
         num_quantile_bins: int = 5000,
         no_quantile: bool = False,
+        quantile_low: float = 0.02,
+        quantile_high: float = 0.98,
+        quantile_pairs: list[tuple[float, float]] | None = None,
     ):
         """
         Args:
@@ -200,7 +210,16 @@ class RunningStatsChunked:
             num_quantile_bins: Number of bins for histogram-based quantile estimation.
             no_quantile: If True, skip quantile computation entirely. Useful for first pass
                          of two-pass mode where only min/max/mean/std are needed.
+            quantile_low: Lower quantile to compute for quantile normalization.
+            quantile_high: Upper quantile to compute for quantile normalization.
+            quantile_pairs: Optional list of lower/upper quantile pairs to compute.
         """
+        if quantile_pairs is None:
+            quantile_pairs = [(quantile_low, quantile_high)]
+        for low, high in quantile_pairs:
+            if not 0 < low < high < 1:
+                raise ValueError("quantile pairs must satisfy 0 < low < high < 1")
+
         self._count = 0
         self._mean = None
         self._mean_of_squares = None
@@ -209,6 +228,14 @@ class RunningStatsChunked:
         self._num_quantile_bins = num_quantile_bins
         self._fixed_bounds = known_min is not None and known_max is not None
         self._no_quantile = no_quantile
+        self._quantile_pairs = []
+        for low, high in quantile_pairs:
+            pair = (low, high)
+            if pair not in self._quantile_pairs:
+                self._quantile_pairs.append(pair)
+        self._quantile_keys = [
+            (quantile_stat_key(low), quantile_stat_key(high)) for low, high in self._quantile_pairs
+        ]
 
         if self._no_quantile:
             # Skip quantile computation - no data accumulation or histograms needed
@@ -285,7 +312,7 @@ class RunningStatsChunked:
         """Compute and return statistics.
 
         Returns:
-            Dict with keys 'mean', 'std', 'min', 'max', 'q02', 'q98'
+            Dict with keys 'mean', 'std', 'min', 'max', and configured quantile keys.
             Each with arrays of shape (chunk_len, dims)
         """
         if self._count < 2:
@@ -298,17 +325,20 @@ class RunningStatsChunked:
 
         if self._no_quantile:
             # Skip quantile computation entirely
-            return {
+            stats = {
                 "mean": self._mean,
                 "std": stddev,
                 "min": self._min,
                 "max": self._max,
-                "q02": None,
-                "q98": None,
             }
+            for low_key, high_key in self._quantile_keys:
+                stats[low_key] = None
+                stats[high_key] = None
+            return stats
 
-        q02 = np.zeros((chunk_len, dims))
-        q98 = np.zeros((chunk_len, dims))
+        quantiles = {
+            key: np.zeros((chunk_len, dims)) for pair_keys in self._quantile_keys for key in pair_keys
+        }
 
         if self._fixed_bounds:
             # Compute quantiles from histograms
@@ -318,15 +348,16 @@ class RunningStatsChunked:
                     edges = self._bin_edges[t, d]
                     cumsum = np.cumsum(hist)
 
-                    # 2nd percentile
-                    target_count_02 = 0.02 * self._count
-                    idx_02 = np.searchsorted(cumsum, target_count_02)
-                    q02[t, d] = edges[idx_02]
+                    for (low, high), (low_key, high_key) in zip(
+                        self._quantile_pairs, self._quantile_keys, strict=True
+                    ):
+                        target_count_low = low * self._count
+                        idx_low = np.searchsorted(cumsum, target_count_low)
+                        quantiles[low_key][t, d] = edges[idx_low]
 
-                    # 98th percentile
-                    target_count_98 = 0.98 * self._count
-                    idx_98 = np.searchsorted(cumsum, target_count_98)
-                    q98[t, d] = edges[idx_98]
+                        target_count_high = high * self._count
+                        idx_high = np.searchsorted(cumsum, target_count_high)
+                        quantiles[high_key][t, d] = edges[idx_high]
         else:
             # Concatenate all accumulated data
             all_data = np.concatenate(self._accumulated_data, axis=0)  # (total_samples, chunk_len, dims)
@@ -335,17 +366,20 @@ class RunningStatsChunked:
             for t in range(chunk_len):
                 for d in range(dims):
                     values = all_data[:, t, d]
-                    q02[t, d] = np.percentile(values, 2)
-                    q98[t, d] = np.percentile(values, 98)
+                    for (low, high), (low_key, high_key) in zip(
+                        self._quantile_pairs, self._quantile_keys, strict=True
+                    ):
+                        quantiles[low_key][t, d] = np.percentile(values, low * 100)
+                        quantiles[high_key][t, d] = np.percentile(values, high * 100)
 
-        return {
+        stats = {
             "mean": self._mean,
             "std": stddev,
             "min": self._min,
             "max": self._max,
-            "q02": q02,
-            "q98": q98,
         }
+        stats.update(quantiles)
+        return stats
 
 
 def serialize_json(norm_stats: dict[str, NormStats]) -> str:

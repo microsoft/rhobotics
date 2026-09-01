@@ -34,7 +34,6 @@ def pytest_collection_modifyitems(config, items):
 pytest_plugins = [
     "tests.fixtures.features",
     "tests.fixtures.datasets",
-    "tests.fixtures.policies",
 ]
 
 

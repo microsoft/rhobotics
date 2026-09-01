@@ -17,10 +17,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class WandBConfig:
-    project: str = "phi4robotics"
-    # Use the correct entity for the Microsoft Research WandB instance
-    # Users can override this with --wandb.username=<entity> if needed
-    username: str = "msrx-eai"  # Default to the team entity
+    project: str = "rho"
+    username: str | None = None
     tags: list = None
     group: str = None
     notes: str = None

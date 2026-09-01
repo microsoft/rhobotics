@@ -1,0 +1,12 @@
+# Evaluate a portable Rho checkpoint with end-effector 6D pose actions.
+pretrained_checkpoint: null
+environment: !include "ee_6d_pos/environment.yaml"
+
+policy:
+  type: "rho"
+
+eval_num_episodes: 10
+record_videos: true
+output_dir: "outputs/eval_roboeval/ee_6d_pos"
+device: "cuda"
+seed: 42

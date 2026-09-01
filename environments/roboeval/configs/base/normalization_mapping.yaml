@@ -1,0 +1,6 @@
+# Normalization strategy
+normalization_mapping:
+  VISUAL: IDENTITY # Keep images in [0,1] range
+  ENV: MIN_MAX # Robust normalization for environment variables
+  STATE: MIN_MAX # Robust normalization for robot state
+  ACTION: MIN_MAX # Robust normalization for actions

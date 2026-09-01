@@ -1,5 +1,6 @@
 import abc
 import dataclasses
+import functools
 import logging
 import math
 from dataclasses import dataclass
@@ -11,7 +12,18 @@ import torch.nn.functional as F
 import torchvision.transforms.v2 as T
 from torch import Tensor
 
-from rho.common.constants import ACTION, OBSERVATION_IMAGE, OBSERVATION_STATE
+from rho.common.constants import (
+    ACTION,
+    LANGUAGE_ACTION_FRAME,
+    LANGUAGE_ACTION_TARGET,
+    OBSERVATION_IMAGE,
+    OBSERVATION_STATE,
+)
+from rho.common.language_actions import (
+    ee_6d_actions_to_eef_rpy,
+    summarize_ee_6d_language_actions,
+    summarize_eef_rpy_language_actions,
+)
 from rho.common.rotation_helpers import (
     compute_absolute_ee_6d_pos,
     compute_absolute_ee_quat_pos,
@@ -30,9 +42,26 @@ from rho.common.rotation_helpers import (
     convert_ee_quat_wxyz_to_ee_6d,
     convert_ee_rpy_to_ee_6d,
 )
+from rho.common.task_encoding import encode_task_bytes
 from rho.common.types import ActionType, FeatureType, PolicyFeature
 
 logger = logging.getLogger(__name__)
+
+
+# Per-sample image augmentation transforms (RandomResizedCrop / ColorJitter)
+# call torchvision constructors that do internal validation + op registration.
+# At eff_bs=512 across multiple image keys this is ~1500 throwaway
+# constructions per batch. Cache by params (the transforms re-roll random
+# state per call, so reuse is safe across samples).
+@functools.lru_cache(maxsize=16)
+def _cached_random_resized_crop(height, width, scale, ratio):
+    return T.RandomResizedCrop(size=(height, width), scale=scale, ratio=ratio)
+
+
+@functools.lru_cache(maxsize=16)
+def _cached_color_jitter(brightness, contrast, saturation, hue):
+    return T.ColorJitter(brightness=brightness, contrast=contrast, saturation=saturation, hue=hue)
+
 
 try:
     from draccus.choice_types import ChoiceRegistry
@@ -260,6 +289,68 @@ class Transform(ChoiceRegistry, abc.ABC):
     def __call__(self, data: Tensor | dict[str, Tensor]) -> Tensor | dict[str, Tensor]:
         raise NotImplementedError
 
+    def deterministic(self) -> "Transform | None":
+        """Return the inference-time (non-random) form of this transform.
+
+        Deterministic transforms return ``self`` unchanged (the default).
+        Random augmentations override this to return either a deterministic
+        replacement (e.g. a fixed crop/resize) or ``None`` to drop themselves
+        from the pipeline entirely. ``get_transforms(training=False)`` maps
+        every transform through this so that eval/serve preprocessing is
+        reproducible and free of training augmentation.
+        """
+        return self
+
+
+def _first_text(value: Any) -> str | None:
+    if isinstance(value, str):
+        text = value.strip()
+        return text if text else None
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            text = _first_text(item)
+            if text is not None:
+                return text
+    return None
+
+
+@Transform.register_subclass("task_description_selector")
+@dataclass(frozen=True)
+class TaskDescriptionSelector(Transform):
+    """Sample between a task and subtask description, writing the result to task."""
+
+    task_key: str = "task"
+    subtask_key: str = "subtask"
+    output_key: str = "task"
+    subtask_probability: float = 0.0
+    drop_subtask_key: bool = True
+    input_type: str = "Dict"
+    post_norm: bool = False
+    type: str = "task_description_selector"
+
+    def __post_init__(self):
+        if not 0.0 <= self.subtask_probability <= 1.0:
+            raise ValueError("subtask_probability must be between 0.0 and 1.0")
+
+    def __call__(self, data: dict[str, Any]) -> dict[str, Any]:
+        task = _first_text(data.get(self.task_key))
+        subtask = _first_text(data.get(self.subtask_key))
+
+        if subtask is not None and (task is None or torch.rand(()) < self.subtask_probability):
+            data[self.output_key] = subtask
+        elif task is not None:
+            data[self.output_key] = task
+
+        if self.drop_subtask_key and self.subtask_key != self.output_key:
+            data.pop(self.subtask_key, None)
+
+        return data
+
+    def deterministic(self) -> "Transform | None":
+        # Eval form: no random sampling between task/subtask. Force the primary
+        # task description (falls back to subtask only when task is absent).
+        return dataclasses.replace(self, subtask_probability=0.0)
+
 
 @Transform.register_subclass("center_crop")
 @dataclasses.dataclass(frozen=True)
@@ -402,6 +493,85 @@ class ChannelReorder(Transform):
         return data.permute(perm)
 
 
+@dataclass(frozen=True)
+class _CenterResizedCrop(Transform):
+    """Deterministic, centered counterpart of :class:`RandomResizedCrop`.
+
+    Reproduces the *geometry* that ``RandomResizedCrop`` samples, but with the
+    randomness removed: it crops the expected region (the mean ``scale`` area
+    fraction at the geometric-mean ``ratio``) from the centre of the image,
+    then resizes to ``(height, width)``.
+
+    The crop maths — including torchvision's central-crop fallback for inputs
+    whose aspect ratio cannot satisfy ``ratio`` — mirrors
+    ``RandomResizedCrop.get_params``, so the eval-time field of view matches
+    training. A plain full-frame resize would be wrong twice over: it ignores
+    ``scale`` (training zooms in, eval would not) and it stretches non-square
+    inputs, whereas the sampled crop already carries the target aspect ratio.
+
+    Caveat: for *wide* ``scale`` ranges, torchvision rejects candidate crops
+    that do not fit the source and resamples, which biases its realised mean
+    area below the range mean used here. This is negligible for the tight
+    ranges used in practice -- ``scale=(0.9, 0.9)`` matches exactly and
+    ``(0.9, 1.0)`` differs by ~0.5% of area -- but a wide range such as
+    ``(0.08, 1.0)`` can diverge by ~11%. Revisit this if such a range is ever
+    configured.
+
+    Not registered as a config subclass; only constructed at runtime by
+    ``RandomResizedCrop.deterministic()``, never deserialized from a config.
+    """
+
+    height: int
+    width: int
+    scale: tuple[float, float] = (1.0, 1.0)
+    ratio: tuple[float, float] = (1.0, 1.0)
+    input_type: str = "Tensor"
+    type: str = "center_resized_crop"
+
+    def _crop_size(self, h: int, w: int) -> tuple[int, int]:
+        """Expected crop ``(crop_h, crop_w)`` for a ``h x w`` source image."""
+        # Area is sampled uniformly -> expected value is the arithmetic mean.
+        # Aspect ratio is sampled log-uniformly -> use the geometric mean.
+        scale = (float(self.scale[0]) + float(self.scale[1])) / 2.0
+        ratio = math.sqrt(float(self.ratio[0]) * float(self.ratio[1]))
+
+        target_area = h * w * scale
+        crop_w = int(round(math.sqrt(target_area * ratio)))
+        crop_h = int(round(math.sqrt(target_area / ratio)))
+
+        if 0 < crop_w <= w and 0 < crop_h <= h:
+            return crop_h, crop_w
+
+        # Central-crop fallback, matching torchvision's get_params: the source
+        # aspect ratio cannot satisfy `ratio`, so clamp to the nearest bound.
+        min_ratio, max_ratio = float(min(self.ratio)), float(max(self.ratio))
+        in_ratio = w / h
+        if in_ratio < min_ratio:
+            crop_w = w
+            crop_h = int(round(crop_w / min_ratio))
+        elif in_ratio > max_ratio:
+            crop_h = h
+            crop_w = int(round(crop_h * max_ratio))
+        else:
+            crop_h, crop_w = h, w
+        return max(1, min(crop_h, h)), max(1, min(crop_w, w))
+
+    def __call__(self, data: Tensor) -> Tensor:
+        if len(data.shape) not in [3, 4]:
+            raise ValueError(f"Expected 3D (CHW) or 4D (BCHW) tensor, got {len(data.shape)}D")
+
+        h, w = data.shape[-2:]
+        crop_h, crop_w = self._crop_size(h, w)
+
+        top = (h - crop_h) // 2
+        left = (w - crop_w) // 2
+        cropped = data[..., top : top + crop_h, left : left + crop_w]
+
+        if (crop_h, crop_w) == (self.height, self.width):
+            return cropped
+        return T.Resize((self.height, self.width), antialias=True)(cropped)
+
+
 @Transform.register_subclass("random_resized_crop")
 @dataclass(frozen=True)
 class RandomResizedCrop(Transform):
@@ -419,10 +589,22 @@ class RandomResizedCrop(Transform):
     def __call__(self, data: Tensor) -> Tensor:
         if len(data.shape) not in [3, 4]:
             raise ValueError(f"Expected 3D (CHW) or 4D (BCHW) tensor, got {len(data.shape)}D")
+        # Cache the torchvision transform instance keyed by params. The
+        # constructor does internal validation and op registration which is
+        # non-trivial when called per-sample at eff_bs=512 across 3 image keys
+        # (~1500 throwaway constructions per batch). Cached instance still
+        # generates fresh random params on each call.
+        return _cached_random_resized_crop(self.height, self.width, self.scale, self.ratio)(data)
 
-        # Use torchvision's implementation (already handles batches)
-        transform = T.RandomResizedCrop(size=(self.height, self.width), scale=self.scale, ratio=self.ratio)
-        return transform(data)
+    def deterministic(self) -> "Transform | None":
+        # Eval form: crop the *expected* region centred, instead of a random
+        # one, preserving the training-time field of view and aspect ratio.
+        return _CenterResizedCrop(
+            height=self.height,
+            width=self.width,
+            scale=tuple(self.scale),
+            ratio=tuple(self.ratio),
+        )
 
 
 @Transform.register_subclass("color_jitter")
@@ -457,17 +639,19 @@ class ColorJitter(Transform):
             # Reshape (B, S, C, H, W) -> (B*S, C, H, W)
             data = data.reshape(batch * seq_len, c, h, w)
 
-        # Use torchvision's implementation (already handles batches)
-        transform = T.ColorJitter(
-            brightness=self.brightness, contrast=self.contrast, saturation=self.saturation, hue=self.hue
-        )
-        result = transform(data)
+        # Cache the torchvision transform instance keyed by params (see
+        # RandomResizedCrop.__call__ for the same rationale).
+        result = _cached_color_jitter(self.brightness, self.contrast, self.saturation, self.hue)(data)
 
         # Reshape back to 5D if input was 5D
         if is_5d:
             result = result.reshape(batch, seq_len, c, h, w)
 
         return result
+
+    def deterministic(self) -> "Transform | None":
+        # Eval form: no color augmentation, drop from the pipeline.
+        return None
 
 
 @Transform.register_subclass("random_flip_left_right")
@@ -486,6 +670,9 @@ class RandomFlipLeftRight(Transform):
         transform = T.RandomHorizontalFlip(p=self.p)
         return transform(data)
 
+    def deterministic(self) -> "Transform | None":
+        return None
+
 
 @Transform.register_subclass("random_flip_up_down")
 @dataclass(frozen=True)
@@ -502,6 +689,9 @@ class RandomFlipUpDown(Transform):
 
         transform = T.RandomVerticalFlip(p=self.p)
         return transform(data)
+
+    def deterministic(self) -> "Transform | None":
+        return None
 
 
 @Transform.register_subclass("random_rot90")
@@ -523,6 +713,9 @@ class RandomRot90(Transform):
             # torch.rot90 rotates in the last two dimensions (H, W)
             return torch.rot90(data, k=k, dims=(-2, -1))
         return data
+
+    def deterministic(self) -> "Transform | None":
+        return None
 
 
 @Transform.register_subclass("combine_keys")
@@ -843,7 +1036,23 @@ class DeltaActions(Transform):
     input_type: str = "Dict"
     post_norm: bool = True
     relative_to_state: bool = False
+    use_absolute_grippers: bool = False
     type: str = "delta_actions"
+
+    @staticmethod
+    def _gripper_slices(action_type: ActionType, action_dim: int) -> list[slice]:
+        dims_per_arm = {
+            ActionType.EE_EULER_POS: 7,
+            ActionType.EE_QUAT_POS_XYZW: 8,
+            ActionType.EE_QUAT_POS_WXYZ: 8,
+            ActionType.EE_6D_POS: 10,
+        }.get(action_type)
+        if dims_per_arm is None:
+            return []
+        return [
+            slice(start + dims_per_arm - 1, start + dims_per_arm)
+            for start in range(0, action_dim, dims_per_arm)
+        ]
 
     def __call__(self, data: dict[str, Tensor]) -> dict[str, Tensor]:
         if self.state_key not in data or self.action_key not in data:
@@ -926,6 +1135,10 @@ class DeltaActions(Transform):
         else:
             raise ValueError(f"Unknown action_type: {self.action_type}")
 
+        if self.use_absolute_grippers:
+            for grip_slice in self._gripper_slices(self.action_type, actions.shape[-1]):
+                delta_actions[..., grip_slice] = actions[..., grip_slice]
+
         if orig_action_dim == 2:
             delta_actions = delta_actions.squeeze(0)
 
@@ -983,6 +1196,7 @@ class AbsoluteActions(Transform):
     input_type: str = "Dict"
     post_norm: bool = True
     relative_to_state: bool = False
+    use_absolute_grippers: bool = False
     type: str = "absolute_actions"
 
     def __call__(self, data: dict[str, Tensor]) -> dict[str, Tensor]:
@@ -999,16 +1213,18 @@ class AbsoluteActions(Transform):
 
         orig_action_dim = len(actions.shape)
 
-        if len(actions.shape) == 2:
+        if orig_action_dim == 2:
             actions = actions.unsqueeze(0)
-
-        # Check the shape of state, if (state_dim,), expand to (1, state_dim)
-        if len(state.shape) == 1:
-            state = state.unsqueeze(0)
-        # Check the shape of state, if (batch_size,sequence_len, state_dim), shrink to (batch_size, state_dim)
-
-        if len(state.shape) == 3:
-            state = state.squeeze(1)
+            # Unbatched input: state is (state_dim,), (history, state_dim),
+            # or (1, history, state_dim). Promote to 3D, take most recent step.
+            while state.ndim < 3:
+                state = state.unsqueeze(0)
+            state = state[:, -1, :]
+        else:
+            # Batched input: state is (batch, state_dim) or
+            # (batch, history, state_dim). Reduce history axis if present.
+            if state.ndim == 3:
+                state = state[:, -1, :]
 
         # Validate action dimensions based on type
         if self.action_type == ActionType.POSITION:
@@ -1068,6 +1284,10 @@ class AbsoluteActions(Transform):
         else:
             raise ValueError(f"Unknown action_type: {self.action_type}")
 
+        if self.use_absolute_grippers:
+            for grip_slice in DeltaActions._gripper_slices(self.action_type, actions.shape[-1]):
+                absolute_actions[..., grip_slice] = actions[..., grip_slice]
+
         if orig_action_dim == 2:
             absolute_actions = absolute_actions.squeeze(0)
 
@@ -1112,9 +1332,16 @@ class ConvertTo6dActions(Transform):
 
         # Validate action dimensions based on type
         if self.action_type == ActionType.EE_EULER_POS:
-            assert actions.shape[-1] % 7 == 0, (
-                f"{ActionType.EE_EULER_POS} action dimension must be multiple of 7"
-            )
+            if actions.shape[-1] % 7 != 0:
+                _ds_name = data.get("dataset_name")
+                if hasattr(_ds_name, "decode"):
+                    _ds_name = _ds_name.decode("utf-8", errors="replace")
+                raise AssertionError(
+                    f"{ActionType.EE_EULER_POS} action dimension must be multiple of 7; "
+                    f"got actions.shape={tuple(actions.shape)} for action_key={self.action_key!r}; "
+                    f"dataset_name={_ds_name!r}, "
+                    f"sample_keys={sorted(data.keys()) if isinstance(data, dict) else type(data).__name__}"
+                )
             actions_6d = convert_ee_rpy_to_ee_6d(actions, with_ee_gripper=True)
         elif self.action_type == ActionType.EE_QUAT_POS_XYZW:
             assert actions.shape[-1] % 8 == 0, (
@@ -1234,16 +1461,199 @@ class ConvertFrom6dActions(Transform):
         return data
 
 
+class EndStateTarget:
+    """Snapshot the chunk-final action as a KI-ENDSTATE LM target.
+
+    Inserted into the per-dataset transform pipeline right before Normalize,
+    so it reads the un-normalized delta-6D action (per-arm
+    [pos(3), rot6d(6), grip(1)]). Writes ``sample[output_key]``: the last
+    chunk step in physical units (translation cm, RPY degrees), optionally
+    converted from 6D rotation to RPY, zero-padded to ``target_dim``.
+
+    Constructed in code (not registered for YAML) and gated by config -- only
+    KI-ENDSTATE runs with ``endstate_target_units='physical'`` get it. The
+    flow expert is unaffected: it keeps consuming the normalized 6D ``action``.
+    No-op for samples without an ``action`` key (VL cotraining batches).
+    """
+
+    _ARM_6D = 10  # [pos(3), rot6d(6), grip(1)]
+    _ARM_RPY = 7  # [pos(3), rpy(3), grip(1)]
+
+    def __init__(
+        self,
+        rotation: str,
+        target_dim: int,
+        action_key: str = "action",
+        output_key: str = "endstate_target",
+        with_ee_gripper: bool = True,
+    ):
+        self.rotation = rotation
+        self.target_dim = target_dim
+        self.action_key = action_key
+        self.output_key = output_key
+        self.with_ee_gripper = with_ee_gripper
+
+    def __call__(self, data: dict[str, Tensor]) -> dict[str, Tensor]:
+        if self.action_key not in data:
+            return data
+
+        # action[..., -1, :] is the chunk-final step; the `...` keeps this
+        # correct whether action is (chunk, dim) or (batch, chunk, dim).
+        last = data[self.action_key][..., -1, :].detach().to(torch.float32).clone()
+        num_arms = last.shape[-1] // self._ARM_6D
+
+        # Translation m -> cm. Done while still in 6D layout (positions are at
+        # a known per-arm offset); the 6D->RPY conversion below passes
+        # positions through unchanged.
+        for arm in range(num_arms):
+            base = arm * self._ARM_6D
+            last[..., base : base + 3] *= 100.0
+
+        if self.rotation == "rpy":
+            last = convert_ee_6d_to_ee_rpy(last, with_ee_gripper=self.with_ee_gripper)
+            for arm in range(num_arms):
+                base = arm * self._ARM_RPY
+                last[..., base + 3 : base + 6] = torch.rad2deg(last[..., base + 3 : base + 6])
+
+        cur = last.shape[-1]
+        if cur < self.target_dim:
+            last = F.pad(last, (0, self.target_dim - cur))
+
+        data[self.output_key] = last
+        return data
+
+
+class LanguageActionTarget:
+    """Snapshot the chunk-net action as LAP language-action text.
+
+    Runs before normalization, after configured action-space transforms. For
+    the common EE_6D_POS setup with ``relative_to_state=True``, the last action
+    in the chunk is already the net end-effector displacement from the current
+    state to the chunk end. The output is encoded as fixed-width bytes so the
+    dataloader batch remains tensor-only.
+    """
+
+    def __init__(
+        self,
+        action_key: str = ACTION,
+        output_key: str = LANGUAGE_ACTION_TARGET,
+        source_action_type: ActionType = ActionType.EE_6D_POS,
+        chunk_reduction: str = "last",
+        include_rotation: bool = True,
+        eef_frame_prob: float = 0.5,
+        state_key: str = OBSERVATION_STATE,
+        frame_output_key: str = LANGUAGE_ACTION_FRAME,
+    ):
+        self.action_key = action_key
+        self.output_key = output_key
+        self.source_action_type = ActionType(source_action_type)
+        self.chunk_reduction = chunk_reduction
+        self.include_rotation = include_rotation
+        self.eef_frame_prob = eef_frame_prob
+        self.state_key = state_key
+        self.frame_output_key = frame_output_key
+
+    def __call__(self, data: dict[str, Tensor]) -> dict[str, Tensor]:
+        if self.action_key not in data:
+            return data
+
+        actions = data[self.action_key].detach().to(torch.float32)
+        if actions.ndim == 2:
+            actions = actions.unsqueeze(0)
+            squeeze = True
+        else:
+            squeeze = False
+
+        if self.chunk_reduction == "last":
+            net_action = actions[..., -1, :]
+        elif self.chunk_reduction == "sum":
+            net_action = actions.sum(dim=-2)
+        else:
+            raise ValueError(
+                f"Unsupported chunk_reduction={self.chunk_reduction!r}; expected 'last' or 'sum'"
+            )
+
+        if self.source_action_type != ActionType.EE_6D_POS:
+            raise ValueError(
+                f"LanguageActionTarget currently supports EE_6D_POS, got {self.source_action_type}"
+            )
+
+        if self.eef_frame_prob > 0.0 and self.state_key in data:
+            use_eef = torch.rand(net_action.shape[0]).lt(self.eef_frame_prob)
+        else:
+            use_eef = torch.zeros(net_action.shape[0], dtype=torch.bool)
+        texts: list[str] = []
+        frames: list[str] = []
+        if use_eef.any():
+            state = data[self.state_key]
+            if state.ndim == 3:
+                state = state[:, -1]
+            eef_actions = ee_6d_actions_to_eef_rpy(net_action[use_eef], state[use_eef])
+            eef_texts = iter(
+                summarize_eef_rpy_language_actions(
+                    eef_actions,
+                    include_rotation=self.include_rotation,
+                )
+            )
+        else:
+            eef_texts = iter(())
+        if (~use_eef).any():
+            base_texts = iter(
+                summarize_ee_6d_language_actions(net_action[~use_eef], include_rotation=self.include_rotation)
+            )
+        else:
+            base_texts = iter(())
+
+        for selected in use_eef.tolist():
+            if selected:
+                texts.append(next(eef_texts))
+                frames.append("end-effector frame")
+            else:
+                texts.append(next(base_texts))
+                frames.append("robot base frame")
+        encoded = torch.stack([encode_task_bytes(text) for text in texts], dim=0)
+        data[self.output_key] = encoded.squeeze(0) if squeeze else encoded
+        encoded_frames = torch.stack([encode_task_bytes(frame) for frame in frames], dim=0)
+        data[self.frame_output_key] = encoded_frames.squeeze(0) if squeeze else encoded_frames
+        return data
+
+
 ##### IMAGE TRANSFORMS END #####
 
 
+def get_target_sequence_lengths(temporal_indices: dict[str, Any] | None) -> dict[FeatureType, int] | None:
+    """Convert a per-feature temporal lookup mapping into a model shape contract.
+
+    The values in ``temporal_indices`` may be frame indices or timestamps; padding
+    only needs the number of requested steps for each feature type.
+    """
+    if temporal_indices is None:
+        return None
+
+    sequence_lengths = {FeatureType.VISUAL: 1, FeatureType.STATE: 1, FeatureType.ACTION: 1}
+    for key_substr, feature_type in zip(
+        [OBSERVATION_IMAGE, OBSERVATION_STATE, ACTION],
+        [FeatureType.VISUAL, FeatureType.STATE, FeatureType.ACTION],
+        strict=False,
+    ):
+        sequence_lengths[feature_type] = max(
+            (len(indices) for key, indices in temporal_indices.items() if key.startswith(key_substr)),
+            default=1,
+        )
+    return sequence_lengths
+
+
 def build_key_padding_transform(
-    features: dict[str, PolicyFeature] | None, delta_timestamps: dict[str, Any] | None = None
+    features: dict[str, PolicyFeature] | None,
+    target_sequence_lengths: dict[FeatureType, int] | None = None,
 ):
     """Builds a transform that checks to see if all features are keys in the input dict,
         for any transforms that are missing it will create a zero element tensor of the correct shape.
     Args:
-        features: FeatureConfig containing all feature parameters
+        features: FeatureConfig containing all feature parameters.
+        target_sequence_lengths: Fixed sequence lengths required by the model,
+            keyed by feature type. This is a shape contract, not LeRobot's
+            per-dataset temporal loading schedule.
     """
     if features is None:
         return lambda x: x  # Identity if no features provided
@@ -1251,35 +1661,80 @@ def build_key_padding_transform(
         features = features.feature_dict
 
     sequence_by_type = None
-    if delta_timestamps is not None:
-        # Check delta_timestamps to match against OBSERVATION_IMAGE, OBSERVATION_STATE,
-        # and ACTION
-        # If any of these keys are in delta_timestamps, we will use that to
-        # determine sequence length
-        # Chosing the maximum if multiple are present
+    if target_sequence_lengths is not None:
         sequence_by_type = {FeatureType.VISUAL: 1, FeatureType.STATE: 1, FeatureType.ACTION: 1}
-        str_to_type = zip(
-            [OBSERVATION_IMAGE, OBSERVATION_STATE, ACTION],
-            [FeatureType.VISUAL, FeatureType.STATE, FeatureType.ACTION],
-            strict=False,
-        )
-        for key_substr, key_type in str_to_type:
-            max_length = 0
-            for key, timestamps in delta_timestamps.items():
-                if key.startswith(key_substr):
-                    length = len(timestamps)
-                    if length > max_length:
-                        max_length = length
-            if max_length > 0:
-                sequence_by_type[key_type] = max_length
+        sequence_by_type.update(target_sequence_lengths)
 
     def key_padding_transform(
         data: dict[str, Tensor], batch_size: int | None = None, device=None
     ) -> dict[str, Tensor]:
         if data is None:
             return data
+
+        def _sequence_axis(value: Tensor, target_shape: tuple[int, ...], sequence_len: int) -> int | None:
+            if sequence_len <= 1:
+                return None
+            if batch_size is not None:
+                return 1 if value.ndim >= len(target_shape) else None
+            return 0 if value.ndim == len(target_shape) else None
+
+        def _new_pad_mask(value: Tensor, sequence_len: int) -> Tensor:
+            if sequence_len <= 1:
+                if batch_size is not None:
+                    return torch.zeros((batch_size, 1), dtype=torch.bool, device=value.device)
+                return torch.zeros((1,), dtype=torch.bool, device=value.device)
+            axis = _sequence_axis(value, key_shape, sequence_len)
+            current_len = value.shape[axis] if axis is not None else sequence_len
+            if batch_size is not None:
+                return torch.zeros((value.shape[0], current_len), dtype=torch.bool, device=value.device)
+            return torch.zeros((current_len,), dtype=torch.bool, device=value.device)
+
+        def _pad_sequence(value: Tensor, target_len: int, axis: int) -> tuple[Tensor, int]:
+            current_len = value.shape[axis]
+            if current_len >= target_len:
+                return value, 0
+            pad_shape = list(value.shape)
+            pad_shape[axis] = target_len - current_len
+            pad = torch.zeros(pad_shape, dtype=value.dtype, device=value.device)
+            return torch.cat([value, pad], dim=axis), target_len - current_len
+
+        def _pad_mask(mask: Tensor, target_len: int, pad_len: int) -> Tensor:
+            if mask.shape[-1] >= target_len:
+                return mask
+            true_len = target_len - mask.shape[-1] if pad_len == 0 else pad_len
+            pad_shape = list(mask.shape)
+            pad_shape[-1] = true_len
+            pad = torch.ones(pad_shape, dtype=torch.bool, device=mask.device)
+            return torch.cat([mask, pad], dim=-1)
+
+        def _dim_pad_mask(value: Tensor, target_dim: int) -> Tensor:
+            # Transforms such as quaternion -> 6D rotation can widen a real
+            # feature before padding runs. Those added dimensions are data, not
+            # padding, so the mask must describe the post-transform tensor.
+            mask_dim = max(value.shape[-1], target_dim)
+            if batch_size is not None:
+                mask = torch.zeros((value.shape[0], mask_dim), dtype=torch.bool, device=value.device)
+            else:
+                mask = torch.zeros((mask_dim,), dtype=torch.bool, device=value.device)
+            current_dim = value.shape[-1]
+            if current_dim < mask_dim:
+                mask[..., current_dim:] = True
+            return mask
+
+        def _normalize_dim_pad_mask(mask: Tensor, target_dim: int) -> Tensor:
+            if mask.shape[-1] == target_dim:
+                return mask
+            if mask.shape[-1] > target_dim:
+                return mask[..., :target_dim]
+            pad_shape = list(mask.shape)
+            pad_shape[-1] = target_dim - mask.shape[-1]
+            pad = torch.ones(pad_shape, dtype=torch.bool, device=mask.device)
+            return torch.cat([mask, pad], dim=-1)
+
         for key, feature in features.items():
             key_shape = feature.shape
+            emit_dim_pad_mask = feature.type != FeatureType.VISUAL
+            sequence_len = 1
             if sequence_by_type is not None:
                 sequence_len = sequence_by_type[feature.type]
                 if sequence_len > 1:
@@ -1294,22 +1749,41 @@ def build_key_padding_transform(
             if key not in data:
                 data[key] = torch.zeros(key_shape, dtype=torch.float32)
                 data[f"{key}_is_pad"] = torch.ones(mask_shape, dtype=torch.bool)
+                if emit_dim_pad_mask:
+                    data[f"{key}_dim_is_pad"] = _dim_pad_mask(data[key], key_shape[-1])
             elif f"{key}_is_pad" not in data:
-                data[f"{key}_is_pad"] = torch.zeros(mask_shape, dtype=torch.bool)
+                data[f"{key}_is_pad"] = _new_pad_mask(data[key], sequence_len)
+            if emit_dim_pad_mask and f"{key}_dim_is_pad" not in data:
+                data[f"{key}_dim_is_pad"] = _dim_pad_mask(data[key], key_shape[-1])
+            elif emit_dim_pad_mask:
+                data[f"{key}_dim_is_pad"] = _normalize_dim_pad_mask(
+                    data[f"{key}_dim_is_pad"], max(data[key].shape[-1], key_shape[-1])
+                )
 
             # Assert that the shape is correct for both original and padded data
             if data[key].shape != key_shape:
                 if feature.type == FeatureType.VISUAL:
                     # If the image is the wrong size then apply padding
                     data[key] = ResizeWithPadding(height=key_shape[-2], width=key_shape[-1])(data[key])
-                elif data[key].shape[-1] < key_shape[-1]:
-                    # Pad the last dimensions with zeros if shape is incorrect
-                    pad_size = key_shape[-1] - data[key].shape[-1]
-                    pad = (0, pad_size)  # Pad only the last dimension
-                    data[key] = F.pad(data[key], pad, "constant", 0)
+                else:
+                    if data[key].shape[-1] < key_shape[-1]:
+                        # Pad the last dimension with zeros when action/state dims differ.
+                        pad_size = key_shape[-1] - data[key].shape[-1]
+                        pad = (0, pad_size)
+                        data[key] = F.pad(data[key], pad, "constant", 0)
+
+                    axis = _sequence_axis(data[key], key_shape, sequence_len)
+                    if axis is not None:
+                        data[key], pad_len = _pad_sequence(data[key], sequence_len, axis)
+                        data[f"{key}_is_pad"] = _pad_mask(data[f"{key}_is_pad"], sequence_len, pad_len)
+
+            if data[f"{key}_is_pad"].shape != mask_shape and sequence_len > 1:
+                data[f"{key}_is_pad"] = _pad_mask(data[f"{key}_is_pad"], sequence_len, 0)
             if device is not None:
                 data[key] = data[key].to(device)
                 data[f"{key}_is_pad"] = data[f"{key}_is_pad"].to(device)
+                if emit_dim_pad_mask:
+                    data[f"{key}_dim_is_pad"] = data[f"{key}_dim_is_pad"].to(device)
 
         return data
 

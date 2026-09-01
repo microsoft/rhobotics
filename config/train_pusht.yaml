@@ -1,0 +1,35 @@
+# Train Rho on the public LeRobot PushT dataset.
+# Usage: python -m rho.train --config_path=config/train_pusht.yaml
+
+wandb:
+  project: "rho"
+  tags: ["pusht", "rho", "training"]
+  group: "pusht_experiments"
+  enabled: false
+
+dataset: !include datasets/pusht.yaml
+
+environment: null
+
+policy:
+  <<: !include policies/rho.yaml
+  chunk_size: 16
+  n_action_steps: 8
+  optimizer_lr: 1e-4
+
+batch_size: 32
+num_workers: 4
+steps: 50000
+
+output_dir: "outputs/training_pusht_rho"
+save_checkpoint_every: 5000
+keep_checkpoint_interval: 5000
+logging_interval: 100
+mixed_precision: "bf16"
+gradient_accumulation_steps: 1
+record_videos: false
+eval_interval: 999999
+validation_interval: 999999
+
+resume: false
+pretrained_checkpoint: null

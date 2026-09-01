@@ -4,9 +4,13 @@ import tempfile
 
 import numpy as np
 import pytest
+import torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-from rho.datasets.multi_dataset import AlkuMultiDataset
+from rho.common.constants import ACTION, OBSERVATION_STATE
+from rho.common.types import FeatureType, NormalizationMode, PolicyFeature
+from rho.datasets.lerobot_dataset import LeRobotDatasetConfig
+from rho.datasets.multi_dataset import CombinedDataset, MultiDatasetConfig, WeightedDatasetConfig
 
 
 @pytest.fixture(scope="session")
@@ -27,7 +31,7 @@ def mock_dataset_config_bare():
     fps = 20  # same as LIBERO dataset
     image_shape = (64, 64, 3)  # Reduced from 256x256 to 64x64 for faster tests
     image_frame_config = {
-        "dtype": "video",
+        "dtype": "image",
         "shape": image_shape,
         "names": ["height", "width", "channels"],
         "info": {
@@ -56,6 +60,61 @@ def mock_dataset_config_bare():
         },
     }
     return {"fps": fps, "features": features, "image_shape": image_shape}
+
+
+def _feature_spec(action_dim: int, state_dim: int | None = None) -> dict[str, PolicyFeature]:
+    state_dim = state_dim or action_dim
+    return {
+        OBSERVATION_STATE: PolicyFeature(FeatureType.STATE, (state_dim,)),
+        ACTION: PolicyFeature(FeatureType.ACTION, (action_dim,)),
+    }
+
+
+def _stats_for_features(features: dict[str, PolicyFeature]) -> dict:
+    return {
+        key: {
+            "mean": torch.zeros(feature.shape),
+            "std": torch.ones(feature.shape),
+            "min": torch.zeros(feature.shape),
+            "max": torch.ones(feature.shape),
+        }
+        for key, feature in features.items()
+    }
+
+
+def _lerobot_cfg_with_features(features: dict[str, PolicyFeature]) -> LeRobotDatasetConfig:
+    return LeRobotDatasetConfig(
+        repo_id="test/dataset",
+        features=features,
+        stats=_stats_for_features(features),
+        normalization_mapping={
+            FeatureType.STATE: NormalizationMode.MEAN_STD,
+            FeatureType.ACTION: NormalizationMode.MEAN_STD,
+        },
+    )
+
+
+class TestMultiDatasetConfig:
+    def test_explicit_parent_features_define_transformed_features(self):
+        child_features = _feature_spec(action_dim=7, state_dim=8)
+        parent_features = _feature_spec(action_dim=20, state_dim=20)
+
+        cfg = MultiDatasetConfig(
+            datasets=[WeightedDatasetConfig(dataset=_lerobot_cfg_with_features(child_features))],
+            features=parent_features,
+        )
+
+        assert cfg.transformed_feature_dict[ACTION].shape == (20,)
+        assert cfg.transformed_feature_dict[OBSERVATION_STATE].shape == (20,)
+
+    def test_heterogeneous_child_features_require_parent_features(self):
+        with pytest.raises(ValueError, match="heterogeneous transformed_features"):
+            MultiDatasetConfig(
+                datasets=[
+                    WeightedDatasetConfig(dataset=_lerobot_cfg_with_features(_feature_spec(action_dim=7))),
+                    WeightedDatasetConfig(dataset=_lerobot_cfg_with_features(_feature_spec(action_dim=8))),
+                ]
+            )
 
 
 @pytest.fixture(scope="session")
@@ -173,12 +232,12 @@ def create_and_populate_mock_datasets(
     return loaded_datasets
 
 
-class TestAlkuMultiDataset:
-    """Test suite for AlkuWeightedMultiDataset."""
+class TestCombinedDataset:
+    """Test suite for CombinedDataset."""
 
     def test_dataset_length(self, mock_datasets):
         """Test that the multi-dataset length equals the sum of individual dataset lengths."""
-        multi_dataset = AlkuMultiDataset(
+        multi_dataset = CombinedDataset(
             datasets=mock_datasets,
         )
 
@@ -187,7 +246,7 @@ class TestAlkuMultiDataset:
 
     def test_cumulative_lengths(self, mock_datasets):
         """Test that cumulative lengths are calculated correctly."""
-        multi_dataset = AlkuMultiDataset(
+        multi_dataset = CombinedDataset(
             datasets=mock_datasets,
         )
 
@@ -201,7 +260,7 @@ class TestAlkuMultiDataset:
 
     def test_item_access_integrity(self, mock_datasets):
         """Test that items are accessed correctly across datasets with integrity preserved."""
-        multi_dataset = AlkuMultiDataset(
+        multi_dataset = CombinedDataset(
             datasets=mock_datasets,
         )
 
@@ -256,7 +315,7 @@ class TestAlkuMultiDataset:
 
     def test_boundary_indices(self, mock_datasets):
         """Test access at dataset boundaries."""
-        multi_dataset = AlkuMultiDataset(
+        multi_dataset = CombinedDataset(
             datasets=mock_datasets,
         )
 
@@ -280,7 +339,7 @@ class TestAlkuMultiDataset:
 
     def test_out_of_bounds_access(self, mock_datasets):
         """Test that out-of-bounds access raises appropriate errors."""
-        multi_dataset = AlkuMultiDataset(
+        multi_dataset = CombinedDataset(
             datasets=mock_datasets,
         )
 
@@ -293,13 +352,9 @@ class TestAlkuMultiDataset:
 
     def test_empty_dataset_list(self):
         """Test initialization with empty dataset list."""
-        multi_dataset = AlkuMultiDataset(datasets=[])
+        multi_dataset = CombinedDataset(datasets=[])
         assert len(multi_dataset) == 0
         assert multi_dataset.cumulative_lengths == []
-
-    # TODO: Add the weighted sampler tests back in here
-    # TODO: Add AlkuMultiIterableDataset and MultiDatasetWeightedSampler tests back in here
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

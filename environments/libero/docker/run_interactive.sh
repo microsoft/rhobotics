@@ -1,25 +1,40 @@
-export PHI4ROBOTICS_DIR=`pwd`
-export CONTAINER_NAME=alku-libero-interactive
+#!/usr/bin/env bash
 
-docker stop $CONTAINER_NAME 2>/dev/null || true
-sleep 1
-docker run --gpus all --ipc=host \
---ulimit memlock=-1 --ulimit stack=67108864 \
---rm -v ~/.cache/huggingface:/hf_home  \
--v $PHI4ROBOTICS_DIR/rho:/workspace/rho \
--v $PHI4ROBOTICS_DIR/config:/workspace/config \
--v $PHI4ROBOTICS_DIR/environments:/workspace/environments \
--v $PHI4ROBOTICS_DIR/outputs:/workspace/outputs \
--v $PHI4ROBOTICS_DIR/tests:/workspace/tests \
--v $PHI4ROBOTICS_DIR/notebooks:/workspace/notebooks \
--v $PHI4ROBOTICS_DIR/scratch:/workspace/scratch \
--v $PHI4ROBOTICS_DIR/rho_client:/workspace/rho_client \
--v /data/:/data \
--e WANDB_BASE_URL="$WANDB_BASE_URL" \
--e WANDB_API_KEY="$WANDB_API_KEY" \
--e HF_TOKEN="$HF_TOKEN" \
---name $CONTAINER_NAME \
--d msrxworkspace1acr.azurecr.io/phi4robotics/rho-libero:latest \
-tail -f /dev/null
+set -euo pipefail
 
-docker exec -it $CONTAINER_NAME /bin/bash\
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+CONTAINER_NAME="${RHO_LIBERO_CONTAINER_NAME:-rho-libero-interactive}"
+HF_CACHE_DIR="${HF_HOME:-$HOME/.cache/huggingface}"
+
+mkdir -p "$HF_CACHE_DIR" "$ROOT_DIR/outputs"
+
+docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+docker_args=(
+  run
+  --gpus all
+  --ipc=host
+  --ulimit memlock=-1
+  --ulimit stack=67108864
+  --rm
+  --volume "$ROOT_DIR:/workspace"
+  --volume "$HF_CACHE_DIR:/hf_home"
+  --env "HF_TOKEN=${HF_TOKEN:-}"
+  --env "WANDB_API_KEY=${WANDB_API_KEY:-}"
+  --env "WANDB_BASE_URL=${WANDB_BASE_URL:-}"
+  --name "$CONTAINER_NAME"
+  --detach
+)
+
+if [[ -n "${RHO_DATA_DIR:-}" ]]; then
+  if [[ ! -d "$RHO_DATA_DIR" ]]; then
+    echo "RHO_DATA_DIR does not exist: $RHO_DATA_DIR" >&2
+    exit 1
+  fi
+  docker_args+=(--volume "$RHO_DATA_DIR:/data")
+fi
+
+docker_args+=(rho-libero:latest tail -f /dev/null)
+
+docker "${docker_args[@]}"
+docker exec -it "$CONTAINER_NAME" /bin/bash

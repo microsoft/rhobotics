@@ -45,7 +45,7 @@ def generate_action_by_episode(policy, episode, device, num_action_steps=8, deno
     tactile_actions = []
     gt_tactile_actions = []
     for start in range(0, len(episode), num_action_steps):
-        # TODO currently this runs B=1 sequentially, we could speed up by batching multiple chunks
+        # Process chunks sequentially with batch size one.
         obs = episode[start]
         gt_action_chunk = torch.from_numpy(np.array(obs[ACTION])).unsqueeze(0).to(device, dtype=torch.float32)
 

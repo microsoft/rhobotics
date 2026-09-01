@@ -1,13 +1,20 @@
 """Tests for rho.eval.policy_interface module."""
 
+import logging
 from dataclasses import dataclass, field
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 from torch import Tensor, nn
 
-from rho.eval.policy_interface import PolicyInterface, PolicyInterfaceConfig, _move_transforms_to_device
+from rho.eval.policy_interface import (
+    PolicyInterface,
+    PolicyInterfaceConfig,
+    _move_transforms_to_device,
+    validate_rtc_horizons,
+)
 
 # =============================================================================
 # Helpers — lightweight mock policy that satisfies PolicyInterface's needs
@@ -181,6 +188,10 @@ class TestPolicyInterfaceConfig:
         )
         assert cfg.eval_mode == "rtc"
 
+    def test_post_init_rejects_invalid_guidance_schedule(self):
+        with pytest.raises(ValueError, match="guidance_schedule"):
+            PolicyInterfaceConfig(policy=_MockPolicy(), guidance_schedule="invalid")
+
 
 # =============================================================================
 # Tests for PolicyInterface
@@ -229,6 +240,60 @@ class TestPolicyInterfaceInit:
         assert pi.device == "cpu"
         assert pi.horizon == 7
         assert pi.execution_horizon == 3
+
+    def test_execution_horizon_override(self):
+        """Serving config can override checkpoint n_action_steps for RTC cadence."""
+        policy = _MockPolicy(config=_MockPolicyConfig(chunk_size=32, n_action_steps=32))
+        policy.model = MagicMock()
+        policy.model.action_expert = MagicMock()
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=_identity_transform,
+            output_transforms=_identity_transform,
+            eval_mode="rtc",
+            inference_delay=9,
+            execution_horizon=16,
+            beta=15,
+        )
+
+        pi = PolicyInterface(cfg)
+
+        assert pi.execution_horizon == 16
+        assert policy.config.n_action_steps == 32
+
+    def test_invalid_fallback_horizon_names_explicit_override(self):
+        policy = _MockPolicy(config=_MockPolicyConfig(chunk_size=4, n_action_steps=4))
+        policy.model = MagicMock()
+        policy.model.action_expert = MagicMock()
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=_identity_transform,
+            output_transforms=_identity_transform,
+            eval_mode="rtc",
+            inference_delay=1,
+            beta=0.5,
+        )
+
+        with pytest.raises(ValueError, match="execution_horizon was not set") as exc_info:
+            PolicyInterface(cfg)
+
+        assert "policy.config.n_action_steps (4)" in str(exc_info.value)
+        assert "Set execution_horizon explicitly" in str(exc_info.value)
+
+    def test_init_rejects_guidance_schedule_mutated_after_config_creation(self):
+        policy = _MockPolicy()
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=_identity_transform,
+            output_transforms=_identity_transform,
+        )
+        cfg.guidance_schedule = "invalid"
+
+        with pytest.raises(ValueError, match="guidance_schedule"):
+            PolicyInterface(cfg)
 
     def test_obs_queue_created_for_multi_step_deltas(self, identity_transforms):
         """Obs queue should be created when delta_indices has >1 entry."""
@@ -367,6 +432,134 @@ class TestProcessObsQueue:
         assert result2["observation.state"][0, 0, 0].item() == 1.0  # previous
         assert result2["observation.state"][0, 1, 0].item() == 2.0  # current
 
+    def test_emits_is_pad_mask_matching_dataset(self, identity_transforms):
+        """process_obs_queue should emit `{key}_is_pad` mirroring dataset getitem.
+
+        At the start of an episode the earliest history steps are padded with the
+        oldest available observation and must be flagged True; once enough history
+        has accumulated the mask must be all False.
+        """
+        config = _MockPolicyConfig(
+            delta_indices_dict={
+                "observation.state": [-1, 0],
+                "observation.image.0": [0],
+                "action": [0],
+            }
+        )
+        policy = _MockPolicy(config=config)
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=identity_transforms,
+            output_transforms=identity_transforms,
+        )
+        pi = PolicyInterface(cfg)
+
+        # First observation: the -1 step falls before the start -> padded.
+        result1 = pi.process_obs_queue({"observation.state": torch.ones(1, 1, 3)})
+        pad1 = result1["observation.state_is_pad"]
+        assert pad1.shape == (1, 2)
+        assert pad1.dtype == torch.bool
+        assert pad1[0, 0].item() is True  # padded oldest step
+        assert pad1[0, 1].item() is False  # current step
+
+        # Second observation: full history available -> nothing padded.
+        result2 = pi.process_obs_queue({"observation.state": torch.ones(1, 1, 3) * 2})
+        pad2 = result2["observation.state_is_pad"]
+        assert pad2.shape == (1, 2)
+        assert pad2[0, 0].item() is False
+        assert pad2[0, 1].item() is False
+
+    def test_multi_step_image_without_temporal_axis(self, identity_transforms):
+        """UR5-style images arrive as (B, C, H, W) with no temporal axis.
+
+        process_obs_queue must add the temporal axis itself rather than treating
+        the channel dimension as time, so a 2-step history yields
+        (B, n_obs, C, H, W) matching the dataset getitem.
+        """
+        config = _MockPolicyConfig(
+            delta_indices_dict={
+                "observation.image.0": [-1, 0],  # 2-step image history
+                "action": [0],
+            }
+        )
+        policy = _MockPolicy(config=config)
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=identity_transforms,
+            output_transforms=identity_transforms,
+        )
+        pi = PolicyInterface(cfg)
+
+        # (batch, C, H, W) — no temporal axis.
+        img1 = torch.ones(1, 3, 4, 4)
+        result1 = pi.process_obs_queue({"observation.image.0": img1})
+        # Channels must be preserved; a temporal axis of size 2 is added.
+        assert result1["observation.image.0"].shape == (1, 2, 3, 4, 4)
+        pad1 = result1["observation.image.0_is_pad"]
+        assert pad1.shape == (1, 2)
+        assert pad1[0, 0].item() is True  # padded oldest step
+        assert pad1[0, 1].item() is False
+
+        img2 = torch.ones(1, 3, 4, 4) * 2
+        result2 = pi.process_obs_queue({"observation.image.0": img2})
+        out = result2["observation.image.0"]
+        assert out.shape == (1, 2, 3, 4, 4)
+        # [previous, current] along the temporal axis.
+        assert out[0, 0, 0, 0, 0].item() == 1.0
+        assert out[0, 1, 0, 0, 0].item() == 2.0
+
+    def test_multi_step_image_with_temporal_axis(self, identity_transforms):
+        """TabletopSim-style images arrive as (B, seq_len, C, H, W).
+
+        The existing temporal axis must be consumed as time (not re-added).
+        """
+        config = _MockPolicyConfig(
+            delta_indices_dict={
+                "observation.image.0": [-1, 0],
+                "action": [0],
+            }
+        )
+        policy = _MockPolicy(config=config)
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=identity_transforms,
+            output_transforms=identity_transforms,
+        )
+        pi = PolicyInterface(cfg)
+
+        # (batch, seq_len=1, C, H, W) — explicit temporal axis.
+        img = torch.ones(1, 1, 3, 4, 4)
+        result = pi.process_obs_queue({"observation.image.0": img})
+        assert result["observation.image.0"].shape == (1, 2, 3, 4, 4)
+
+    def test_multi_step_state_without_temporal_axis(self, identity_transforms):
+        """UR5-style states arrive as (B, dim) with no temporal axis."""
+        config = _MockPolicyConfig(
+            delta_indices_dict={
+                "observation.state": [-1, 0],
+                "action": [0],
+            }
+        )
+        policy = _MockPolicy(config=config)
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=identity_transforms,
+            output_transforms=identity_transforms,
+        )
+        pi = PolicyInterface(cfg)
+
+        result1 = pi.process_obs_queue({"observation.state": torch.ones(1, 3)})
+        assert result1["observation.state"].shape == (1, 2, 3)
+        result2 = pi.process_obs_queue({"observation.state": torch.ones(1, 3) * 2})
+        out = result2["observation.state"]
+        assert out.shape == (1, 2, 3)
+        assert out[0, 0, 0].item() == 1.0
+        assert out[0, 1, 0].item() == 2.0
+
 
 class TestProcessObservation:
     """Tests for PolicyInterface.process_observation."""
@@ -487,6 +680,150 @@ class TestGetActionChunk:
         }
         action = policy_interface.get_action_chunk(obs)
         assert isinstance(action, torch.Tensor)
+
+    def test_rtc_forwards_explicit_noise(self):
+        """RTC should forward caller-supplied noise to the policy."""
+        config = _MockPolicyConfig(chunk_size=4, n_action_steps=2, action_dim=2)
+        policy = _MockPolicy(config=config)
+        policy.model = MagicMock()
+        policy.model.action_expert = MagicMock()
+        policy.sample_actions_rtc = MagicMock(return_value={"actions": torch.zeros(1, 4, 2)})
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=_identity_transform,
+            output_transforms=_identity_transform,
+            eval_mode="rtc",
+            inference_delay=1,
+            beta=0.5,
+        )
+        pi = PolicyInterface(cfg)
+        noise = torch.full((1, 4, 2), 7.0)
+
+        pi.get_action_chunk({"observation.state": torch.zeros(1, 1, 2)}, noise=noise)
+
+        seen_noise = policy.sample_actions_rtc.call_args.kwargs["noise"]
+        torch.testing.assert_close(seen_noise, noise)
+
+    @pytest.mark.parametrize(
+        "num_actions_executed",
+        [
+            -1,
+            5,
+            1.5,
+            True,
+            torch.tensor([1, 2]),
+            np.array([1, 2]),
+        ],
+    )
+    def test_rtc_rejects_invalid_num_actions_executed(self, num_actions_executed):
+        config = _MockPolicyConfig(chunk_size=4, n_action_steps=2, action_dim=2)
+        policy = _MockPolicy(config=config)
+        policy.model = MagicMock()
+        policy.model.action_expert = MagicMock()
+        policy.sample_actions_rtc = MagicMock(return_value={"actions": torch.zeros(1, 4, 2)})
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=_identity_transform,
+            output_transforms=_identity_transform,
+            eval_mode="rtc",
+            inference_delay=1,
+            beta=0.5,
+        )
+        pi = PolicyInterface(cfg)
+        pi.get_action_chunk({"observation.state": torch.zeros(1, 1, 2)})
+
+        with pytest.raises(ValueError, match="num_actions_executed"):
+            pi.get_action_chunk(
+                {
+                    "observation.state": torch.zeros(1, 1, 2),
+                    "num_actions_executed": num_actions_executed,
+                }
+            )
+
+    def test_rtc_accepts_full_cached_chunk_as_executed(self):
+        config = _MockPolicyConfig(chunk_size=4, n_action_steps=2, action_dim=2)
+        policy = _MockPolicy(config=config)
+        policy.model = MagicMock()
+        policy.model.action_expert = MagicMock()
+        policy.sample_actions_rtc = MagicMock(return_value={"actions": torch.zeros(1, 4, 2)})
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=_identity_transform,
+            output_transforms=_identity_transform,
+            eval_mode="rtc",
+            inference_delay=1,
+            beta=0.5,
+        )
+        pi = PolicyInterface(cfg)
+        pi.get_action_chunk({"observation.state": torch.zeros(1, 1, 2)})
+
+        pi.get_action_chunk(
+            {
+                "observation.state": torch.zeros(1, 1, 2),
+                "num_actions_executed": 4,
+            }
+        )
+
+        assert policy.sample_actions_rtc.call_args.kwargs["prev_actions"] is None
+
+    def test_rtc_reframes_cached_absolute_actions(self):
+        """RTC should transform cached absolute actions into the current policy frame."""
+        config = _MockPolicyConfig(chunk_size=4, n_action_steps=2, action_dim=2)
+        policy = _MockPolicy(config=config)
+        policy.model = MagicMock()
+        policy.model.action_expert = MagicMock()
+
+        first_policy_chunk = torch.zeros(1, 4, 2)
+        second_policy_chunk = torch.ones(1, 4, 2)
+        policy.sample_actions_rtc = MagicMock(
+            side_effect=[
+                {"actions": first_policy_chunk},
+                {"actions": second_policy_chunk},
+            ]
+        )
+
+        def to_current_policy_frame(obs):
+            if "action" in obs:
+                timestep = torch.arange(obs["action"].shape[-2]).view(1, -1, 1)
+                obs["action"] = obs["action"] - obs["observation.state"][:, -1:, :] + timestep
+            return obs
+
+        def to_absolute_actions(obs):
+            timestep = torch.arange(obs["action"].shape[-2]).view(1, -1, 1)
+            obs["action"] = obs["action"] + obs["observation.state"][:, -1:, :] - timestep
+            return obs
+
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=to_current_policy_frame,
+            output_transforms=to_absolute_actions,
+            eval_mode="rtc",
+            inference_delay=1,
+            beta=5.0,
+        )
+        pi = PolicyInterface(cfg)
+
+        first_action = pi.get_action_chunk({"observation.state": torch.full((1, 1, 2), 10.0)})
+        expected_first = torch.tensor([10.0, 9.0, 8.0, 7.0]).view(1, 4, 1).expand(-1, -1, 2)
+        torch.testing.assert_close(first_action, expected_first)
+        torch.testing.assert_close(pi.prev_action_chunk, first_action)
+
+        second_action = pi.get_action_chunk(
+            {
+                "observation.state": torch.full((1, 1, 2), 12.0),
+                "num_actions_executed": 2,
+            }
+        )
+
+        rtc_prev_actions = policy.sample_actions_rtc.call_args.kwargs["prev_actions"]
+        torch.testing.assert_close(rtc_prev_actions, torch.full((1, 2, 2), -4.0))
+        expected_second = torch.tensor([13.0, 12.0, 11.0, 10.0]).view(1, 4, 1).expand(-1, -1, 2)
+        torch.testing.assert_close(second_action, expected_second)
+        torch.testing.assert_close(pi.prev_action_chunk, second_action)
 
     def test_reset_flag_clears_history_buffers(self, identity_transforms):
         """When obs['_reset_'] is true, internal history buffers should be cleared first."""
@@ -646,7 +983,7 @@ class TestPolicyInterfaceWithDataConfig:
         # Transforms should have been set from data_config
         assert pi.input_transforms is not None
         assert pi.output_transforms is not None
-        mock_data_config.get_transforms.assert_called_once_with(remap=False)
+        mock_data_config.get_transforms.assert_called_once_with(remap=False, training=False)
         mock_data_config.get_action_denormalization.assert_called_once()
 
     def test_explicit_transforms_override_data_config(self):
@@ -669,3 +1006,50 @@ class TestPolicyInterfaceWithDataConfig:
         # output_transforms should also stay custom since it was explicitly provided
         assert pi.output_transforms is custom_transform
         mock_data_config.get_transforms.assert_not_called()
+
+
+# =============================================================================
+# Tests for validate_rtc_horizons
+# =============================================================================
+
+
+class TestValidateRtcHorizons:
+    """Tests for the validate_rtc_horizons pure function."""
+
+    def test_raises_when_sum_exceeds_chunk_size(self):
+        """inference_delay + execution_horizon > chunk_size must raise ValueError."""
+        with pytest.raises(ValueError) as exc_info:
+            validate_rtc_horizons(inference_delay=6, execution_horizon=50, chunk_size=50)
+        msg = str(exc_info.value)
+        assert "6" in msg
+        assert "50" in msg
+
+    def test_valid_config_does_not_raise(self):
+        """inference_delay + execution_horizon <= chunk_size should not raise."""
+        validate_rtc_horizons(inference_delay=6, execution_horizon=8, chunk_size=32)
+
+    def test_exact_sum_warns_degenerate_mask(self, caplog):
+        """When sum == chunk_size and inference_delay >= chunk_size - execution_horizon, warn."""
+        with caplog.at_level(logging.WARNING, logger="rho.eval.policy_interface"):
+            validate_rtc_horizons(inference_delay=6, execution_horizon=26, chunk_size=32)
+        assert any("hard-masking" in r.message or "hard masking" in r.message for r in caplog.records)
+
+    def test_exact_sum_does_not_raise(self):
+        """inference_delay + execution_horizon == chunk_size is the boundary and must not raise."""
+        validate_rtc_horizons(inference_delay=6, execution_horizon=26, chunk_size=32)
+
+    def test_zero_delay_full_horizon_warns_no_latency_benefit(self, caplog):
+        """execution_horizon >= chunk_size triggers the 'no latency benefit' warning."""
+        with caplog.at_level(logging.WARNING, logger="rho.eval.policy_interface"):
+            validate_rtc_horizons(inference_delay=0, execution_horizon=50, chunk_size=50)
+        assert any("no latency benefit" in r.message for r in caplog.records)
+
+    def test_zero_delay_full_horizon_does_not_raise(self):
+        """inference_delay=0, execution_horizon=chunk_size is non-fatal."""
+        validate_rtc_horizons(inference_delay=0, execution_horizon=50, chunk_size=50)
+
+    def test_healthy_config_no_warnings(self, caplog):
+        """A properly configured RTC run should produce no warnings."""
+        with caplog.at_level(logging.WARNING, logger="rho.eval.policy_interface"):
+            validate_rtc_horizons(inference_delay=4, execution_horizon=8, chunk_size=32)
+        assert caplog.records == []

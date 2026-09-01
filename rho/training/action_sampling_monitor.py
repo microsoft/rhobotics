@@ -37,6 +37,10 @@ class ActionSamplingMonitor:
         Returns:
             Dictionary of monitoring metrics
         """
+        return self.monitor_batches(training_dataloader, step, wandb_logger)
+
+    @torch.no_grad()
+    def monitor_batches(self, batches, step: int, wandb_logger=None) -> dict[str, float]:
         if not self.should_monitor(step):
             return {}
 
@@ -57,32 +61,34 @@ class ActionSamplingMonitor:
             unit="sample",
             leave=False,
         )
-        for batch in training_dataloader:
+        for batch in batches:
             if sample_count >= self.num_samples:
                 break
 
-            # Move batch to device
-            for key in batch:
-                if isinstance(batch[key], torch.Tensor):
-                    batch[key] = batch[key].to(self.device, non_blocking=True)
+            # Build a model batch without mutating the original batch. This
+            # matters for lookahead monitoring, where the same batch is later
+            # used for training.
+            model_batch = {
+                key: value.to(self.device, non_blocking=True) if isinstance(value, torch.Tensor) else value
+                for key, value in batch.items()
+            }
 
-            batch_size = batch["action"].shape[0]
+            batch_size = model_batch["action"].shape[0]
 
             # Get ground truth actions
-            ground_truth_actions = batch["action"]
+            ground_truth_actions = model_batch["action"]
 
             # Remove action labels, otherwise they get put into the queues
-            del batch["action"]
+            del model_batch["action"]
 
-            # Squeeze out time dimension if present
-            # TODO: Handle variable-length sequences properly
-            batch["observation.state"] = batch["observation.state"].squeeze(1)
+            # Monitoring currently assumes a fixed single-step state sequence.
+            model_batch["observation.state"] = model_batch["observation.state"].squeeze(1)
 
             # Sample actions
             policy.reset()
             sampled_actions = []
             for t in range(n_action_steps):
-                sampled_action = policy.select_action(batch)
+                sampled_action = policy.select_action(model_batch)
                 sampled_actions.append(sampled_action)
                 progress.set_postfix(
                     batch=sample_count // max(batch_size, 1), action_step=f"{t + 1}/{n_action_steps}"

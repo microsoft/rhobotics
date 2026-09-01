@@ -1,5 +1,6 @@
 import abc
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from rho.common.constants import (
     OBSERVATION_STATE,
     OBSERVATION_TACTILE,
 )
+from rho.common.registry import get_registered_choice_type
 from rho.common.types import PolicyFeature
 from rho.models.optimizer import OptimizerConfig
 from rho.models.schedule import LRSchedulerConfig
@@ -48,6 +50,15 @@ class PolicyConfig(ChoiceRegistry):
     dtype: torch.dtype = torch.bfloat16
     lr_scheduler: LRSchedulerConfig = None
     optimizer: OptimizerConfig = None
+
+    @property
+    def type(self) -> str:
+        """Return the registered policy identity used for factory dispatch.
+
+        ``name`` remains available for display metadata and as a compatibility
+        fallback for unregistered programmatic configs.
+        """
+        return get_registered_choice_type(self, legacy_name=self.name)
 
     @property
     def robot_state_feature(self):
@@ -92,6 +103,14 @@ class PolicyConfig(ChoiceRegistry):
     def action_delta_indices(self) -> list:
         return [0]
 
+    @property
+    def reward_delta_indices(self) -> list | None:
+        return None
+
+    @property
+    def tactile_observation_delta_indices(self) -> list | None:
+        return None
+
     def get_optimizer_preset(self) -> OptimizerConfig | None:
         return self.optimizer
 
@@ -119,6 +138,16 @@ class PreTrainedPolicy(nn.Module, abc.ABC):
         optimizer.
         """
         raise NotImplementedError
+
+    def get_named_param_groups(self) -> list[dict] | None:
+        """Optional per-group LR breakdown for the optimizer.
+
+        Return a list of dicts ``[{"name": str, "params": [...], "lr": float}, ...]``
+        to drive a multi-group optimizer with per-group learning rates. Return
+        ``None`` (default) to fall back to a single flat group built from
+        ``self.parameters()``.
+        """
+        return None
 
     @abc.abstractmethod
     def reset(self):
@@ -193,7 +222,25 @@ class PreTrainedPolicy(nn.Module, abc.ABC):
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
         logger.info(f"Loading pretrained weights from: {checkpoint_path}")
+        from rho.checkpoints import is_checkpoint_bundle, load_bundle_weights
+
+        if is_checkpoint_bundle(checkpoint_path):
+            load_bundle_weights(self, checkpoint_path, strict=True)
+            self._post_checkpoint_load()
+            if hasattr(self, "device"):
+                self.to(self.device)
+                logger.info(f"Pretrained weights loaded and moved to {self.device}")
+            else:
+                logger.info("Pretrained weights loaded successfully")
+            return
+
+        legacy_load_started = time.perf_counter()
         checkpoint = torch.load(checkpoint_path, weights_only=False, map_location="cpu")
+        logger.info(
+            "Legacy checkpoint deserialized in %.2fs from %s",
+            time.perf_counter() - legacy_load_started,
+            checkpoint_path,
+        )
 
         # Handle different checkpoint formats
         if "policy_state_dict" in checkpoint:

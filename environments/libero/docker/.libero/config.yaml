@@ -1,5 +1,0 @@
-benchmark_root: /azureml-envs/default/lib/python3.10/site-packages/libero/libero
-bddl_files: /azureml-envs/default/lib/python3.10/site-packages/libero/libero/./bddl_files
-init_states: /azureml-envs/default/lib/python3.10/site-packages/libero/libero/./init_files
-datasets: /azureml-envs/default/lib/python3.10/site-packages/libero/libero/../datasets
-assets: /azureml-envs/default/lib/python3.10/site-packages/libero/libero/./assets

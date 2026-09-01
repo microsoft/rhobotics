@@ -1,16 +1,19 @@
 import logging
+from collections import deque
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 
 import draccus
 import torch
 from flask import json
-from lerobot.utils.utils import cycle
 from lerobot.utils.device_utils import get_safe_torch_device
+from lerobot.utils.utils import cycle
 from tqdm import tqdm
 
+from rho.checkpoints import resolve_checkpoint
+from rho.common.serialization import serialize_to_dict
 from rho.common.transforms import ConsolidateTransform, TransformConfig
 from rho.common.wandb_logging import WandBConfig, WandBLogger
 from rho.datasets import LeRobotDatasetConfig, MultiDatasetConfig, make_dataloader
@@ -31,29 +34,109 @@ from rho.training.validation_probe import ValidationProbe
 from rho.utils import init_logging
 
 # Initialize logging early (before draccus parsing) - will be reconfigured later with accelerator
-# Uses ALKU_LOG_LEVEL env var if set, otherwise defaults to INFO
+# Uses RHO_LOG_LEVEL if set, otherwise defaults to INFO.
 init_logging()
 
 logger = logging.getLogger(__name__)
+
+DatasetConfig = LeRobotDatasetConfig | MultiDatasetConfig
+
+
+def resolve_training_checkpoint(cfg: "TrainConfig") -> Path | None:
+    """Resolve the model source selected by training configuration."""
+    if cfg.run_name is not None:
+        existing = find_latest_checkpoint(cfg.checkpoint_folder)
+        if existing is not None:
+            logger.info("run_name=%r: resuming from %s", cfg.run_name, existing)
+            cfg.resume = True
+            return existing
+
+    if cfg.resume and cfg.pretrained_checkpoint is None:
+        raise ValueError("resume=True requires a checkpoint in run_name or an explicit pretrained_checkpoint")
+
+    source = cfg.pretrained_checkpoint
+    if source is None:
+        source = getattr(cfg.policy, "pretrained_repo_id", None)
+    if source is None:
+        return None
+
+    return resolve_checkpoint(
+        source,
+        revision=cfg.checkpoint_revision,
+        cache_dir=cfg.checkpoint_cache_dir,
+        include_training_state=cfg.resume,
+    )
+
+
+def initialize_checkpoint_folder(cfg: "TrainConfig", *, timestamp: str | None = None) -> Path:
+    """Create the checkpoint folder once training execution begins.
+
+    Timestamped folders cannot be created in ``TrainConfig.__post_init__``
+    because every distributed worker decodes the config independently. The
+    Accelerate entry point supplies one timestamp broadcast by the main
+    process; single-process training lets this function generate it locally.
+    """
+    if cfg.checkpoint_folder is not None:
+        cfg.checkpoint_folder.mkdir(parents=True, exist_ok=True)
+        return cfg.checkpoint_folder
+
+    requested_local_checkpoint = (
+        cfg.pretrained_checkpoint is not None and Path(cfg.pretrained_checkpoint).expanduser().exists()
+    )
+    if cfg.resume and cfg.resolved_checkpoint is not None and requested_local_checkpoint:
+        cfg.checkpoint_folder = cfg.resolved_checkpoint.parent
+    else:
+        timestamp = timestamp or datetime.now().strftime("%m%d_%H%M%S")
+        cfg.checkpoint_folder = Path(cfg.output_dir) / timestamp / "checkpoints"
+    cfg.checkpoint_folder.mkdir(parents=True, exist_ok=True)
+    return cfg.checkpoint_folder
+
+
+def collect_lookahead_monitor_batches(training_iter, lookahead_batches: deque, num_samples: int) -> list:
+    """Return enough future batches for monitoring without growing the lookahead buffer unnecessarily.
+
+    Batches already in ``lookahead_batches`` have been fetched but not yet trained
+    on, so they are the preferred monitor source. Only the missing batches are
+    fetched from ``training_iter`` and added to the buffer for later training.
+    """
+    sample_count = 0
+    monitor_batches = []
+
+    for monitor_batch in lookahead_batches:
+        monitor_batches.append(monitor_batch)
+        sample_count += monitor_batch["action"].shape[0]
+        if sample_count >= num_samples:
+            return monitor_batches
+
+    while sample_count < num_samples:
+        monitor_batch = next(training_iter)
+        monitor_batches.append(monitor_batch)
+        lookahead_batches.append(monitor_batch)
+        sample_count += monitor_batch["action"].shape[0]
+
+    return monitor_batches
 
 
 @dataclass
 class TrainConfig:
     wandb: WandBConfig = field(default_factory=WandBConfig)
 
-    dataset: LeRobotDatasetConfig | MultiDatasetConfig = None
-    validation_dataset: LeRobotDatasetConfig | MultiDatasetConfig | None = None
+    dataset: DatasetConfig = None
+    validation_dataset: DatasetConfig | None = None
 
     policy: PolicyConfig = field(default_factory=PolicyConfig)
-    # Absolute path to a pretrained checkpoint
+    # Explicit local path or Hugging Face repository overriding the policy default.
     pretrained_checkpoint: str | Path | None = None
+    checkpoint_revision: str | None = None
+    checkpoint_cache_dir: str | None = None
+    resolved_checkpoint: Path | None = field(default=None, init=False, repr=False, compare=False)
     # Whether to resume training from the last checkpoint
     resume: bool = False
     # A fixed name for the output run folder.  When set, the output directory
     # will be ``<output_dir>/<run_name>/checkpoints`` instead of using a
-    # timestamp.  If that folder already contains a checkpoint the job will
-    # automatically resume from it (sets ``resume=True`` and
-    # ``pretrained_checkpoint`` accordingly).
+    # timestamp. If that folder already contains a checkpoint, runtime
+    # resolution automatically resumes it without replacing the authored
+    # ``pretrained_checkpoint`` source.
     run_name: str | None = None
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -68,10 +151,18 @@ class TrainConfig:
     output_dir: str = "outputs/training"
     save_checkpoint_every: int = 1000  # Save checkpoint every N steps
     keep_checkpoint_interval: int = 10000
+    # Older retained checkpoints keep model weights but drop optimizer and
+    # scheduler state unless their step matches this interval. None keeps full
+    # training state only in the newest checkpoint.
+    keep_training_state_interval: int | None = None
     mixed_precision: str = "no"  # "no", "fp16", "bf16"
     gradient_accumulation_steps: int = 1
     logging_interval: int = 100  # Log metrics every N steps
     grad_clip_norm: float | None = 10.0  # Gradient clipping norm
+    # Lightweight host-memory logging for diagnosing dataloader / eval memory
+    # growth. Logged under train/memory/* on the main process.
+    memory_monitoring: bool = False
+    memory_monitor_interval: int = 100
 
     # Evaluation settings
     validation_interval: int = 1000  # Steps between validation checks
@@ -92,6 +183,7 @@ class TrainConfig:
     action_monitoring: bool = False  # Enable/disable action sampling monitoring
     action_monitor_interval: int = 1000  # Steps between action sampling monitoring
     action_monitor_samples: int = 16  # Number of samples to use for monitoring
+    action_monitor_source: str = "lookahead"  # "lookahead", "training_fresh", or "validation"
     set_static_graph: bool = False
 
     validation_probe: bool = False  # Enable/disable the validation probe
@@ -105,10 +197,26 @@ class TrainConfig:
     # Logging configuration
     log_level: str = "INFO"  # Logging level: DEBUG, INFO, WARNING, ERROR
 
+    def to_dict(self) -> dict:
+        """Serialize authored settings while excluding runtime checkpoint state."""
+        return {
+            config_field.name: serialize_to_dict(getattr(self, config_field.name))
+            for config_field in fields(self)
+            if config_field.name != "resolved_checkpoint"
+        }
+
     def __post_init__(self):
         """Validate the configuration"""
         logger.debug("Validating training configuration...")
         logger.debug(self.policy)
+        if self.keep_training_state_interval is not None and self.keep_training_state_interval <= 0:
+            raise ValueError("keep_training_state_interval must be positive or None")
+        if self.action_monitor_source not in {"lookahead", "training_fresh", "validation"}:
+            raise ValueError(
+                "action_monitor_source must be one of "
+                "'lookahead', 'training_fresh', or 'validation'; "
+                f"got {self.action_monitor_source!r}"
+            )
 
         # Expand environment variables in eval_dataset_root_dir
         if self.eval_dataset_root_dir is not None:
@@ -125,38 +233,17 @@ class TrainConfig:
             if self.num_workers is not None:
                 self.validation_dataset.num_workers = self.num_workers
 
-        # --- Determine the checkpoint folder ---
         if self.run_name is not None:
-            # Fixed, named run folder – enables automatic restart/resume
+            # Fixed, named run folder enables automatic restart/resume.
             self.checkpoint_folder = Path(self.output_dir) / self.run_name / "checkpoints"
-            self.checkpoint_folder.mkdir(parents=True, exist_ok=True)
-
-            # Auto-resume: if there's already a checkpoint, use it
-            if not self.resume and self.pretrained_checkpoint is None:
-                existing = find_latest_checkpoint(self.checkpoint_folder)
-                if existing is not None:
-                    logger.info(
-                        f"run_name='{self.run_name}': found existing checkpoint "
-                        f"{existing}, enabling auto-resume."
-                    )
-                    self.pretrained_checkpoint = str(existing)
-                    self.resume = True
-        elif not self.resume:
-            # Default: timestamp-based folder
-            timestamp = str(datetime.now().strftime("%m%d_%H%M%S"))
-            self.checkpoint_folder = Path(self.output_dir) / timestamp / "checkpoints"
-            self.checkpoint_folder.mkdir(parents=True, exist_ok=True)
         else:
-            self.checkpoint_folder = Path(self.pretrained_checkpoint).parent
+            # Timestamped folders are initialized by the training entry point.
+            # In distributed training the main process broadcasts one timestamp
+            # so workers cannot create competing run directories.
+            self.checkpoint_folder = None
 
         if not isinstance(self.policy, PolicyConfig):
             raise ValueError("Policy must be a PolicyConfig instance or a dict")
-
-        if self.pretrained_checkpoint and not Path(self.pretrained_checkpoint).exists():
-            raise FileNotFoundError(f"Pretrained checkpoint not found: {self.pretrained_checkpoint}")
-
-        if self.pretrained_checkpoint is None and self.resume:
-            raise ValueError("Cannot resume training without a pretrained checkpoint")
 
         if self.policy.feature_dict is None:
             self.policy.feature_dict = self.dataset.transformed_feature_dict
@@ -243,7 +330,6 @@ def make_everything(cfg: TrainConfig, device: torch.device = None):
 
     if device is None:
         device = get_safe_torch_device(cfg.device, log=True)
-    # Create the dataloader
     training_dataloader, training_sampler = make_dataloader(cfg.dataset, cfg.policy)
     validation_dataloader = None
     if cfg.validation_dataset is not None:
@@ -264,20 +350,16 @@ def make_everything(cfg: TrainConfig, device: torch.device = None):
     dataset_length = cfg.dataset.get_length()
     training_metrics_recorder = TrainLogger(dataset_length=dataset_length)
 
-    if cfg.resume or cfg.pretrained_checkpoint is not None:
-        if cfg.pretrained_checkpoint is None:
-            checkpoint_path = Path(cfg.checkpoint_folder / "checkpoint_latest.pt")
-        else:
-            checkpoint_path = Path(cfg.pretrained_checkpoint)
-
-        if checkpoint_path.exists():
-            logger.info(f"Resuming from checkpoint: {checkpoint_path}")
-        else:
-            raise FileNotFoundError(
-                f"Checkpoint not found at {checkpoint_path}. "
-                "Please provide a valid pretrained_checkpoint or set resume to False."
-            )
-
+    if cfg.resolved_checkpoint is None:
+        cfg.resolved_checkpoint = resolve_training_checkpoint(cfg)
+    if cfg.resolved_checkpoint is not None:
+        checkpoint_path = cfg.resolved_checkpoint
+        logger.info(
+            "Loading %s checkpoint %s (requested source: %s)",
+            "resume" if cfg.resume else "pretrained",
+            checkpoint_path,
+            cfg.pretrained_checkpoint or getattr(cfg.policy, "pretrained_repo_id", None),
+        )
         if cfg.resume:
             step, optimizer, lr_scheduler, training_sampler, training_metrics_recorder = load_training_state(
                 checkpoint_path, optimizer, lr_scheduler, training_sampler, training_metrics_recorder
@@ -305,21 +387,16 @@ def train(cfg: TrainConfig) -> None:
     init_logging(console_level=cfg.log_level)
 
     # Setup output directory
-
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    cfg.resolved_checkpoint = resolve_training_checkpoint(cfg)
+    initialize_checkpoint_folder(cfg)
     logger.info(f"Checkpoints will be saved to: {cfg.checkpoint_folder}")
 
     if cfg.wandb.id is None:
         cfg.wandb.id = (
             "default_job_" + cfg.checkpoint_folder.parent.stem
         )  # grab the timestamp to match wandb job name with checkpoint storage
-
-    # save the trainconfig for future reference and manual eval
-    # print the TrainConfig for local debugging
-    # print("#################### Training config ####################")
-    # pprint(asdict(cfg))
-    # print("#################### Training config ####################")
 
     serializable_cfg = serialize_train_config(cfg)
     with open(Path(cfg.checkpoint_folder.parent / "train_config.json"), "w") as f:
@@ -356,7 +433,7 @@ def train(cfg: TrainConfig) -> None:
         and validation_dataloader is not None
     ):
         try:
-            denorm_transform = cfg.dataset.get_action_denormalization()
+            denorm_transform = cfg.validation_dataset.get_action_denormalization()
         except Exception:
             logger.warning(
                 "Failed to get action denormalization, validation probe will run without denormalization",
@@ -371,6 +448,7 @@ def train(cfg: TrainConfig) -> None:
         )
 
     training_iter = cycle(training_dataloader)
+    lookahead_batches = deque()
     wandb_logger = WandBLogger(cfg.wandb)
     # Create progress bar
     progress_bar = tqdm(range(step, cfg.steps), desc="Training", initial=step, total=cfg.steps, unit="step")
@@ -390,7 +468,7 @@ def train(cfg: TrainConfig) -> None:
     for _ in progress_bar:
         step += 1
         with training_metrics_recorder.log_time("train/dataloading_s"):
-            batch = next(training_iter)
+            batch = lookahead_batches.popleft() if lookahead_batches else next(training_iter)
 
         # Apply training transforms and step them
         train_transforms.train()
@@ -456,10 +534,18 @@ def train(cfg: TrainConfig) -> None:
             wandb_logger.log(eval_metrics, step=step, prefix="eval")
 
         if cfg.action_monitoring and step % cfg.action_monitor_interval == 0:
-            monitor_dataloader = (
-                validation_dataloader if validation_dataloader is not None else training_dataloader
-            )
-            action_sampling_monitor.monitor_training_progress(monitor_dataloader, step, wandb_logger)
+            if cfg.action_monitor_source == "lookahead":
+                monitor_batches = collect_lookahead_monitor_batches(
+                    training_iter, lookahead_batches, cfg.action_monitor_samples
+                )
+                action_sampling_monitor.monitor_batches(monitor_batches, step, wandb_logger)
+            else:
+                monitor_dataloader = training_dataloader
+                if cfg.action_monitor_source == "validation":
+                    monitor_dataloader = (
+                        validation_dataloader if validation_dataloader is not None else training_dataloader
+                    )
+                action_sampling_monitor.monitor_training_progress(monitor_dataloader, step, wandb_logger)
 
         if step % cfg.save_checkpoint_every == 0:
             save_checkpoint(
@@ -472,6 +558,8 @@ def train(cfg: TrainConfig) -> None:
                 sampler=training_sampler,
                 lr_scheduler=lr_scheduler,
                 train_logger=training_metrics_recorder,
+                data_config=cfg.dataset,
+                keep_training_state_interval=cfg.keep_training_state_interval,
             )
 
         if step % cfg.logging_interval == 0:

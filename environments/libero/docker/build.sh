@@ -1,11 +1,10 @@
 #!/bin/bash
 
-# Build script for ALKU Libero container
-# This script builds the Docker image for ALKU Libero development
+# Build the Rho LIBERO container.
 
 set -e
 
-echo "Building ALKU Libero container..."
+echo "Building Rho LIBERO container..."
 
 # Change to the project root directory
 cd "$(dirname "$0")/../../.."

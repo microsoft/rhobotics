@@ -2,19 +2,15 @@
 Policy module initialization with automatic registration and factory function.
 """
 
+from rho.models.schedule import migrate_legacy_scheduler_config
 from rho.policies.base import PolicyConfig, PreTrainedPolicy
-from rho.policies.BC.behavioral_cloning import BehavioralCloningPolicy
-from rho.policies.diffusion.diffusion import DiffusionPolicy
 from rho.policies.dsrl.dsrl_policy import DSRLPolicy, DSRLPolicyConfig
 from rho.policies.dsrl.flowdagger_policy import FlowDAggerPolicy, FlowDAggerPolicyConfig
-#from rho.policies.pi0.modeling_pi0 import PI0Policy
-#from rho.policies.pi0fast.pi0fast_policy import PI0FASTPolicy
-from rho.policies.rhoalpha.configuration_rhoalpha import RhoAlphaConfig
-from rho.policies.rhoalpha.rhoalpha_policy import RhoAlphaPolicy
-from rho.policies.rhoalpha.rhoalpha_tactile import RhoAlphaTactilePolicy
+from rho.policies.rho import RhoPolicy
 
 # Registry to store policy classes
 POLICY_REGISTRY: dict[str, type[PreTrainedPolicy]] = {}
+POLICY_CONFIG_REGISTRY: dict[str, type[PolicyConfig]] = {}
 
 
 def register_policy(name: str):
@@ -23,16 +19,18 @@ def register_policy(name: str):
 
     Args:
         name: The name to register the policy under
-
-    Example:
-        @register_policy("BehavioralCloning")
-        class BehavioralCloningPolicy(PreTrainedPolicy):
-            pass
     """
 
     def decorator(cls: type[PreTrainedPolicy]):
+        try:
+            config_class = PolicyConfig.get_choice_class(name)
+        except KeyError:
+            raise ValueError(
+                f"Cannot register policy type {name!r} without a matching "
+                "PolicyConfig.register_subclass() registration"
+            ) from None
         POLICY_REGISTRY[name] = cls
-        cls.name = name  # Set the name attribute on the class
+        POLICY_CONFIG_REGISTRY[name] = config_class
         return cls
 
     return decorator
@@ -50,25 +48,33 @@ def make_policy(policy_cfg: PolicyConfig) -> PreTrainedPolicy:
 
     Raises:
         ValueError: If the policy name is not found in the registry
-
-    Example:
-        config = PolicyConfig(name="BehavioralCloning", feature_dict=features)
-        policy = make_policy(config)
     """
-    if policy_cfg.name is None:
-        raise ValueError("PolicyConfig.name must be specified")
+    policy_type = policy_cfg.type
 
-    if policy_cfg.name not in POLICY_REGISTRY:
+    if policy_type not in POLICY_REGISTRY:
         available_policies = list(POLICY_REGISTRY.keys())
         raise ValueError(
-            f"Policy '{policy_cfg.name}' not found in registry. Available policies: {available_policies}"
+            f"Policy type '{policy_type}' not found in registry. Available policies: {available_policies}"
         )
 
-    policy_class = POLICY_REGISTRY[policy_cfg.name]
+    config_class = POLICY_CONFIG_REGISTRY.get(policy_type)
+    if config_class is not None and not isinstance(policy_cfg, config_class):
+        raise TypeError(
+            f"Policy type {policy_type!r} requires {config_class.__name__}, "
+            f"got {policy_cfg.__class__.__name__}"
+        )
+
+    policy_class = POLICY_REGISTRY[policy_type]
     return policy_class(policy_cfg)
 
 
-def make_policy_from_checkpoint(checkpoint_path: str, policy_cfg: PolicyConfig = None) -> PreTrainedPolicy:
+def make_policy_from_checkpoint(
+    checkpoint_path: str,
+    policy_cfg: PolicyConfig = None,
+    *,
+    revision: str | None = None,
+    cache_dir: str | None = None,
+) -> PreTrainedPolicy:
     """
     Create a policy instance directly from a checkpoint.
 
@@ -86,13 +92,43 @@ def make_policy_from_checkpoint(checkpoint_path: str, policy_cfg: PolicyConfig =
         ValueError: If policy config cannot be determined
         FileNotFoundError: If checkpoint doesn't exist
     """
-    from pathlib import Path
-
     import torch
 
-    checkpoint_path = Path(checkpoint_path)
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    from rho.checkpoints import (
+        checkpoint_read_lease,
+        is_checkpoint_bundle,
+        load_bundle_metadata,
+        resolve_checkpoint,
+    )
+
+    checkpoint_path = resolve_checkpoint(
+        checkpoint_path,
+        revision=revision,
+        cache_dir=cache_dir,
+        include_training_state=False,
+    )
+    if is_checkpoint_bundle(checkpoint_path):
+        with checkpoint_read_lease(checkpoint_path):
+            if policy_cfg is None:
+                import draccus
+
+                metadata = load_bundle_metadata(checkpoint_path)
+                policy_dict = metadata["policy"]
+                if policy_dict is None:
+                    raise ValueError(f"Policy metadata not found in checkpoint bundle: {checkpoint_path}")
+                policy_dict = dict(policy_dict)
+                if metadata["features"] is not None:
+                    policy_dict["feature_dict"] = metadata["features"]
+                if "type" not in policy_dict and "name" in policy_dict:
+                    policy_dict["type"] = policy_dict["name"]
+                if isinstance(policy_dict.get("lr_scheduler"), dict):
+                    policy_dict["lr_scheduler"] = migrate_legacy_scheduler_config(policy_dict["lr_scheduler"])
+                if policy_dict.get("type") == "rho":
+                    policy_dict.pop("empty_cameras", None)
+                policy_cfg = draccus.decode(PolicyConfig, policy_dict)
+            policy = make_policy(policy_cfg)
+            policy.load_from_pretrained(checkpoint_path)
+            return policy
 
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
@@ -145,49 +181,24 @@ def list_available_policies() -> list[str]:
 
 
 # Register all available policies
-register_policy("behavioral_cloning")(BehavioralCloningPolicy)
-register_policy("diffusion")(DiffusionPolicy)
-register_policy("rhoalpha")(RhoAlphaPolicy)
-register_policy("rhoalpha_tactile")(RhoAlphaTactilePolicy)
+register_policy("rho")(RhoPolicy)
 register_policy("dsrl")(DSRLPolicy)
 register_policy("flowdagger")(FlowDAggerPolicy)
-
-# Backward-compat aliases — these all resolve to RhoAlphaPolicy with
-# vlm_backend set accordingly by the training config / YAML.
-POLICY_REGISTRY["phi4mm"] = RhoAlphaPolicy
-POLICY_REGISTRY["phi4mm_tactile"] = RhoAlphaTactilePolicy
-POLICY_REGISTRY["qwen25vl"] = RhoAlphaPolicy
-POLICY_REGISTRY["qwen3vl"] = RhoAlphaPolicy
-
-# Register RhoAlphaConfig under Qwen names so draccus can deserialize
-# YAML configs with type: "qwen25vl" / "qwen3vl" into RhoAlphaConfig.
-PolicyConfig.register_subclass("qwen25vl", RhoAlphaConfig)
-PolicyConfig.register_subclass("qwen3vl", RhoAlphaConfig)
-
-#register_policy("pi0")(PI0Policy)
-#register_policy("pi0fast")(PI0FASTPolicy)
-
-# Add more policies here as they are implemented:
-# register_policy("TransformerPolicy")(TransformerPolicy)
 
 
 # Export public API
 __all__ = [
     "PreTrainedPolicy",
     "PolicyConfig",
-    "BehavioralCloningPolicy",
-    "DiffusionPolicy",
     "DSRLPolicy",
     "DSRLPolicyConfig",
     "FlowDAggerPolicy",
     "FlowDAggerPolicyConfig",
-    "RhoAlphaPolicy",
-    "RhoAlphaTactilePolicy",
-#    "PI0Policy",
-#    "PI0FASTPolicy",
+    "RhoPolicy",
     "make_policy",
     "make_policy_from_checkpoint",
     "register_policy",
     "list_available_policies",
     "POLICY_REGISTRY",
+    "POLICY_CONFIG_REGISTRY",
 ]

@@ -1,0 +1,72 @@
+# Features for the RoboEval dual-arm setup
+features:
+  # Visual observations - camera feeds
+  observation.image.0:
+    type: VISUAL
+    shape: (3,224,224) # RGB images
+  observation.image.1:
+    type: VISUAL
+    shape: (3,224,224) # Left wrist camera
+  observation.image.2:
+    type: VISUAL
+    shape: (3,224,224) # Right wrist camera
+
+  # State observations - robot joint positions
+  observation.state:
+    type: STATE
+    shape: (20,)
+
+  # Actions - dual-arm end-effector poses
+  action:
+    type: ACTION
+    shape: (20,) # 20-dimensional dual-arm end-effector representation
+
+<<: !include ../base/normalization_mapping.yaml
+
+observation_mapping:
+  "observation.images.head": "observation.image.0"
+  "observation.images.left_wrist": "observation.image.1"
+  "observation.images.right_wrist": "observation.image.2"
+  # The language instruction may be missing from these datasets
+  "observation.ee_6d_pos": "observation.state"
+  "action.ee_6d_pos": "action"
+
+transform_mapping:
+  # "action":
+  #   - type: delta_actions
+  #     action_key: "action"
+  #     state_key: "observation.state"
+  #     action_type: "EE_6D_POS"
+  #     relative_to_state: true
+  #     post_norm: false
+
+  "observation.image.0":
+    - type: color_jitter
+      brightness: 0.2
+      contrast: [0.8, 1.2]
+      saturation: [0.8, 1.2]
+      hue: 0.05
+
+  "observation.image.1":
+    - type: resize_with_padding
+      height: 224
+      width: 224
+
+    - type: color_jitter
+      brightness: 0.2
+      contrast: [0.8, 1.2]
+      saturation: [0.8, 1.2]
+      hue: 0.05
+
+  "observation.image.2":
+    - type: resize_with_padding
+      height: 224
+      width: 224
+
+    - type: color_jitter
+      brightness: 0.2
+      contrast: [0.8, 1.2]
+      saturation: [0.8, 1.2]
+      hue: 0.05
+
+action_type: EE_6D_POS  # End-effector position and 6D rotation control

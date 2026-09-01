@@ -1,28 +1,42 @@
+#!/usr/bin/env bash
 
-export PHI4ROBOTICS_DIR=`pwd`
-# Server port to forward host <-> container; matches the `port` field in the
-# environment yaml (e.g. environments/fr3_duo/serve_duo.yaml).
-export RHO_SERVER_PORT="${RHO_SERVER_PORT:-9999}"
+set -euo pipefail
 
-docker stop rho-training-interactive 2>/dev/null || true
-sleep 1
-docker run --gpus all --ipc=host \
---ulimit memlock=-1 --ulimit stack=67108864 \
---rm -v ~/.cache/huggingface:/hf_home  \
--v $PHI4ROBOTICS_DIR/rho:/workspace/rho \
--v $PHI4ROBOTICS_DIR/rho_client:/workspace/rho_client \
--v $PHI4ROBOTICS_DIR/config:/workspace/config \
--v $PHI4ROBOTICS_DIR/environments:/workspace/environments \
--v $PHI4ROBOTICS_DIR/outputs:/workspace/outputs \
--v $PHI4ROBOTICS_DIR/tests:/workspace/tests \
--v $PHI4ROBOTICS_DIR/notebooks:/workspace/notebooks \
--v /data/:/data \
--e WANDB_BASE_URL="$WANDB_BASE_URL" \
--e WANDB_API_KEY="$WANDB_API_KEY" \
--e HF_TOKEN="$HF_TOKEN" \
--p $RHO_SERVER_PORT:$RHO_SERVER_PORT \
---name rho-training-interactive \
--d rho-training:latest \
-tail -f /dev/null
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CONTAINER_NAME="${RHO_CONTAINER_NAME:-rho-training-interactive}"
+SERVER_PORT="${RHO_SERVER_PORT:-9999}"
+HF_CACHE_DIR="${HF_HOME:-$HOME/.cache/huggingface}"
 
-docker exec -it rho-training-interactive /bin/bash\
+mkdir -p "$HF_CACHE_DIR" "$ROOT_DIR/outputs"
+
+docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+docker_args=(
+  run
+  --gpus all
+  --ipc=host
+  --ulimit memlock=-1
+  --ulimit stack=67108864
+  --rm
+  --volume "$ROOT_DIR:/workspace"
+  --volume "$HF_CACHE_DIR:/hf_home"
+  --env "HF_TOKEN=${HF_TOKEN:-}"
+  --env "WANDB_API_KEY=${WANDB_API_KEY:-}"
+  --env "WANDB_BASE_URL=${WANDB_BASE_URL:-}"
+  --publish "$SERVER_PORT:$SERVER_PORT"
+  --name "$CONTAINER_NAME"
+  --detach
+)
+
+if [[ -n "${RHO_DATA_DIR:-}" ]]; then
+  if [[ ! -d "$RHO_DATA_DIR" ]]; then
+    echo "RHO_DATA_DIR does not exist: $RHO_DATA_DIR" >&2
+    exit 1
+  fi
+  docker_args+=(--volume "$RHO_DATA_DIR:/data")
+fi
+
+docker_args+=(rho-training:latest tail -f /dev/null)
+
+docker "${docker_args[@]}"
+docker exec -it "$CONTAINER_NAME" /bin/bash

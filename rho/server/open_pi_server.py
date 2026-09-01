@@ -10,9 +10,9 @@ import traceback
 
 import websockets.asyncio.server as _server
 import websockets.frames
+from rho_client.msgpack_numpy import Packer, unpackb
 
 from rho.eval.policy_interface import PolicyInterface
-from rho_client.msgpack_numpy import Packer, unpackb
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,6 @@ class WebsocketPolicyServer:
 
         await websocket.send(packer.pack(self._metadata))
 
-        # prev_total_time = None
         while True:
             try:
                 input = unpackb(await websocket.recv())

@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────────
 
 
+@PolicyConfig.register_subclass("dsrl")
 @dataclass
 class DSRLPolicyConfig(PolicyConfig):
     """
@@ -47,7 +48,7 @@ class DSRLPolicyConfig(PolicyConfig):
     noise_actor_checkpoint: str = ""  # Path to DSRLTrainer checkpoint .pt
 
     # ── Base policy (π_dp, held in-process) ────────────────────────────────
-    base_policy_name: str = "phi4mm"
+    base_policy_name: str = "rho"
 
     # ── Problem dimensions ────────────────────────────────────────────────────
     noise_action_steps: int = 16  # Query freq: actor predicts this many steps

@@ -1,7 +1,6 @@
 #!/bin/bash
 
-# Build script for ALKU training container
-# This script builds the Docker image for ALKU training
+# Build the Rho training container.
 
 set -e
 

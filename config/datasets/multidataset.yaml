@@ -1,7 +1,7 @@
+# Minimal public MultiDatasetConfig example.
+#
+# Additional datasets can be added when they expose compatible observation and
+# action features. Weights are relative and do not need to sum to one.
 datasets:
   - dataset: !include pusht.yaml
-    weight: 1.5
-  - dataset: !include pusht.yaml
-    weight: 0.25
-  - dataset: !include pusht.yaml
-    weight: 0.6666666
+    weight: 1.0

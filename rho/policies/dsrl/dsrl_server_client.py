@@ -11,7 +11,6 @@ ODE instead of sampling from N(0, I).
 """
 
 import numpy as np
-
 from rho_client.websocket_client_policy import WebsocketClientPolicy
 
 

@@ -15,6 +15,31 @@ from rho.common.types import FeatureType, NormalizationMode, PolicyFeature
 logger = logging.getLogger(__name__)
 
 
+def _chunk_quantile_stat_pair(
+    stats_for_key: dict[str, Tensor],
+    stats_chunked_size: int,
+    *,
+    allow_perdim_keys: bool = False,
+) -> tuple[str, str]:
+    suffix = f"_chunk{stats_chunked_size}"
+    candidates = [(f"q01{suffix}", f"q99{suffix}")]
+    if allow_perdim_keys:
+        candidates.append(("q01_chunk", "q99_chunk"))
+
+    for low_key, high_key in candidates:
+        if low_key in stats_for_key and high_key in stats_for_key:
+            return low_key, high_key
+
+    expected = ", ".join(f"{low}/{high}" for low, high in candidates)
+    raise ValueError(f"Action chunk quantile normalization requires one of these stat pairs: {expected}")
+
+
+def _slice_chunk_stat_to_value(stat: Tensor, value: Tensor) -> Tensor:
+    if stat.ndim >= 2 and value.ndim >= 2:
+        return stat[: value.shape[-2]]
+    return stat
+
+
 def create_stats_buffers(
     features: dict[str, PolicyFeature],
     norm_map: dict[str, NormalizationMode],
@@ -204,12 +229,13 @@ def create_stats_buffers(
                         stats[key][f"max_chunk{stats_chunked_size}"]
                     ).to(dtype=torch.float32)[:chunk_size]
                 elif norm_mode is NormalizationMode.ACTIONCHUNK_QUANTILE:
-                    buffer[f"q02_chunk{chunk_size}"].data = torch.from_numpy(
-                        stats[key][f"q02_chunk{stats_chunked_size}"]
-                    ).to(dtype=torch.float32)[:chunk_size]
-                    buffer[f"q98_chunk{chunk_size}"].data = torch.from_numpy(
-                        stats[key][f"q98_chunk{stats_chunked_size}"]
-                    ).to(dtype=torch.float32)[:chunk_size]
+                    q_low_key, q_high_key = _chunk_quantile_stat_pair(stats[key], stats_chunked_size)
+                    buffer[f"q02_chunk{chunk_size}"].data = torch.from_numpy(stats[key][q_low_key]).to(
+                        dtype=torch.float32
+                    )[:chunk_size]
+                    buffer[f"q98_chunk{chunk_size}"].data = torch.from_numpy(stats[key][q_high_key]).to(
+                        dtype=torch.float32
+                    )[:chunk_size]
                 elif norm_mode is NormalizationMode.ACTIONCHUNK_PERDIM_MEAN_STD:
                     buffer["mean_chunk"].data = torch.from_numpy(
                         stats[key][f"mean_chunk{stats_chunked_size}"]
@@ -225,12 +251,15 @@ def create_stats_buffers(
                         stats[key][f"max_chunk{stats_chunked_size}"]
                     ).to(dtype=torch.float32)[0]
                 elif norm_mode is NormalizationMode.ACTIONCHUNK_PERDIM_QUANTILE:
-                    buffer["q02_chunk"].data = torch.from_numpy(
-                        stats[key][f"q02_chunk{stats_chunked_size}"]
-                    ).to(dtype=torch.float32)[0]
-                    buffer["q98_chunk"].data = torch.from_numpy(
-                        stats[key][f"q98_chunk{stats_chunked_size}"]
-                    ).to(dtype=torch.float32)[0]
+                    q_low_key, q_high_key = _chunk_quantile_stat_pair(
+                        stats[key], stats_chunked_size, allow_perdim_keys=True
+                    )
+                    buffer["q02_chunk"].data = torch.from_numpy(stats[key][q_low_key]).to(
+                        dtype=torch.float32
+                    )[0]
+                    buffer["q98_chunk"].data = torch.from_numpy(stats[key][q_high_key]).to(
+                        dtype=torch.float32
+                    )[0]
             elif isinstance(stats[key]["mean"], torch.Tensor):
                 # Note: The clone is needed to make sure that the logic in save_pretrained
                 # doesn't see duplicated
@@ -261,11 +290,12 @@ def create_stats_buffers(
                         stats[key][f"max_chunk{stats_chunked_size}"].clone().to(dtype=torch.float32)
                     )[:chunk_size]
                 elif norm_mode is NormalizationMode.ACTIONCHUNK_QUANTILE:
+                    q_low_key, q_high_key = _chunk_quantile_stat_pair(stats[key], stats_chunked_size)
                     buffer[f"q02_chunk{chunk_size}"].data = (
-                        stats[key][f"q02_chunk{stats_chunked_size}"].clone().to(dtype=torch.float32)
+                        stats[key][q_low_key].clone().to(dtype=torch.float32)
                     )[:chunk_size]
                     buffer[f"q98_chunk{chunk_size}"].data = (
-                        stats[key][f"q98_chunk{stats_chunked_size}"].clone().to(dtype=torch.float32)
+                        stats[key][q_high_key].clone().to(dtype=torch.float32)
                     )[:chunk_size]
                 elif norm_mode is NormalizationMode.ACTIONCHUNK_PERDIM_MEAN_STD:
                     buffer["mean_chunk"].data = stats[key]["mean_chunk"].clone().to(dtype=torch.float32)[0]
@@ -274,8 +304,11 @@ def create_stats_buffers(
                     buffer["min_chunk"].data = stats[key]["min_chunk"].clone().to(dtype=torch.float32)[0]
                     buffer["max_chunk"].data = stats[key]["max_chunk"].clone().to(dtype=torch.float32)[0]
                 elif norm_mode is NormalizationMode.ACTIONCHUNK_PERDIM_QUANTILE:
-                    buffer["q02_chunk"].data = stats[key]["q02_chunk"].clone().to(dtype=torch.float32)[0]
-                    buffer["q98_chunk"].data = stats[key]["q98_chunk"].clone().to(dtype=torch.float32)[0]
+                    q_low_key, q_high_key = _chunk_quantile_stat_pair(
+                        stats[key], stats_chunked_size, allow_perdim_keys=True
+                    )
+                    buffer["q02_chunk"].data = stats[key][q_low_key].clone().to(dtype=torch.float32)[0]
+                    buffer["q98_chunk"].data = stats[key][q_high_key].clone().to(dtype=torch.float32)[0]
 
             elif isinstance(stats[key]["mean"], list):
                 if norm_mode is NormalizationMode.MEAN_STD:
@@ -302,12 +335,13 @@ def create_stats_buffers(
                         stats[key][f"max_chunk{stats_chunked_size}"]
                     ).to(dtype=torch.float32)[:chunk_size]
                 elif norm_mode is NormalizationMode.ACTIONCHUNK_QUANTILE:
-                    buffer[f"q02_chunk{chunk_size}"].data = torch.tensor(
-                        stats[key][f"q02_chunk{stats_chunked_size}"]
-                    ).to(dtype=torch.float32)[:chunk_size]
-                    buffer[f"q98_chunk{chunk_size}"].data = torch.tensor(
-                        stats[key][f"q98_chunk{stats_chunked_size}"]
-                    ).to(dtype=torch.float32)[:chunk_size]
+                    q_low_key, q_high_key = _chunk_quantile_stat_pair(stats[key], stats_chunked_size)
+                    buffer[f"q02_chunk{chunk_size}"].data = torch.tensor(stats[key][q_low_key]).to(
+                        dtype=torch.float32
+                    )[:chunk_size]
+                    buffer[f"q98_chunk{chunk_size}"].data = torch.tensor(stats[key][q_high_key]).to(
+                        dtype=torch.float32
+                    )[:chunk_size]
                 elif norm_mode is NormalizationMode.ACTIONCHUNK_PERDIM_MEAN_STD:
                     buffer["mean_chunk"].data = torch.tensor(
                         stats[key][f"mean_chunk{stats_chunked_size}"]
@@ -323,12 +357,11 @@ def create_stats_buffers(
                         dtype=torch.float32
                     )[0]
                 elif norm_mode is NormalizationMode.ACTIONCHUNK_PERDIM_QUANTILE:
-                    buffer["q02_chunk"].data = torch.tensor(stats[key][f"q02_chunk{stats_chunked_size}"]).to(
-                        dtype=torch.float32
-                    )[0]
-                    buffer["q98_chunk"].data = torch.tensor(stats[key][f"q98_chunk{stats_chunked_size}"]).to(
-                        dtype=torch.float32
-                    )[0]
+                    q_low_key, q_high_key = _chunk_quantile_stat_pair(
+                        stats[key], stats_chunked_size, allow_perdim_keys=True
+                    )
+                    buffer["q02_chunk"].data = torch.tensor(stats[key][q_low_key]).to(dtype=torch.float32)[0]
+                    buffer["q98_chunk"].data = torch.tensor(stats[key][q_high_key]).to(dtype=torch.float32)[0]
             else:
                 type_ = type(stats[key]["mean"])
                 raise ValueError(f"np.ndarray or torch.Tensor expected, but type is '{type_}' instead.")
@@ -388,7 +421,6 @@ class Normalize(nn.Module):
         batch = dict(batch)  # shallow copy avoids mutating the input batch
         for key, ft in self.features.items():
             if key not in batch:
-                # raise ValueError(f"Missing key in batch during normalization: {key}")
                 continue
 
             norm_mode = self.norm_map.get(ft.type, NormalizationMode.IDENTITY)
@@ -417,7 +449,6 @@ class Normalize(nn.Module):
                 q99 = buffer["q99"]
                 assert not torch.isinf(q01).any(), _no_stats_error_str("q01")
                 assert not torch.isinf(q99).any(), _no_stats_error_str("q99")
-                # print(key, batch[key].shape, q01.shape, q99.shape)
                 batch[key] = (batch[key] - q01) / (q99 - q01 + 1e-6) * 2.0 - 1.0  # Using the openpi approach
                 clip_range = self.clip_values.get(ft.type)
                 if clip_range is not None:
@@ -428,12 +459,16 @@ class Normalize(nn.Module):
                 chunk_std = buffer[f"std_chunk{self.chunk_size}"]
                 assert not torch.isinf(chunk_mean).any(), _no_stats_error_str(f"mean_chunk{self.chunk_size}")
                 assert not torch.isinf(chunk_std).any(), _no_stats_error_str(f"std_chunk{self.chunk_size}")
+                chunk_mean = _slice_chunk_stat_to_value(chunk_mean, batch[key])
+                chunk_std = _slice_chunk_stat_to_value(chunk_std, batch[key])
                 batch[key] = (batch[key] - chunk_mean) / (chunk_std + 1e-8)
             elif norm_mode is NormalizationMode.ACTIONCHUNK_MIN_MAX:
                 chunk_min = buffer[f"min_chunk{self.chunk_size}"]
                 chunk_max = buffer[f"max_chunk{self.chunk_size}"]
                 assert not torch.isinf(chunk_min).any(), _no_stats_error_str(f"min_chunk{self.chunk_size}")
                 assert not torch.isinf(chunk_max).any(), _no_stats_error_str(f"max_chunk{self.chunk_size}")
+                chunk_min = _slice_chunk_stat_to_value(chunk_min, batch[key])
+                chunk_max = _slice_chunk_stat_to_value(chunk_max, batch[key])
                 # normalize to [0,1]
                 batch[key] = (batch[key] - chunk_min) / (chunk_max - chunk_min + 1e-8)
                 # normalize to [-1, 1]
@@ -443,6 +478,8 @@ class Normalize(nn.Module):
                 chunk_q98 = buffer[f"q98_chunk{self.chunk_size}"]
                 assert not torch.isinf(chunk_q02).any(), _no_stats_error_str(f"q02_chunk{self.chunk_size}")
                 assert not torch.isinf(chunk_q98).any(), _no_stats_error_str(f"q98_chunk{self.chunk_size}")
+                chunk_q02 = _slice_chunk_stat_to_value(chunk_q02, batch[key])
+                chunk_q98 = _slice_chunk_stat_to_value(chunk_q98, batch[key])
                 # Formula: y = 2 * ((x - q02) / (q98 - q02)) - 1, then clip to [-1.5, 1.5]
                 batch[key] = 2 * ((batch[key] - chunk_q02) / (chunk_q98 - chunk_q02 + 1e-8)) - 1
                 batch[key] = batch[key].clamp(-1.5, 1.5)
@@ -521,7 +558,6 @@ class Unnormalize(nn.Module):
         for key, ft in self.features.items():
             if key not in batch:
                 continue
-                # raise ValueError(f"Missing key in batch during denormalization: {key}")
 
             norm_mode = self.norm_map.get(ft.type, NormalizationMode.IDENTITY)
             if norm_mode is NormalizationMode.IDENTITY:
@@ -553,12 +589,16 @@ class Unnormalize(nn.Module):
                 chunk_std = buffer[f"std_chunk{self.chunk_size}"]
                 assert not torch.isinf(chunk_mean).any(), _no_stats_error_str(f"mean_chunk{self.chunk_size}")
                 assert not torch.isinf(chunk_std).any(), _no_stats_error_str(f"std_chunk{self.chunk_size}")
+                chunk_mean = _slice_chunk_stat_to_value(chunk_mean, batch[key])
+                chunk_std = _slice_chunk_stat_to_value(chunk_std, batch[key])
                 batch[key] = batch[key] * chunk_std + chunk_mean
             elif norm_mode is NormalizationMode.ACTIONCHUNK_MIN_MAX:
                 chunk_min = buffer[f"min_chunk{self.chunk_size}"]
                 chunk_max = buffer[f"max_chunk{self.chunk_size}"]
                 assert not torch.isinf(chunk_min).any(), _no_stats_error_str(f"min_chunk{self.chunk_size}")
                 assert not torch.isinf(chunk_max).any(), _no_stats_error_str(f"max_chunk{self.chunk_size}")
+                chunk_min = _slice_chunk_stat_to_value(chunk_min, batch[key])
+                chunk_max = _slice_chunk_stat_to_value(chunk_max, batch[key])
                 batch[key] = (batch[key] + 1) / 2
                 batch[key] = batch[key] * (chunk_max - chunk_min) + chunk_min
             elif norm_mode is NormalizationMode.ACTIONCHUNK_QUANTILE:
@@ -566,6 +606,8 @@ class Unnormalize(nn.Module):
                 chunk_q98 = buffer[f"q98_chunk{self.chunk_size}"]
                 assert not torch.isinf(chunk_q02).any(), _no_stats_error_str(f"q02_chunk{self.chunk_size}")
                 assert not torch.isinf(chunk_q98).any(), _no_stats_error_str(f"q98_chunk{self.chunk_size}")
+                chunk_q02 = _slice_chunk_stat_to_value(chunk_q02, batch[key])
+                chunk_q98 = _slice_chunk_stat_to_value(chunk_q98, batch[key])
                 # Inverse: x = ((y + 1) / 2) * (q98 - q02) + q02
                 batch[key] = ((batch[key] + 1) / 2) * (chunk_q98 - chunk_q02) + chunk_q02
             elif norm_mode is NormalizationMode.ACTIONCHUNK_PERDIM_MEAN_STD:

@@ -110,8 +110,9 @@ def test_train_logger_reset():
     assert logger.metrics["samples"].value == 0
 
 
-@patch("torch.save")
-def test_save_checkpoint_basic(mock_torch_save):
+@patch("rho.training.train_utils.validate_checkpoint")
+@patch("rho.training.train_utils.save_checkpoint_bundle")
+def test_save_checkpoint_basic(mock_save_bundle, _mock_validate, tmp_path):
     """Test save_checkpoint function"""
     # Create mock objects
     mock_policy = MagicMock()
@@ -122,13 +123,13 @@ def test_save_checkpoint_basic(mock_torch_save):
 
     step = 1000
     metrics = {"loss": 0.5}
-    output_dir = Path("test_checkpoint.pt")
+    output_dir = tmp_path / "checkpoints"
 
     # Call save_checkpoint
     save_checkpoint(mock_policy, mock_optimizer, step, metrics, output_dir)
 
-    # Verify torch.save was called twice (step checkpoint + latest)
-    assert mock_torch_save.call_count == 2
+    mock_save_bundle.assert_called_once()
+    assert mock_save_bundle.call_args.args[1] == output_dir / "checkpoint_step_0001000"
 
 
 def test_load_training_state_no_scheduler():
@@ -148,8 +149,35 @@ def test_load_training_state_no_scheduler():
     assert loaded_logger is None
 
 
-@patch("pathlib.Path.mkdir")
-def test_save_checkpoint_creates_directory(mock_mkdir):
+def test_load_training_state_policy_only_checkpoint_starts_fresh(tmp_path):
+    """Policy-only checkpoints should not attempt to restore training state."""
+    checkpoint_path = tmp_path / "checkpoint_latest.pt"
+    torch.save({"policy_state_dict": {"weight": torch.tensor([1.0])}}, checkpoint_path)
+
+    optimizer = MagicMock()
+    scheduler = MagicMock()
+    sampler = MagicMock()
+    train_logger = MagicMock()
+
+    step, loaded_optimizer, loaded_scheduler, loaded_sampler, loaded_logger = load_training_state(
+        checkpoint_path, optimizer, scheduler, sampler, train_logger
+    )
+
+    assert step == 0
+    assert loaded_optimizer is optimizer
+    assert loaded_scheduler is scheduler
+    assert loaded_sampler is sampler
+    assert loaded_logger is train_logger
+    optimizer.load_state_dict.assert_not_called()
+    scheduler.load_state_dict.assert_not_called()
+    sampler.load_state.assert_not_called()
+    train_logger.load_state.assert_not_called()
+    optimizer.zero_grad.assert_called_once_with(set_to_none=True)
+
+
+@patch("rho.training.train_utils.validate_checkpoint")
+@patch("rho.training.train_utils.save_checkpoint_bundle")
+def test_save_checkpoint_creates_directory(mock_save_bundle, _mock_validate, tmp_path):
     """Test save_checkpoint creates directory"""
     mock_policy = MagicMock()
     mock_policy.state_dict.return_value = {}
@@ -157,11 +185,11 @@ def test_save_checkpoint_creates_directory(mock_mkdir):
     mock_optimizer = MagicMock()
     mock_optimizer.state_dict.return_value = {}
 
-    with patch("torch.save"):
-        save_checkpoint(mock_policy, mock_optimizer, 100, {}, Path("test_dir"))
+    output_dir = tmp_path / "test_dir"
+    save_checkpoint(mock_policy, mock_optimizer, 100, {}, output_dir)
 
-    # Directory creation should be called
-    mock_mkdir.assert_called()
+    assert output_dir.is_dir()
+    mock_save_bundle.assert_called_once()
 
 
 def test_train_logger_save_state():
@@ -260,11 +288,11 @@ def test_find_latest_checkpoint_empty_dir(tmp_path):
     assert find_latest_checkpoint(tmp_path) is None
 
 
-def test_find_latest_checkpoint_prefers_latest(tmp_path):
-    """Returns checkpoint_latest.pt when it exists."""
+def test_find_latest_checkpoint_prefers_numbered_checkpoint(tmp_path):
+    """Numbered checkpoints take precedence over the legacy latest copy."""
     (tmp_path / "checkpoint_latest.pt").write_bytes(b"fake")
     (tmp_path / "checkpoint_step_0001000.pt").write_bytes(b"fake")
-    assert find_latest_checkpoint(tmp_path) == tmp_path / "checkpoint_latest.pt"
+    assert find_latest_checkpoint(tmp_path) == tmp_path / "checkpoint_step_0001000.pt"
 
 
 def test_find_latest_checkpoint_falls_back_to_highest_step(tmp_path):

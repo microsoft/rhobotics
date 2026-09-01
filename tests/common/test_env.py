@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -168,21 +169,43 @@ def test_gym_environment_close(pusht_env_config):
 def test_register_environment_and_make():
     """Test the full register -> make_environment lifecycle."""
 
+    @EnvironmentConfig.register_subclass("lifecycle_test_env")
+    @dataclass
+    class LifecycleTestConfig(EnvironmentConfig):
+        name: str = "lifecycle display name"
+
     @register_environment("lifecycle_test_env")
     class LifecycleTestEnv:
         def __init__(self, config):
             self.config = config
 
-    # Decorator should register and set name attribute
+    # Decorator should bind the runtime class to the registered config type.
     assert "lifecycle_test_env" in ENV_REGISTRY
     assert ENV_REGISTRY["lifecycle_test_env"] == LifecycleTestEnv
-    assert LifecycleTestEnv.name == "lifecycle_test_env"
 
     # make_environment should find and instantiate it
-    config = EnvironmentConfig(name="lifecycle_test_env")
+    config = LifecycleTestConfig()
     env = make_environment(config)
     assert isinstance(env, LifecycleTestEnv)
     assert env.config == config
+
+
+def test_make_environment_dispatches_registered_type_not_display_name():
+    @EnvironmentConfig.register_subclass("typed_lifecycle_test_env")
+    @dataclass
+    class TypedLifecycleConfig(EnvironmentConfig):
+        name: str = "display-only"
+
+    @register_environment("typed_lifecycle_test_env")
+    class TypedLifecycleEnv:
+        def __init__(self, config):
+            self.config = config
+
+    config = TypedLifecycleConfig()
+    env = make_environment(config)
+
+    assert config.type == "typed_lifecycle_test_env"
+    assert isinstance(env, TypedLifecycleEnv)
 
 
 def test_make_environment_with_none():
@@ -196,7 +219,7 @@ def test_make_environment_with_missing_name():
     config = EnvironmentConfig()
     config.name = None
 
-    with pytest.raises(ValueError, match="EnvironmentConfig.name must be specified"):
+    with pytest.raises(ValueError, match="has no registered type"):
         make_environment(config)
 
 
@@ -205,7 +228,7 @@ def test_make_environment_with_unregistered_env():
     config = EnvironmentConfig()
     config.name = "nonexistent_environment"
 
-    with pytest.raises(ValueError, match="Environment 'nonexistent_environment' not found in registry"):
+    with pytest.raises(ValueError, match="Environment type 'nonexistent_environment' not found in registry"):
         make_environment(config)
 
 

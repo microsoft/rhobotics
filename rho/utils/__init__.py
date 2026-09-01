@@ -34,13 +34,13 @@ def init_logging(
         log_file: Optional file path to write logs to
         display_pid: Include process ID in log messages (useful for debugging multi-process)
         console_level: Logging level for console output. Defaults to INFO, can be overridden
-                      by ALKU_LOG_LEVEL environment variable.
+                      by RHO_LOG_LEVEL environment variable.
         file_level: Logging level for file output
         accelerator: Optional Accelerator instance (for multi-GPU detection)
     """
     # Determine console log level: explicit arg > env var > default (INFO)
     if console_level is None:
-        console_level = os.environ.get("ALKU_LOG_LEVEL", "INFO")
+        console_level = os.environ.get("RHO_LOG_LEVEL", "INFO")
 
     class LevelAwareFormatter(logging.Formatter):
         """Formatter that uses verbose format when DEBUG level is enabled."""

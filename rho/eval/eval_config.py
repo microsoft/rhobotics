@@ -9,16 +9,26 @@ and evaluates the policy in the cfg.environment using the EnvironmentWrapper
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
+from types import UnionType
+from typing import Union, get_args, get_origin
 
 import draccus
 import torch
+from draccus import ChoiceRegistry
 
+from rho.checkpoints import (
+    is_checkpoint_bundle,
+    load_bundle_metadata,
+    resolve_checkpoint,
+    resolve_latest_checkpoint,
+)
 from rho.common.wandb_logging import WandBConfig
 from rho.datasets.data_config import DataConfig
 from rho.environment.env import EnvironmentConfig
 from rho.eval.policy_interface import PolicyInterfaceConfig
+from rho.models.schedule import migrate_legacy_scheduler_config
 from rho.policies import PolicyConfig
 from rho.policies.dsrl.dsrl_config import DSRLConfig
 from rho.policies.dsrl.flowdagger_config import FlowDAggerConfig
@@ -26,23 +36,108 @@ from rho.policies.dsrl.flowdagger_config import FlowDAggerConfig
 logger = logging.getLogger(__name__)
 
 
+def _resolve_choice_config_class(config_cls: type, config_dict: dict) -> type:
+    """Resolve a draccus ChoiceRegistry base class to the concrete dataclass."""
+    if not issubclass(config_cls, ChoiceRegistry):
+        return config_cls
+
+    choice_name = config_dict.get("type") or config_dict.get("name") or config_cls.default_choice_name()
+    if choice_name is None:
+        return config_cls
+
+    try:
+        return config_cls.get_choice_class(choice_name)
+    except KeyError:
+        return config_cls
+
+
+def _config_class_from_annotation(annotation) -> type | None:
+    """Return a dataclass/ChoiceRegistry class from a field annotation if one is obvious."""
+    origin = get_origin(annotation)
+    if origin in (UnionType, Union):
+        for arg in get_args(annotation):
+            if arg is type(None):
+                continue
+            config_cls = _config_class_from_annotation(arg)
+            if config_cls is not None:
+                return config_cls
+        return None
+
+    if isinstance(annotation, type) and (is_dataclass(annotation) or issubclass(annotation, ChoiceRegistry)):
+        return annotation
+
+    return None
+
+
+def _strip_unknown_config_fields(config_cls: type, config_dict: dict, context: str) -> dict:
+    """Drop stale fields from serialized configs before draccus decodes them.
+
+    Checkpoint ``train_config.json`` files can outlive code fields.  Draccus is
+    intentionally strict, so eval-time checkpoint loading removes fields that
+    are not present in the current dataclass and logs exactly what was ignored.
+    """
+    if not isinstance(config_dict, dict):
+        return config_dict
+
+    concrete_cls = _resolve_choice_config_class(config_cls, config_dict)
+    if not is_dataclass(concrete_cls):
+        return config_dict
+
+    config_fields = {f.name: f for f in fields(concrete_cls)}
+    passthrough_fields = {"type"}
+    unknown_fields = sorted(k for k in config_dict if k not in config_fields and k not in passthrough_fields)
+
+    if unknown_fields:
+        formatted_fields = ", ".join(f"`{name}`" for name in unknown_fields)
+        logger.warning(
+            f"Ignoring unsupported fields from train_config.json for {context} "
+            f"({concrete_cls.__name__}): {formatted_fields}"
+        )
+
+    cleaned = {}
+    for key, value in config_dict.items():
+        if key in passthrough_fields:
+            cleaned[key] = value
+            continue
+        if key not in config_fields:
+            continue
+
+        nested_cls = _config_class_from_annotation(config_fields[key].type)
+        if nested_cls is not None and isinstance(value, dict):
+            cleaned[key] = _strip_unknown_config_fields(nested_cls, value, f"{context}.{key}")
+        else:
+            cleaned[key] = value
+
+    return cleaned
+
+
 def _root_dir_matches(candidate: str, target: str) -> bool:
     """Check if two root_dir paths refer to the same dataset.
 
-    Compares the last two path components (e.g. ``aloha_sim_jellyho/aloha_handover_box_v6``)
-    to handle different mount point prefixes between training and evaluation.
+    Uses a tiered matching strategy:
+    1. Exact match
+    2. Last 4 path components match (more precise than last 2)
+    3. Last 2 path components match (fallback for mount point differences)
     Also strips version suffixes (``_v5``, ``_v6``, etc.) to handle dataset version
     differences between training and evaluation.
     """
     if candidate == target:
         return True
-    # Compare trailing path components to handle different mount prefixes
+
+    # Try matching with more path components first (last 4) before falling back to 2
     c_parts = Path(candidate).parts
     t_parts = Path(target).parts
+
+    # Try last 4 components first (more precise)
+    n = min(4, len(c_parts), len(t_parts))
+    if n == 4 and c_parts[-n:] == t_parts[-n:]:
+        return True
+
     # Match on the last 2 components (parent dir + dataset name)
     n = min(2, len(c_parts), len(t_parts))
     if c_parts[-n:] == t_parts[-n:]:
         return True
+
     # Also try matching after stripping version suffixes (_v5, _v6, etc.)
     import re
 
@@ -67,14 +162,38 @@ def find_dataset_by_root_dir(dataset_dict: dict, target_root_dir: str) -> dict |
     Returns:
         The matching dataset dict, or None if not found
     """
+    # Collect all available datasets for debugging
+    available_datasets = []
+
+    def collect_datasets(d: dict):
+        """Recursively collect all datasets with root_dirs for logging."""
+        if "root_dir" in d:
+            available_datasets.append(d.get("root_dir", "unknown"))
+        if d.get("flatten_nested", True) and "dataset_cfgs" in d:
+            for cfg in d["dataset_cfgs"]:
+                if "root_dir" in cfg:
+                    available_datasets.append(cfg.get("root_dir", "unknown"))
+        if "datasets" in d:
+            for weighted_dataset in d["datasets"]:
+                if "dataset" in weighted_dataset:
+                    collect_datasets(weighted_dataset["dataset"])
+
+    collect_datasets(dataset_dict)
+    if available_datasets:
+        logger.info(f"Available datasets in training config: {available_datasets}")
+
     # Check if this is a leaf dataset with matching root_dir
     if "root_dir" in dataset_dict and _root_dir_matches(dataset_dict["root_dir"], target_root_dir):
+        logger.info(f"Matched dataset with root_dir: {dataset_dict['root_dir']}")
+        logger.info(f"  Has transform_mapping: {'transform_mapping' in dataset_dict}")
         return dataset_dict
 
     # If flatten_nested is True (default), check dataset_cfgs for the flattened list
     if dataset_dict.get("flatten_nested", True) and "dataset_cfgs" in dataset_dict:
         for cfg in dataset_dict["dataset_cfgs"]:
             if _root_dir_matches(cfg.get("root_dir", ""), target_root_dir):
+                logger.info(f"Matched dataset with root_dir: {cfg.get('root_dir', 'unknown')}")
+                logger.info(f"  Has transform_mapping: {'transform_mapping' in cfg}")
                 return cfg
 
     # Fallback: recursively search through nested datasets structure
@@ -91,7 +210,7 @@ def find_dataset_by_root_dir(dataset_dict: dict, target_root_dir: str) -> dict |
 def _normalize_policy_dict(policy_dict: dict) -> dict:
     """Apply backward-compat fixups to a serialized PolicyConfig dict.
 
-    * Renames ``lr_scheduler.name`` → ``lr_scheduler.type``
+    * Migrates legacy ``lr_scheduler.name`` discriminator/algorithm fields
     * Falls back to ``name`` when ``type`` is missing at the top level
 
     Args:
@@ -103,8 +222,8 @@ def _normalize_policy_dict(policy_dict: dict) -> dict:
     Raises:
         ValueError: If neither ``type`` nor ``name`` is present.
     """
-    if "lr_scheduler" in policy_dict and "name" in policy_dict["lr_scheduler"]:
-        policy_dict["lr_scheduler"]["type"] = policy_dict["lr_scheduler"].pop("name")
+    if "lr_scheduler" in policy_dict:
+        policy_dict["lr_scheduler"] = migrate_legacy_scheduler_config(policy_dict["lr_scheduler"])
     if "type" not in policy_dict and "name" in policy_dict:
         policy_dict["type"] = policy_dict["name"]
     if "type" not in policy_dict:
@@ -245,6 +364,7 @@ def load_policy_config_from_json(train_config_path):
         return None
 
     policy_dict = _normalize_policy_dict(train_config_dict["policy"])
+    policy_dict = _strip_unknown_config_fields(PolicyConfig, policy_dict, "policy")
     policy_config = draccus.decode(PolicyConfig, policy_dict)
     logger.info(f"PolicyConfig loaded from {train_config_path}: {policy_config.name}")
     return policy_config
@@ -282,6 +402,7 @@ def load_configs_from_train_config(
     policy_config = None
     if "policy" in train_config_dict:
         policy_dict = _normalize_policy_dict(train_config_dict["policy"])
+        policy_dict = _strip_unknown_config_fields(PolicyConfig, policy_dict, "policy")
         policy_config = draccus.decode(PolicyConfig, policy_dict)
         logger.info(f"PolicyConfig loaded from {train_config_path}: {policy_config.name}")
     else:
@@ -299,6 +420,7 @@ def load_configs_from_train_config(
             pass
         else:
             try:
+                dataset_dict = _strip_unknown_config_fields(DataConfig, dataset_dict, "dataset")
                 data_config = draccus.decode(DataConfig, dataset_dict)
                 logger.info(f"DataConfig loaded from {train_config_path}: {type(data_config).__name__}")
             except Exception as e:
@@ -309,19 +431,58 @@ def load_configs_from_train_config(
     return policy_config, data_config
 
 
+def load_configs_from_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    dataset_root_dir: str | None = None,
+) -> tuple[PolicyConfig | None, DataConfig | None]:
+    """Load portable bundle metadata or fall back to a legacy training config."""
+    checkpoint_path = Path(checkpoint_path)
+    if not is_checkpoint_bundle(checkpoint_path):
+        train_config_path = checkpoint_path.parent.parent / "train_config.json"
+        return load_configs_from_train_config(
+            train_config_path,
+            dataset_root_dir=dataset_root_dir,
+        )
+
+    metadata = load_bundle_metadata(checkpoint_path)
+
+    policy_config = None
+    policy_dict = metadata["policy"]
+    if policy_dict is not None:
+        if metadata["features"] is not None:
+            policy_dict["feature_dict"] = metadata["features"]
+        policy_dict = _normalize_policy_dict(policy_dict)
+        policy_dict = _strip_unknown_config_fields(PolicyConfig, policy_dict, "policy")
+        policy_config = draccus.decode(PolicyConfig, policy_dict)
+
+    data_config = None
+    dataset_dict = metadata["data_config"]
+    if dataset_dict is not None:
+        if metadata["stats"] is not None:
+            dataset_dict["stats"] = metadata["stats"]
+        dataset_dict = _normalize_dataset_dict(dataset_dict, dataset_root_dir=dataset_root_dir)
+        if dataset_dict is not None:
+            dataset_dict = _strip_unknown_config_fields(DataConfig, dataset_dict, "dataset")
+            data_config = draccus.decode(DataConfig, dataset_dict)
+
+    return policy_config, data_config
+
+
 @dataclass
 class EvalConfig:
     # Core evaluation settings
     pretrained_checkpoint: str | None = None
+    checkpoint_revision: str | None = None
+    checkpoint_cache_dir: str | None = None
     name: str = "eval"  # Name for this evaluation config (used as metric prefix in wandb)
 
     # Environment settings
     # should be defined in subclasses
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
 
-    # TODO get feedback: make dataset and policy configs optional as they can be populated from
-    # the train_config.json
-    # Dataset and policy configs (shared with training)
+    # Dataset and policy configs may be replaced with checkpoint metadata
+    # during initialization.
     dataset: DataConfig = field(default_factory=DataConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     policy_interface_cfg: PolicyInterfaceConfig = field(default_factory=PolicyInterfaceConfig)
@@ -329,7 +490,9 @@ class EvalConfig:
 
     eval_mode: str = "standard"
     inference_delay: int = 6  # number of action steps it takes to inference
+    execution_horizon: int | None = None  # actions executed between RTC inferences
     beta: int = 10  # weighting of rtc update vs flow matching update
+    guidance_schedule: str = "paper"  # guidance coefficient schedule: 'paper' or 'constant'
 
     # Key to select which dataset transforms to use in event of training
     # with multidataset
@@ -375,10 +538,20 @@ class EvalConfig:
             self.pretrained_checkpoint = None
             return
 
-        # 0. Check is user provided a folder or a .pt file
-        self.pretrained_checkpoint = Path(self.pretrained_checkpoint)
+        # Resolve a specific bundle, a checkpoint root, or a legacy .pt file.
+        self.pretrained_checkpoint = resolve_checkpoint(
+            self.pretrained_checkpoint,
+            revision=self.checkpoint_revision,
+            cache_dir=self.checkpoint_cache_dir,
+            include_training_state=False,
+        )
         if self.pretrained_checkpoint.is_dir():
-            self.pretrained_checkpoint = self.pretrained_checkpoint / "checkpoint_latest.pt"
+            resolved_checkpoint = resolve_latest_checkpoint(self.pretrained_checkpoint)
+            if resolved_checkpoint is None:
+                raise FileNotFoundError(
+                    f"No completed checkpoint found in directory: {self.pretrained_checkpoint}"
+                )
+            self.pretrained_checkpoint = resolved_checkpoint
 
         # 1. Check we can find the pretrained_checkpoint
         if not self.pretrained_checkpoint.exists():
@@ -386,10 +559,8 @@ class EvalConfig:
         else:
             self.checkpoint_folder = Path(self.pretrained_checkpoint).parent
 
-        # Load policy and dataset configs from train_config.json
-        train_config_path = Path(self.checkpoint_folder).parent / "train_config.json"
-        policy_config, data_config = load_configs_from_train_config(
-            train_config_path,
+        policy_config, data_config = load_configs_from_checkpoint(
+            self.pretrained_checkpoint,
             dataset_root_dir=self.dataset_root_dir,
         )
         if policy_config is not None:
@@ -412,7 +583,9 @@ class EvalConfig:
         self.policy_interface_cfg.data_config = self.dataset
         self.policy_interface_cfg.eval_mode = self.eval_mode
         self.policy_interface_cfg.inference_delay = self.inference_delay
+        self.policy_interface_cfg.execution_horizon = self.execution_horizon
         self.policy_interface_cfg.beta = self.beta
+        self.policy_interface_cfg.guidance_schedule = self.guidance_schedule
 
 
 @dataclass

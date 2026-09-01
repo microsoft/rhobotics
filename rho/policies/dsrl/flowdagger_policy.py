@@ -24,6 +24,7 @@ from rho.policies.dsrl.noise_policy import DeterministicNoisePolicy
 logger = logging.getLogger(__name__)
 
 
+@PolicyConfig.register_subclass("flowdagger")
 @dataclass
 class FlowDAggerPolicyConfig(PolicyConfig):
     """Inference-side config for FlowDAgger. Mirrors DSRLPolicyConfig."""
@@ -32,7 +33,7 @@ class FlowDAggerPolicyConfig(PolicyConfig):
     noise_policy_checkpoint: str = ""
 
     # ── Base policy (the frozen flow model held in-process) ──────────────────
-    base_policy_name: str = "rhoalpha"
+    base_policy_name: str = "rho"
 
     # ── Problem dimensions (must match the frozen base policy) ───────────────
     # Base policy expects initial_noise of shape (chunk_size, max_action_dim).

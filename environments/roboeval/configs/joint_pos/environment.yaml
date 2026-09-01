@@ -1,0 +1,9 @@
+type: "roboeval"
+max_episode_steps: 250
+task_name: "lift_pot" # Default task for evaluation
+action_space: "joint_pos" # eef_6dof, eef_quat, joint_pos
+observation_mapping: # Map observation keys to dataset format
+  # Main camera views
+  "observation.rgb_head": "observation.image.0"
+  "observation.rgb_left_wrist": "observation.image.1"
+  "observation.rgb_right_wrist": "observation.image.2"

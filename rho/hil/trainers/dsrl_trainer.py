@@ -164,7 +164,7 @@ class DSRLTrainer:
         # DSRL agent
         self.agent = DSRLSACAgent(
             config,
-            device=device,  # policy_forward_fn=policy_forward_fn
+            device=device,
         )
 
         # Replay buffer
@@ -176,7 +176,6 @@ class DSRLTrainer:
             image_shapes=image_shapes,
             noise_dim=config.noise_dim,
             state_dim=config.state_dim if config.include_state else 0,
-            # action_dim=config.action_value_dim if config.algorithm == "na" else 0,
         )
 
         # Logging
@@ -209,7 +208,7 @@ class DSRLTrainer:
             # e.g. "rho_dsrl-sac_sparse_pick_drop_pumpkin_0402_1530"
             task_name = Path(config.log_dir).name  # e.g. "dsrl_pick_drop_pumpkin"
             algo_tag = f"dsrl-{config.algorithm}"  # e.g. "dsrl-sac"
-            base_model = config.base_policy_name  # e.g. "rhoalpha" or "phi4mm"
+            base_model = config.base_policy_name  # e.g. "rho"
             reward_tag = config.reward_type  # e.g. "sparse" or "intervention"
             timestamp = datetime.now().strftime("%m%d_%H%M%S")
 
@@ -543,7 +542,6 @@ class DSRLTrainer:
             mask=mask,
             state=state,
             next_state=next_state,
-            # action=action,
         )
 
         self.total_transitions += 1
@@ -609,8 +607,6 @@ class DSRLTrainer:
 
             # Receive transitions
             transitions = self.experience_receiver.receive_batch(max_batch=256, timeout_ms=100)
-            # if transitions:
-            #     print(f"[DEBUG] Received {len(transitions)} transitions")
 
             for t in transitions:
                 self._process_transition(t)

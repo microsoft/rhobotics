@@ -29,7 +29,9 @@ def check_dataset_loading(cfg: TrainConfig, max_retries: int = 5, retry_delay: f
     Returns:
         bool: True if dataset loads successfully, False otherwise
     """
-    logger.info(f"Checking dataset loading for: {cfg.dataset.repo_id}")
+    repo_id = getattr(cfg.dataset, "repo_id", None)
+    dataset_label = repo_id or type(cfg.dataset).__name__
+    logger.info(f"Checking dataset loading for: {dataset_label}")
     logger.info(f"Dataset config: {cfg.dataset}")
     logger.info("-" * 60)
 
@@ -46,31 +48,27 @@ def check_dataset_loading(cfg: TrainConfig, max_retries: int = 5, retry_delay: f
             # Check if we can extract features
             underlying_dataset = training_dataloader.dataset
             logger.info(f"  Dataset type: {type(underlying_dataset)}")
-            logger.info(f"  Dataset length: {len(underlying_dataset)}")
+            try:
+                logger.info(f"  Dataset length: {len(underlying_dataset)}")
+            except TypeError:
+                logger.info("  Dataset length: unavailable for iterable dataset")
 
             if hasattr(underlying_dataset, "meta"):
                 logger.info("  Dataset metadata available")
                 logger.info(f"    - Features: {list(underlying_dataset.meta.features.keys())}")
 
-            # Try to get a batch
-            try:
-                batch_iter = iter(training_dataloader)
-                batch = next(batch_iter)
-                logger.info("  Successfully loaded first batch")
-                logger.info(
-                    f"    - Batch keys: {list(batch.keys()) if isinstance(batch, dict) else 'Not a dict'}"
-                )
+            batch = next(iter(training_dataloader))
+            logger.info("  Successfully loaded first batch")
+            logger.info(
+                f"    - Batch keys: {list(batch.keys()) if isinstance(batch, dict) else 'Not a dict'}"
+            )
 
-                if isinstance(batch, dict):
-                    for key, value in batch.items():
-                        if hasattr(value, "shape"):
-                            logger.info(f"      {key}: {value.shape}")
-                        else:
-                            logger.info(f"      {key}: {type(value)}")
-
-            except Exception as batch_error:
-                logger.warning(f"  Could not load first batch: {batch_error}")
-                # Don't fail on batch loading error - dataset creation succeeded
+            if isinstance(batch, dict):
+                for key, value in batch.items():
+                    if hasattr(value, "shape"):
+                        logger.info(f"      {key}: {value.shape}")
+                    else:
+                        logger.info(f"      {key}: {type(value)}")
 
             logger.info(f"Dataset loading SUCCESSFUL on attempt {attempt + 1}")
             return True
@@ -103,12 +101,11 @@ def main(cfg: TrainConfig) -> None:
 
     # Validate basic config
     if cfg.dataset is None:
-        logger.error("No dataset configuration provided!")
-        return
+        raise ValueError("No dataset configuration provided")
 
-    if not cfg.dataset.repo_id:
-        logger.error("No dataset repo_id specified!")
-        return
+    repo_id = getattr(cfg.dataset, "repo_id", None)
+    if repo_id is not None and not repo_id:
+        raise ValueError("Dataset repo_id cannot be empty")
 
     # Set batch size if not provided
     if cfg.batch_size is not None:
@@ -126,6 +123,9 @@ def main(cfg: TrainConfig) -> None:
         logger.error("DATASET CHECK FAILED")
         logger.error("There are issues with the dataset configuration or availability.")
     logger.info("=" * 60)
+
+    if not success:
+        raise RuntimeError("Dataset check failed")
 
 
 if __name__ == "__main__":

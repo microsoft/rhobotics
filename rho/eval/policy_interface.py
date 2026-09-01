@@ -77,6 +77,72 @@ def debug_print_and_save_obs(obs, debug_dir="debug_obs_images"):
             )
 
 
+def validate_rtc_horizons(inference_delay: int, execution_horizon: int, chunk_size: int) -> None:
+    """Validate that the RTC horizon parameters are self-consistent.
+
+    Raises ``ValueError`` when ``inference_delay + execution_horizon > chunk_size`` because
+    the rollout queue would then retain actions from an older chunk while the cached
+    ``prev_action_chunk`` has already advanced, causing RTC to blend against actions the
+    robot is not actually executing.
+
+    Also emits ``logger.warning`` for two degenerate-but-non-fatal configurations:
+
+    * ``execution_horizon >= chunk_size``: re-inference occurs on essentially every
+      timestep so RTC provides no latency benefit.
+    * ``inference_delay >= chunk_size - execution_horizon``: the soft-mask decay region
+      (Section 3.2 of arXiv:2506.07339) is empty and the method reduces to the naive
+      hard-masking baseline.
+    """
+    if execution_horizon >= chunk_size:
+        logger.warning(
+            "RTC: execution_horizon (%d) >= chunk_size (%d). Re-inference will occur on essentially "
+            "every timestep, so RTC provides no latency benefit. Consider reducing execution_horizon.",
+            execution_horizon,
+            chunk_size,
+        )
+
+    if inference_delay >= chunk_size - execution_horizon:
+        logger.warning(
+            "RTC: inference_delay (%d) >= chunk_size (%d) - execution_horizon (%d) = %d. "
+            "Every overlapping row of the soft mask sits in the i < d branch of Eq. 5 and receives "
+            "weight 1.0, so the exponential decay region is empty and the method reduces to the "
+            "naive hard-masking baseline that soft masking exists to improve on.",
+            inference_delay,
+            chunk_size,
+            execution_horizon,
+            chunk_size - execution_horizon,
+        )
+
+    if inference_delay + execution_horizon > chunk_size:
+        raise ValueError(
+            f"RTC: inference_delay ({inference_delay}) + execution_horizon ({execution_horizon}) = "
+            f"{inference_delay + execution_horizon} > chunk_size ({chunk_size}). "
+            "RTC would otherwise blend against actions the robot is not executing because the rollout "
+            "queue retains actions from an older chunk while prev_action_chunk has already advanced. "
+            "Fix: reduce execution_horizon or inference_delay so their sum fits within chunk_size."
+        )
+
+
+def _parse_num_actions_executed(value) -> int:
+    if isinstance(value, torch.Tensor):
+        if value.numel() != 1:
+            raise ValueError("num_actions_executed must be an integer scalar.")
+        value = value.item()
+    elif isinstance(value, np.ndarray):
+        if value.size != 1:
+            raise ValueError("num_actions_executed must be an integer scalar.")
+        value = value.item()
+
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ValueError("num_actions_executed must be an integer scalar.")
+    return int(value)
+
+
+def _validate_guidance_schedule(value: str) -> None:
+    if value not in ("paper", "constant"):
+        raise ValueError(f"guidance_schedule must be 'paper' or 'constant', got {value!r}.")
+
+
 @dataclass
 class PolicyInterfaceConfig:
     """Configuration for environment interactions"""
@@ -103,10 +169,13 @@ class PolicyInterfaceConfig:
 
     eval_mode: str = "standard"  # Options: 'standard', 'rtc'
     inference_delay: int = None  # Number of steps policy inference takes
+    execution_horizon: int | None = None  # Actions executed between RTC inferences
     beta: int = None  # Weighting parameter for RTC update vs standard update
+    guidance_schedule: str = "paper"  # Guidance coefficient schedule: 'paper' or 'constant'
 
     def __post_init__(self):
         assert self.eval_mode in ["standard", "rtc"], "eval_mode must be 'standard' or 'rtc'"
+        _validate_guidance_schedule(self.guidance_schedule)
         if "task" not in self.observation_mapping.values():
             self.observation_mapping["task"] = "task"
         if "action" not in self.observation_mapping.values():
@@ -115,6 +184,7 @@ class PolicyInterfaceConfig:
 
 class PolicyInterface:
     def __init__(self, cfg: PolicyInterfaceConfig):
+        _validate_guidance_schedule(cfg.guidance_schedule)
         self.policy = cfg.policy
         self.data_config = cfg.data_config
         self.device = cfg.device
@@ -125,8 +195,19 @@ class PolicyInterface:
         self.eval_mode = cfg.eval_mode
         self.inference_delay = cfg.inference_delay
         self.beta = cfg.beta
+        self.guidance_schedule = cfg.guidance_schedule
         self.horizon = self.policy.config.chunk_size
-        self.execution_horizon = self.policy.config.n_action_steps
+        self.execution_horizon = (
+            cfg.execution_horizon if cfg.execution_horizon is not None else self.policy.config.n_action_steps
+        )
+
+        # Most recent action chunk after output transforms, in the absolute
+        # action representation consumed by the environment. Before RTC reuses
+        # the remaining actions, process_observation transforms them into the
+        # current request's policy frame. This is required for state-relative
+        # deltas and per-timestep ACTIONCHUNK normalization: cached model-space
+        # values from old index e+i are not comparable to new index i.
+        self.prev_action_chunk: torch.Tensor | None = None
 
         if self.eval_mode == "rtc":
             logger.info("RTC mode enabled: applying necessary config adjustments.")
@@ -138,20 +219,32 @@ class PolicyInterface:
             assert self.inference_delay is not None and self.beta is not None, (
                 "RTC mode requires inference_delay and beta to be set."
             )
+            if self.execution_horizon <= 0:
+                raise ValueError("RTC mode requires execution_horizon to be positive.")
+            try:
+                validate_rtc_horizons(self.inference_delay, self.execution_horizon, self.horizon)
+            except ValueError as exc:
+                if cfg.execution_horizon is None:
+                    raise ValueError(
+                        f"{exc} execution_horizon was not set, so policy.config.n_action_steps "
+                        f"({self.policy.config.n_action_steps}) was used. Set execution_horizon "
+                        "explicitly in the evaluation or serving config."
+                    ) from exc
+                raise
 
         if self.data_config is not None:
             logger.info("Initializing data config within PolicyInterfaceConfig.")
             if self.input_transforms is None:
-                logger.info(f"[DEBUG] data_config.transform_mapping: {self.data_config.transform_mapping}")
+                logger.debug(f"data_config.transform_mapping: {self.data_config.transform_mapping}")
                 if self.data_config.transform_mapping is not None:
                     for _k, _v in self.data_config.transform_mapping.items():
                         _vl = _v if isinstance(_v, (list, tuple)) else [_v]
                         for _t in _vl:
-                            logger.info(f"[DEBUG]   transform_mapping['{_k}']: {type(_t).__name__} -> {_t}")
+                            logger.debug(f"  transform_mapping['{_k}']: {type(_t).__name__} -> {_t}")
                 else:
-                    logger.warning("[DEBUG] transform_mapping is None in data_config!")
-                self.input_transforms = self.data_config.get_transforms(remap=False)
-                logger.info(f"[DEBUG] input_transforms after get_transforms: {self.input_transforms}")
+                    logger.warning("transform_mapping is None in data_config!")
+                self.input_transforms = self.data_config.get_transforms(remap=False, training=False)
+                logger.debug(f"input_transforms after get_transforms: {self.input_transforms}")
             if self.output_transforms is None:
                 self.output_transforms = self.data_config.get_action_denormalization()
 
@@ -177,6 +270,23 @@ class PolicyInterface:
             elif "image" not in key and not key.startswith("action"):
                 self.obs_queue[key] = deque(maxlen=1)
 
+        # Rank (number of dims, excluding batch) of a single observation frame
+        # for each queued key. Used by process_obs_queue to detect whether an
+        # incoming tensor already carries an explicit temporal axis. Some
+        # environments (e.g. TabletopSim) provide observations as
+        # (batch, seq_len, *feature_shape) while others (e.g. UR5) provide them
+        # as (batch, *feature_shape) with no temporal axis.
+        self._feature_ranks = {}
+        feature_dict = getattr(self.policy.config, "feature_dict", None) or {}
+        for key in self.obs_queue:
+            feature = feature_dict.get(key)
+            if feature is not None and getattr(feature, "shape", None) is not None:
+                self._feature_ranks[key] = len(feature.shape)
+            else:
+                # Fallback when feature metadata is unavailable: images are
+                # (C, H, W) -> rank 3, everything else (state/env) -> rank 1.
+                self._feature_ranks[key] = 3 if "image" in key else 1
+
     def reset(self):
         """Reset policy interface state between episodes.
 
@@ -186,6 +296,9 @@ class PolicyInterface:
         print("RESETTING OBS QUEUE")
         for key in self.obs_queue:
             self.obs_queue[key].clear()
+        # Drop the stored RTC action chunk so remaining-action blending does not
+        # leak across episode boundaries.
+        self.prev_action_chunk = None
 
     def remap_observation(self, obs: dict[str, torch.Tensor | str]) -> dict[str, Any]:
         """Remap observation keys based on observation_mapping.
@@ -231,18 +344,40 @@ class PolicyInterface:
         Returns:
             A dictionary with observation keys and concatenated tensors of shape
             (batch_size, n_timesteps, *obs_shape) where n_timesteps is determined by
-            the delta_indices for each key.
+            the delta_indices for each key. For every processed key, a companion
+            ``{key}_is_pad`` boolean tensor of shape (batch_size, n_timesteps) is
+            added, mirroring the ``LeRobotDataset`` getitem behaviour: an entry is
+            True when the requested timestep falls before the start of the
+            available history and is therefore filled with the oldest observation.
         """
 
+        pad_updates: dict[str, torch.Tensor] = {}
         for key in obs:
             if key in self.obs_queue:
                 # first append current obs to the queues, preserving the batch dimension
-                values = obs[key]  # (batch_size, seq_len, *obs_shape)
+                values = obs[key]
                 if values.ndim < 2:
                     continue
-                # append in reverse order so that latest is at the end
-                for t in reversed(range(values.shape[1])):
-                    self.obs_queue[key].append(values[:, t : t + 1])  # (batch_size, 1, *obs_shape)
+
+                # Detect whether the incoming tensor carries an explicit temporal
+                # axis. A single frame is (batch, *feature_shape); with a temporal
+                # axis it is (batch, seq_len, *feature_shape). We disambiguate by
+                # comparing the tensor rank against the known per-frame feature
+                # rank. Some environments (e.g. TabletopSim) supply the temporal
+                # axis; others (e.g. UR5) supply a single current frame.
+                feature_rank = self._feature_ranks[key]
+                if values.ndim == feature_rank + 2:
+                    # (batch, seq_len, *feature_shape): append each timestep,
+                    # oldest first so the latest ends up at the end of the queue.
+                    frames = [values[:, t : t + 1] for t in reversed(range(values.shape[1]))]
+                else:
+                    # (batch, *feature_shape) with no temporal axis (or an
+                    # unexpected rank): treat as a single current frame and add
+                    # the temporal axis ourselves -> (batch, 1, *feature_shape).
+                    frames = [values.unsqueeze(1)]
+
+                for frame in frames:
+                    self.obs_queue[key].append(frame)  # (batch_size, 1, *obs_shape)
 
                 # then sample from the queue
                 delta_indices = self.delta_indices_dict[key]
@@ -250,6 +385,7 @@ class PolicyInterface:
                 buffer_list = list(self.obs_queue[key])
                 buffer_len = len(buffer_list)
                 sampled_history = []
+                pad_flags = []
 
                 for delta_idx in delta_indices:
                     # delta_idx is negative or zero (e.g., -27, -24, ..., 0)
@@ -260,12 +396,24 @@ class PolicyInterface:
                     if actual_idx < 0:
                         # Pad with oldest available observation
                         sampled_history.append(buffer_list[0])
+                        pad_flags.append(True)
                     else:
                         sampled_history.append(buffer_list[actual_idx])
+                        pad_flags.append(False)
 
                 # Concatenate along seq dim: (batch_size, history_len, *obs_shape)
                 obs[key] = torch.cat(sampled_history, dim=1)
 
+                # Emit an is_pad mask matching the dataset getitem, so policies can
+                # mask out padded (repeated boundary) observations at inference just
+                # as they do during training. The pad status only depends on the
+                # buffer length, so it is shared across the batch dimension.
+                pad_mask = torch.tensor(pad_flags, dtype=torch.bool, device=obs[key].device)
+                pad_updates[f"{key}_is_pad"] = (
+                    pad_mask.unsqueeze(0).expand(obs[key].shape[0], -1).contiguous()
+                )
+
+        obs.update(pad_updates)
         return obs
 
     def process_observation(self, obs, process_action: bool = False):
@@ -354,6 +502,12 @@ class PolicyInterface:
                 - Task: List of strings
                 - Action (optional, for RTC mode): torch.Tensor of shape
                     (batch_size, chunk_size, action_dim)
+                - num_actions_executed (optional, for RTC mode): int count of how
+                    many actions from the previously predicted chunk the client
+                    has already executed. The remaining (not-yet-executed)
+                    actions are recovered by indexing into the internally stored
+                    policy-space chunk and used as the RTC previous actions,
+                    superseding any client-provided "action" tensor.
                 - _reset_ (optional): bool-like flag. If True, clears internal
                     observation history buffers before processing this call.
             noise: Optional initial noise tensor. When provided,
@@ -380,6 +534,40 @@ class PolicyInterface:
         if reset_requested:
             self.reset()
 
+        # RTC: the client tells us how many actions from the *previously*
+        # predicted chunk it has already executed. The still-pending
+        # ("remaining") actions are recovered by indexing into the stored
+        # absolute chunk (see ``self.prev_action_chunk``). They are then passed
+        # through the input transforms with the current observation so RTC
+        # guidance compares actions in one policy coordinate frame.
+        num_actions_executed = obs.pop("num_actions_executed", None)
+        if num_actions_executed is not None:
+            num_actions_executed = _parse_num_actions_executed(num_actions_executed)
+            if self.eval_mode == "rtc":
+                cached_chunk_length = (
+                    self.prev_action_chunk.shape[-2] if self.prev_action_chunk is not None else 0
+                )
+                if not 0 <= num_actions_executed <= cached_chunk_length:
+                    raise ValueError(
+                        "num_actions_executed must be between 0 and the cached action chunk length "
+                        f"({cached_chunk_length}), got {num_actions_executed}."
+                    )
+
+        # Decide whether to source RTC previous actions from the stored absolute
+        # chunk. Ignore client-provided actions and re-transform the stored
+        # remainder against the current observation.
+        use_stored_prev = (
+            self.eval_mode == "rtc"
+            and num_actions_executed is not None
+            and self.prev_action_chunk is not None
+        )
+        remaining_absolute_actions = None
+        if use_stored_prev:
+            obs.pop("action", None)
+            remaining_absolute_actions = self.prev_action_chunk[:, num_actions_executed:, :]
+            if remaining_absolute_actions.shape[-2] > 0:
+                obs["action"] = remaining_absolute_actions.detach().clone()
+
         # Move observation tensors to the same device as the policy
         for key, value in obs.items():
             if isinstance(value, torch.Tensor):
@@ -398,21 +586,34 @@ class PolicyInterface:
             if noise_tensor.ndim == 2:
                 noise_tensor = noise_tensor.unsqueeze(0)
 
+        remaining_actions = None
         if self.eval_mode == "standard":
             with torch.no_grad():
                 action_chunk = self.policy.sample_actions(obs, noise=noise_tensor)
         elif self.eval_mode == "rtc":
+            # Stored absolute actions, when present, have already been converted
+            # into current-frame, normalized policy actions.
+            remaining_actions = obs.get("action", None)
+
             action_chunk = self.policy.sample_actions_rtc(
                 obs,
                 inference_delay=self.inference_delay,
-                prev_actions=obs.get("action", None),
+                prev_actions=remaining_actions,
                 beta=self.beta,
                 execution_horizon=self.execution_horizon,
+                guidance_schedule=self.guidance_schedule,
+                noise=noise_tensor,
             )
         else:
             raise ValueError(f"Unknown eval_mode: {self.eval_mode}")
 
         action = self.process_action(obs, action_chunk["actions"])
+
+        # Cache absolute actions. Re-running these through process_observation
+        # on the next request aligns state-relative deltas and ACTIONCHUNK stats
+        # with new chunk indices before RTC guidance.
+        if self.eval_mode == "rtc":
+            self.prev_action_chunk = action.detach().clone()
 
         # Propagate the actual noise used by the flow model back to the
         # caller's obs dict so server code can return it to the robot for
@@ -452,7 +653,7 @@ def main():
         "--checkpoint",
         type=str,
         required=True,
-        help="Path to pretrained checkpoint (.pt file or folder containing checkpoint_latest.pt)",
+        help="Path to a checkpoint bundle, legacy .pt file, or checkpoints directory",
     )
     parser.add_argument(
         "--dataset_root",
@@ -510,6 +711,13 @@ def main():
         default=0,
         help="Weighting parameter for RTC update vs standard update (required for RTC mode)",
     )
+    parser.add_argument(
+        "--guidance_schedule",
+        type=str,
+        default="paper",
+        choices=["paper", "constant"],
+        help="Guidance coefficient schedule for RTC: 'paper' (Eq. 1/4) or 'constant' (always beta)",
+    )
 
     args = parser.parse_args()
 
@@ -559,6 +767,7 @@ def main():
     if args.eval_mode == "rtc":
         logger.info(f"  Inference delay: {args.inference_delay}")
         logger.info(f"  Beta: {args.beta}")
+        logger.info(f"  Guidance schedule: {args.guidance_schedule}")
 
     policy_interface_cfg = PolicyInterfaceConfig(
         data_config=eval_cfg.dataset,
@@ -567,6 +776,7 @@ def main():
         eval_mode=args.eval_mode,
         inference_delay=args.inference_delay if args.eval_mode == "rtc" else None,
         beta=args.beta if args.eval_mode == "rtc" else None,
+        guidance_schedule=args.guidance_schedule,
         observation_mapping=eval_cfg.dataset.observation_mapping
         or {
             "observation.state": "observation.state",

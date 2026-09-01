@@ -1,6 +1,0 @@
-action.ee_position:
-  state_key: observations.ee_position
-  action_type: EE_EULER_POS
-action.joint_position:
-  state_key: observations.joint_position
-  action_type: POSITION

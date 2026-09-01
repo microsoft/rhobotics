@@ -1,11 +1,13 @@
 import logging
 import time
 
-from typing_extensions import override
 import websockets.sync.client
+from typing_extensions import override
 
 from rho_client import base_policy as _base_policy
 from rho_client import msgpack_numpy
+
+logger = logging.getLogger(__name__)
 
 
 class WebsocketClientPolicy(_base_policy.BasePolicy):
@@ -29,7 +31,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
         return self._server_metadata
 
     def _wait_for_server(self) -> tuple[websockets.sync.client.ClientConnection, dict]:
-        logging.info(f"Waiting for server at {self._uri}...")
+        logger.info(f"Waiting for server at {self._uri}...")
         while True:
             try:
                 headers = {"Authorization": f"Api-Key {self._api_key}"} if self._api_key else None
@@ -39,19 +41,19 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 metadata = msgpack_numpy.unpackb(conn.recv())
                 return conn, metadata
             except ConnectionRefusedError:
-                logging.info("Still waiting for server...")
+                logger.info("Still waiting for server...")
                 time.sleep(5)
 
     @override
-    def infer(self, obs: dict) -> dict:  # noqa: UP006
+    def infer(self, obs: dict) -> dict:
         data = self._packer.pack(obs)
         self._ws.send(data)
         response = self._ws.recv()
         if isinstance(response, str):
             # we're expecting bytes; if the server sends a string, it's an error.
-            raise RuntimeError(f"Error in inference server:\n{response}")
+            raise RuntimeError(f"Error in inference server:\n{response}")  # noqa: TRY004
         return msgpack_numpy.unpackb(response)
 
     @override
     def reset(self) -> None:
-        pass
+        return None

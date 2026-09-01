@@ -6,7 +6,7 @@ which avoids loading image/video data and is much faster for computing statistic
 
 Supports computing:
 - Quantile statistics (q01/q99) for all numeric keys
-- Chunked delta action statistics (mean, std, min, max, q02, q98)
+- Chunked delta action statistics (mean, std, min, max, q01/q99 and q02/q98 by default)
 - Both types of statistics
 
 Usage:
@@ -41,7 +41,8 @@ import yaml
 from tqdm import tqdm
 
 from rho.common.transforms import DeltaActions
-from rho.utils.normalize import RunningStats, RunningStatsChunked
+from rho.common.types import ActionType
+from rho.utils.normalize import RunningStats, RunningStatsChunked, quantile_stat_key
 
 # =============================================================================
 # Common Utilities
@@ -463,7 +464,33 @@ def compute_quantile_stats_from_parquet(
 # =============================================================================
 
 
-def infer_action_type_from_key(action_key: str) -> str:
+ACTION_TYPE_ALIASES = {
+    "joint_position": ActionType.POSITION,
+    "position": ActionType.POSITION,
+    "ee_rpy_pos": ActionType.EE_EULER_POS,
+    "ee_euler_pos": ActionType.EE_EULER_POS,
+    "ee_quat_pos": ActionType.EE_QUAT_POS_XYZW,
+    "ee_6d_pos": ActionType.EE_6D_POS,
+    "six_d": ActionType.SIX_D,
+    "quat_xyzw": ActionType.QUAT_XYZW,
+    "quat_wxyz": ActionType.QUAT_WXYZ,
+    "euler": ActionType.EULER,
+}
+
+
+def normalize_action_type(action_type: str | ActionType) -> ActionType:
+    if isinstance(action_type, ActionType):
+        return action_type
+    try:
+        return ActionType(action_type)
+    except ValueError:
+        normalized = action_type.lower()
+        if normalized not in ACTION_TYPE_ALIASES:
+            raise ValueError(f"Unknown action_type: {action_type}") from None
+        return ACTION_TYPE_ALIASES[normalized]
+
+
+def infer_action_type_from_key(action_key: str) -> ActionType:
     """
     Infer action type based on action key naming conventions.
 
@@ -471,19 +498,18 @@ def infer_action_type_from_key(action_key: str) -> str:
         action_key: The action feature key string.
 
     Returns:
-        Inferred action type string matching DeltaActions transform types:
-        "joint_position", "ee_rpy_pos", "ee_quat_pos", or "ee_6d_pos"
+        Inferred action type enum for DeltaActions.
     """
     if "ee_6d" in action_key:
-        return "ee_6d_pos"
+        return ActionType.EE_6D_POS
     elif "ee_quat" in action_key:
-        return "ee_quat_pos"
+        return ActionType.EE_QUAT_POS_XYZW
     elif "ee_rpy" in action_key:
-        return "ee_rpy_pos"
+        return ActionType.EE_EULER_POS
     elif "joint" in action_key:
-        return "joint_position"
+        return ActionType.POSITION
     else:
-        return "joint_position"
+        return ActionType.POSITION
 
 
 def load_parquet_for_chunks(
@@ -606,7 +632,8 @@ def apply_delta_transform(
     states: torch.Tensor,
     action_key: str,
     state_key: str,
-    action_type: str,
+    action_type: str | ActionType,
+    use_absolute_grippers: bool = False,
 ) -> torch.Tensor:
     """
     Apply DeltaActions transform to action chunks.
@@ -637,7 +664,8 @@ def apply_delta_transform(
         action_key=action_key,
         relative_to_state=True,
         post_norm=False,
-        action_type=action_type,
+        action_type=normalize_action_type(action_type),
+        use_absolute_grippers=use_absolute_grippers,
     )
 
     transformed = delta_transform(data)
@@ -652,6 +680,8 @@ def compute_chunked_stats_from_parquet(
     chunk_sizes: list[int] | None = None,
     compute_mode: str = "single_pass",
     output_path: Path | None = None,
+    chunk_quantiles: list[tuple[float, float]] | tuple[float, float] = ((0.01, 0.99), (0.02, 0.98)),
+    use_absolute_grippers: bool = False,
 ) -> dict:
     """
     Compute chunked statistics directly from parquet files.
@@ -664,12 +694,20 @@ def compute_chunked_stats_from_parquet(
         chunk_sizes: List of chunk sizes to compute stats for.
         compute_mode: "single_pass", "two_pass", or "quantile_only".
         output_path: Path to save output stats.
+        chunk_quantiles: Lower and upper quantile pairs for chunk quantile stats.
 
     Returns:
         Dict of computed statistics.
     """
     if chunk_sizes is None:
         chunk_sizes = [50]
+    if len(chunk_quantiles) == 2 and isinstance(chunk_quantiles[0], float):
+        chunk_quantiles = [tuple(chunk_quantiles)]
+    chunk_quantiles = list(chunk_quantiles)
+    quantile_key_pairs = [(quantile_stat_key(low), quantile_stat_key(high)) for low, high in chunk_quantiles]
+
+    def first_pass_bounds_path(path: Path) -> Path:
+        return path.with_name(f"{path.stem}_first_pass_bounds{path.suffix}")
 
     # Get unique state keys
     state_keys = list(set(action_to_state_mapping.values()))
@@ -697,7 +735,9 @@ def compute_chunked_stats_from_parquet(
     # Load precomputed bounds if using quantile_only mode
     precomputed_bounds = None
     if compute_mode == "quantile_only" and output_path:
-        stats_path = output_path.parent / f"{output_path.stem}_stats.json"
+        stats_path = first_pass_bounds_path(output_path)
+        if not stats_path.exists():
+            stats_path = output_path
         if stats_path.exists():
             print(f"Loading precomputed bounds from {stats_path}")
             with open(stats_path) as f:
@@ -747,13 +787,22 @@ def compute_chunked_stats_from_parquet(
                     states = chunks_batch[state_key]
 
                     # Apply delta transform
-                    delta_actions = apply_delta_transform(actions, states, action_key, state_key, action_type)
+                    delta_actions = apply_delta_transform(
+                        actions,
+                        states,
+                        action_key,
+                        state_key,
+                        action_type,
+                        use_absolute_grippers=use_absolute_grippers,
+                    )
                     delta_actions_np = delta_actions.numpy()
 
                     # Get or initialize stats object
                     stats_obj = stats_objects[action_key][chunk_size]
                     if stats_obj is None:
-                        stats_obj = RunningStatsChunked()
+                        stats_obj = RunningStatsChunked(
+                            quantile_pairs=chunk_quantiles,
+                        )
                         stats_objects[action_key][chunk_size] = stats_obj
 
                     # Process in batches for memory efficiency
@@ -778,6 +827,7 @@ def compute_chunked_stats_from_parquet(
                     stats_objects[action_key][chunk_size] = RunningStatsChunked(
                         known_min=precomputed_bounds[action_key][min_key],
                         known_max=precomputed_bounds[action_key][max_key],
+                        quantile_pairs=chunk_quantiles,
                     )
                 else:
                     stats_objects[action_key][chunk_size] = None  # Lazy init
@@ -791,7 +841,10 @@ def compute_chunked_stats_from_parquet(
         # Re-initialize stats objects with no_quantile=True for memory efficiency
         for action_key in action_keys:
             for chunk_size in chunk_sizes:
-                stats_objects[action_key][chunk_size] = RunningStatsChunked(no_quantile=True)
+                stats_objects[action_key][chunk_size] = RunningStatsChunked(
+                    no_quantile=True,
+                    quantile_pairs=chunk_quantiles,
+                )
 
         stats_objects = process_all_parquet_files(stats_objects, pass_name="First pass")
 
@@ -832,7 +885,7 @@ def compute_chunked_stats_from_parquet(
                             first_pass_stats[action_key][f"min_chunk{to_append}"] = known_min.tolist()
                             first_pass_stats[action_key][f"max_chunk{to_append}"] = known_max.tolist()
 
-            first_pass_file = output_path
+            first_pass_file = first_pass_bounds_path(output_path)
             print(f"\nSaving first pass min/max bounds to: {first_pass_file}")
             first_pass_file.parent.mkdir(parents=True, exist_ok=True)
             with open(first_pass_file, "w") as f:
@@ -851,6 +904,7 @@ def compute_chunked_stats_from_parquet(
                     stats_objects[action_key][chunk_size] = RunningStatsChunked(
                         known_min=known_min,
                         known_max=known_max,
+                        quantile_pairs=chunk_quantiles,
                     )
                 else:
                     stats_objects[action_key][chunk_size] = None  # Lazy init
@@ -886,8 +940,13 @@ def compute_chunked_stats_from_parquet(
             chunked_stats_output[action_key][f"std_chunk{to_append}"] = stats_dict["std"].tolist()
             chunked_stats_output[action_key][f"min_chunk{to_append}"] = stats_dict["min"].tolist()
             chunked_stats_output[action_key][f"max_chunk{to_append}"] = stats_dict["max"].tolist()
-            chunked_stats_output[action_key][f"q02_chunk{to_append}"] = stats_dict["q02"].tolist()
-            chunked_stats_output[action_key][f"q98_chunk{to_append}"] = stats_dict["q98"].tolist()
+            for q_low_key, q_high_key in quantile_key_pairs:
+                chunked_stats_output[action_key][f"{q_low_key}_chunk{to_append}"] = stats_dict[
+                    q_low_key
+                ].tolist()
+                chunked_stats_output[action_key][f"{q_high_key}_chunk{to_append}"] = stats_dict[
+                    q_high_key
+                ].tolist()
 
             mean_min, mean_max = stats_dict["mean"].min(), stats_dict["mean"].max()
             print(f"  {action_key} (chunk_size={chunk_size}): mean range [{mean_min:.4f}, {mean_max:.4f}]")
@@ -1089,6 +1148,22 @@ Examples:
         help="List of chunk sizes to compute stats for (for chunk stats).",
     )
     parser.add_argument(
+        "--chunk_quantiles",
+        type=float,
+        nargs="+",
+        default=[1.0, 99.0, 2.0, 98.0],
+        metavar="PCT",
+        help=(
+            "Lower/upper chunk quantile percentile pairs to compute. "
+            "Default: 1 99 2 98, which emits q01/q99 and keeps q02/q98."
+        ),
+    )
+    parser.add_argument(
+        "--use_absolute_grippers",
+        action="store_true",
+        help="Keep gripper channels absolute when computing delta action chunk stats.",
+    )
+    parser.add_argument(
         "--indices_dict",
         type=str,
         default=None,
@@ -1110,6 +1185,16 @@ Examples:
     dataset_path = Path(args.dataset_path)
     output_path = Path(args.output_path) if args.output_path else dataset_path / "meta" / "stats.json"
     print(f"Output path: {output_path}")
+
+    if len(args.chunk_quantiles) % 2 != 0:
+        raise ValueError("--chunk_quantiles must contain LOW HIGH pairs")
+    chunk_quantiles = []
+    for low_pct, high_pct in zip(args.chunk_quantiles[::2], args.chunk_quantiles[1::2], strict=True):
+        pair = (low_pct / 100.0, high_pct / 100.0)
+        if not 0 < pair[0] < pair[1] < 1:
+            raise ValueError("--chunk_quantiles pairs must satisfy 0 < LOW < HIGH < 100")
+        if pair not in chunk_quantiles:
+            chunk_quantiles.append(pair)
 
     combined_stats: dict = {}
 
@@ -1145,7 +1230,9 @@ Examples:
         if action_mapping:
             action_keys = list(action_mapping.keys())
             action_to_state_mapping = {k: v["state_key"] for k, v in action_mapping.items()}
-            action_to_type_mapping = {k: v["action_type"] for k, v in action_mapping.items()}
+            action_to_type_mapping = {
+                k: normalize_action_type(v["action_type"]) for k, v in action_mapping.items()
+            }
         else:
             action_keys = args.action_keys
             action_to_state_mapping = dict.fromkeys(action_keys, "observation.state")
@@ -1163,6 +1250,8 @@ Examples:
             chunk_sizes=args.chunk_sizes,
             compute_mode=args.compute_mode,
             output_path=output_path,
+            chunk_quantiles=chunk_quantiles,
+            use_absolute_grippers=args.use_absolute_grippers,
         )
 
         # Merge chunk stats with combined stats

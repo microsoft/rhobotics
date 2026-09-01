@@ -1,0 +1,18 @@
+# Evaluate a portable Rho checkpoint on LIBERO.
+pretrained_checkpoint: null
+
+eval_num_episodes: 10
+record_videos: true
+output_dir: null
+device: "cuda"
+
+environment:
+  type: "libero"
+  task_suite_name: "libero_spatial"
+  n_envs: 2
+  max_episode_steps: 300
+
+policy:
+  type: "rho"
+
+seed: 42

@@ -1,0 +1,59 @@
+datasets:
+  - dataset:
+      repo_id: "roboeval_lift_pot" # Local dataset identifier
+      root_dir: "${ROBOEVAL_DATA_ROOT}/lift_pot"
+      <<: !include features.yaml
+    weight: 1
+
+  - dataset:
+      repo_id: "roboeval_lift_tray" # Local dataset identifier
+      root_dir: "${ROBOEVAL_DATA_ROOT}/lift_tray"
+      <<: !include features.yaml
+    weight: 1
+
+  - dataset:
+      repo_id: "roboeval_pack_box" # Local dataset identifier
+      root_dir: "${ROBOEVAL_DATA_ROOT}/pack_box"
+      <<: !include features.yaml
+    weight: 1
+
+  - dataset:
+      repo_id: "roboeval_pick_single_book_from_table" # Local dataset identifier
+      root_dir: "${ROBOEVAL_DATA_ROOT}/pick_single_book_from_table"
+      <<: !include features.yaml
+    weight: 1
+
+  - dataset:
+      repo_id: "roboeval_rotate_valve" # Local dataset identifier
+      root_dir: "${ROBOEVAL_DATA_ROOT}/rotate_valve"
+      <<: !include features.yaml
+    weight: 1
+
+  - dataset:
+      repo_id: "roboeval_stack_single_book_shelf" # Local dataset identifier
+      root_dir: "${ROBOEVAL_DATA_ROOT}/stack_single_book_shelf"
+      <<: !include features.yaml
+    weight: 1
+
+  - dataset:
+      repo_id: "roboeval_stack_two_blocks" # Local dataset identifier
+      root_dir: "${ROBOEVAL_DATA_ROOT}/stack_two_blocks"
+      <<: !include features.yaml
+    weight: 1
+
+  - dataset:
+      repo_id: "roboeval_cube_handover" # Local dataset identifier
+      root_dir: "${ROBOEVAL_DATA_ROOT}/cube_handover"
+      <<: !include features.yaml
+    weight: 1
+
+observation_whitelist:
+  - "observation.state"
+  - "observation.image.0"
+  - "observation.image.1"
+  - "observation.image.2"
+  - "action"
+  - "task"
+  - "task_index"
+  - "frame_index"
+  - "episode_index"

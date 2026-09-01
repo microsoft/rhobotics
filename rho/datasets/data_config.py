@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import draccus
 import numpy as np
 import torch
 from draccus import ChoiceRegistry
@@ -11,12 +12,15 @@ from torchvision.transforms import Compose
 
 from rho.common.constants import ACTION, OBSERVATION_ENVIRONMENT_STATE, OBSERVATION_IMAGE, OBSERVATION_STATE
 from rho.common.normalize import Unnormalize
+from rho.common.registry import get_registered_choice_type
 from rho.common.serialization import fixup_feature_shapes, serialize_to_dict
 from rho.common.transforms import (
     AbsoluteActions,
     ConvertFrom6dActions,
     ConvertTo6dActions,
     DeltaActions,
+    EndStateTarget,
+    LanguageActionTarget,
     Transform,
 )
 from rho.common.types import ActionType, FeatureType, NormalizationMode, PolicyFeature, TrainingMode
@@ -93,7 +97,12 @@ def append_task(sample: dict[str, torch.Tensor], instruction: str) -> dict[str, 
         dict[str, torch.Tensor]: The updated data sample.
     """
     if "task" not in sample and instruction is not None:
-        sample["task"] = [instruction]
+        # Encode as a fixed-width uint8 tensor so downstream collate keeps the
+        # batch tensor-only (required for accelerate.dispatch_batches). See
+        # rho.common.task_encoding for the format.
+        from rho.common.task_encoding import encode_task_bytes
+
+        sample["task"] = encode_task_bytes(instruction)
     return sample
 
 
@@ -112,17 +121,69 @@ def convert_dict_list_to_array(d: dict):
 
 @dataclass
 class DataConfig(ChoiceRegistry):
-    """Configuration for data processing from raw data -> model input."""
+    """Registry-level contract for a configured data source."""
 
     @classmethod
     def default_choice_name(cls) -> str:
-        """Return 'base' as default when no 'type' key is provided."""
-        return "base"
+        """Fallback type for legacy single-dataset configurations."""
+        return "lerobot"
 
     @property
     def type(self) -> str:
-        """Return the choice registry type name for this config."""
-        return self.get_choice_name(self.__class__)
+        """Return the unique registered data-source identity."""
+        return get_registered_choice_type(self)
+
+    @property
+    def feature_dict(self):
+        return getattr(self, "features", None)
+
+    @property
+    def transformed_feature_dict(self):
+        return getattr(self, "transformed_features", self.feature_dict)
+
+    def make_dataset(self, policy_cfg=None):
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement make_dataset()")
+
+    def make_sampler(self, dataset, policy_cfg=None):
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement make_sampler()")
+
+    def get_contributions(self):
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement get_contributions()")
+
+    def needs_delta_actions(self) -> bool:
+        return False
+
+    def needs_perdim_delta_actions(self) -> bool:
+        return False
+
+
+@draccus.decode.register(DataConfig)
+def decode_data_config(config_dict: dict, path=()) -> DataConfig:
+    """Decode canonical and legacy dataset dictionaries through one registry."""
+    if isinstance(config_dict, DataConfig):
+        return config_dict
+    if not isinstance(config_dict, dict):
+        raise TypeError(f"DataConfig must be decoded from a mapping, got {type(config_dict).__name__}")
+
+    config_dict = dict(config_dict)
+    config_type = config_dict.pop("type", None)
+    if config_type is None:
+        if "datasets" in config_dict or "dataset_cfgs" in config_dict:
+            config_type = "multi"
+        else:
+            config_type = DataConfig.default_choice_name()
+
+    try:
+        config_class = DataConfig.get_choice_class(config_type)
+    except KeyError:
+        choices = ", ".join(sorted(DataConfig.get_known_choices()))
+        raise ValueError(f"Unknown dataset type {config_type!r}. Available types: {choices}") from None
+    return draccus.decode(config_class, config_dict)
+
+
+@dataclass
+class RobotDataConfig(DataConfig):
+    """Feature processing and normalization shared by robot datasets."""
 
     batch_size: int = 64
     num_workers: int = 4
@@ -134,6 +195,8 @@ class DataConfig(ChoiceRegistry):
     stats: str | dict | None = None  # Statistics for normalization
     clip_values: dict[str, tuple[float, float]] | None = None  # Clipping values for normalization
     chunk_size: int | None = None  # Chunk size for action chunk normalization
+    action_time_horizon_s: float | None = None
+    min_action_chunk_size: int = 8
 
     # Optional mapping for observation keys
     observation_mapping: dict[str, str] = None
@@ -157,6 +220,7 @@ class DataConfig(ChoiceRegistry):
     # This flag is useful when the stats file is too big to save.
     # Particularly in cases where we are using a MultiDatasetConfig
     serialize_stats: bool = True  # Whether to serialize stats when converting to dict
+    video_decoder_cache_size: int | None = None
 
     video_decoder_cache_size: int | None = None  # Max size for video decoder cache, or None for unlimited
 
@@ -201,15 +265,15 @@ class DataConfig(ChoiceRegistry):
             if "{" in self.stats:
                 self.stats = ast.literal_eval(self.stats)  # Assume it's a JSON string
                 self.stats = convert_dict_list_to_array(self.stats)
-            elif Path(self.stats).suffix == ".json":
-                with open(Path(self.stats)) as f:
+            elif Path(os.path.expandvars(self.stats)).suffix == ".json":
+                with open(Path(os.path.expandvars(self.stats))) as f:
                     self.stats = json.load(f)
-            elif Path(self.stats).suffix == ".npz":
+            elif Path(os.path.expandvars(self.stats)).suffix == ".npz":
                 # Handle npz files
-                self.stats = dict(np.load(Path(self.stats), allow_pickle=True))
+                self.stats = dict(np.load(Path(os.path.expandvars(self.stats)), allow_pickle=True))
             else:
                 raise ValueError(
-                    f"Unsupported stats file format: {Path(self.stats).suffix}. "
+                    f"Unsupported stats file format: {Path(os.path.expandvars(self.stats)).suffix}. "
                     f"Supported formats: .json, .npz"
                 )
 
@@ -392,6 +456,7 @@ class DataConfig(ChoiceRegistry):
                         state_key=delta_config["state_key"],
                         action_key=delta_config["action_key"],
                         relative_to_state=delta_config["relative_to_state"],
+                        use_absolute_grippers=delta_config.get("use_absolute_grippers", False),
                         action_type=delta_config["action_type"],
                         post_norm=delta_config["post_norm"],
                     )
@@ -449,35 +514,34 @@ class DataConfig(ChoiceRegistry):
                             f"Please match these values in the config."
                         )
 
-                    # delta_actions_config = (
-                    #     extract_transform_config(t, DeltaActions, "delta_actions") is not None
-                    # )
-                    # if delta_actions_config:
-                    #     if convert_to_6d_found:
-                    #         assert t.action_type == ActionType.EE_6D_POS, (
-                    #             f"DeltaActions transform found for key {key} after "
-                    #             f"ConvertTo6dActions. Please ensure the action_type is "
-                    #             f"set to EE_6D_POS for proper normalization. "
-                    #             f"Current action_type: {t.action_type}"
-                    #         )
-                    #     else:
-                    #         assert t.action_type == self.action_type, (
-                    #             f"DeltaActions transform found for key {key} without "
-                    #             f"preceding ConvertTo6dActions. Please ensure the "
-                    #             f"action_type is set to {self.action_type} for proper "
-                    #             f"normalization. Current action_type: {t.action_type}"
-                    #         )
-
     def remap_features(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Remap the features in the batch according to the feature configuration."""
-        # For now, just return the batch as-is.
+
+        def _remap_key(key: str) -> str:
+            # Remap the key directly, or, for companion `{feature}_is_pad` masks,
+            # remap the underlying feature and re-attach the `_is_pad` suffix so
+            # the mask stays paired with its (renamed) feature.
+            if key in self.observation_mapping:
+                return self.observation_mapping[key]
+            if key.endswith("_is_pad"):
+                base = key[: -len("_is_pad")]
+                if base in self.observation_mapping:
+                    return f"{self.observation_mapping[base]}_is_pad"
+            return key
+
         if self.observation_mapping is not None:
             # Remap observation keys according to the mapping
-            batch = {self.observation_mapping.get(k, k): v for k, v in batch.items()}
+            batch = {_remap_key(k): v for k, v in batch.items()}
 
         if self.observation_whitelist is not None:
-            # Filter the batch to only include whitelisted observations
-            batch = {k: v for k, v in batch.items() if k in self.observation_whitelist}
+            # Filter the batch to only include whitelisted observations, keeping
+            # any `{feature}_is_pad` mask whose feature is whitelisted.
+            batch = {
+                k: v
+                for k, v in batch.items()
+                if k in self.observation_whitelist
+                or (k.endswith("_is_pad") and k[: -len("_is_pad")] in self.observation_whitelist)
+            }
 
         # Flatten state observations (keep batch dimension, flatten the rest)
         for key in list(batch.keys()):
@@ -530,6 +594,38 @@ class DataConfig(ChoiceRegistry):
             return transforms[0]
         else:
             return Compose(transforms)
+
+    def needs_delta_actions(self) -> bool:
+        """True when the ACTION normalization mode is ACTIONCHUNK-family.
+
+        MultiDatasetConfig calls this on each child to decide whether to
+        auto-inject a delta_actions transform.
+        """
+        actionchunk_modes = [
+            NormalizationMode.ACTIONCHUNK_MIN_MAX,
+            NormalizationMode.ACTIONCHUNK_MEAN_STD,
+            NormalizationMode.ACTIONCHUNK_QUANTILE,
+            NormalizationMode.ACTIONCHUNK_PERDIM_MEAN_STD,
+            NormalizationMode.ACTIONCHUNK_PERDIM_MIN_MAX,
+            NormalizationMode.ACTIONCHUNK_PERDIM_QUANTILE,
+        ]
+        if self.normalization_mapping is not None:
+            action_norm_mode = self.normalization_mapping.get(FeatureType.ACTION)
+            if action_norm_mode in actionchunk_modes:
+                return True
+        return False
+
+    def needs_perdim_delta_actions(self) -> bool:
+        perdim_modes = [
+            NormalizationMode.ACTIONCHUNK_PERDIM_MEAN_STD,
+            NormalizationMode.ACTIONCHUNK_PERDIM_MIN_MAX,
+            NormalizationMode.ACTIONCHUNK_PERDIM_QUANTILE,
+        ]
+        if self.normalization_mapping is not None:
+            action_norm_mode = self.normalization_mapping.get(FeatureType.ACTION)
+            if action_norm_mode in perdim_modes:
+                return True
+        return False
 
     def _convert_numpy_to_python(self, obj):
         """Convert numpy arrays and types to Python native types for JSON serialization.
@@ -629,19 +725,17 @@ class DataConfig(ChoiceRegistry):
         and optionally strips stats when serialize_stats is False.
         Feature shapes are converted back to string format for YAML round-trip safety.
 
-        Note: The ChoiceRegistry ``type`` key is intentionally **not** included.
-        DataConfig subclasses (LeRobotDatasetConfig, MultiDatasetConfig) are
-        concrete types in a Union — draccus 0.8-0.11 has a bug where it fails
-        to pop the ``type`` key when decoding known concrete subclasses.
-        Omitting ``type`` avoids that bug and keeps the output round-trippable.
-        Abstract ChoiceRegistry types like PolicyConfig still get ``type``
-        via the generic serialize_to_dict ChoiceRegistry path.
+        The ChoiceRegistry ``type`` key is included so decoding does not rely
+        on field-based inference. Legacy dictionaries without it are handled
+        by ``decode_data_config``.
         """
         from dataclasses import fields as dc_fields
 
-        result = {}
+        result = {"type": self.type}
         for f in dc_fields(self):
-            result[f.name] = serialize_to_dict(getattr(self, f.name))
+            value = serialize_to_dict(getattr(self, f.name))
+            if value is not None:
+                result[f.name] = value
 
         if not self.serialize_stats:
             result["stats"] = None
@@ -653,9 +747,25 @@ class DataConfig(ChoiceRegistry):
         return result
 
     def get_transforms(
-        self, remap=True, images_only=False
+        self,
+        remap=True,
+        images_only=False,
+        endstate_target: tuple[str, int] | None = None,
+        language_action_target: dict | None = None,
+        training: bool = True,
     ) -> Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]] | None:
         """Get a composed transform that includes both feature-specific transforms and normalization.
+
+        Args:
+            endstate_target: ``(rotation, target_dim)`` to append an
+                ``EndStateTarget`` transform before normalization (KI-ENDSTATE
+                physical/RPY ablation). ``None`` skips it (default).
+            language_action_target: kwargs for ``LanguageActionTarget`` to
+                append before normalization. ``None`` skips it.
+            training: When ``False`` (eval/serve), each transform is mapped
+                through its ``deterministic()`` form so that random
+                augmentations (e.g. ``color_jitter``, ``random_resized_crop``)
+                are neutralized or dropped. Defaults to ``True`` (training).
 
         Returns:
             A composed transform function that applies all configured transforms to a batch of data.
@@ -677,6 +787,17 @@ class DataConfig(ChoiceRegistry):
                 transform_list_to_process = transform if isinstance(transform, (list, tuple)) else [transform]
 
                 for t in transform_list_to_process:
+                    if not training:
+                        # Eval/serve: swap each transform for its deterministic
+                        # form. ``None`` drops the transform (e.g. color_jitter).
+                        # Transforms lacking the method (e.g. CenterCrop, which
+                        # is not a Transform subclass) are already deterministic
+                        # and kept as-is.
+                        det = getattr(t, "deterministic", None)
+                        if callable(det):
+                            t = det()
+                            if t is None:
+                                continue
                     list_to_extend = (
                         post_norm_transforms if hasattr(t, "post_norm") and t.post_norm else transform_list
                     )
@@ -686,6 +807,17 @@ class DataConfig(ChoiceRegistry):
                     else:
                         # Other transforms operate on Tensors, wrap them together
                         list_to_extend.append(TransformWrapper(key, t))
+
+        # KI-ENDSTATE physical/RPY target: snapshot the chunk-final action
+        # while it is still un-normalized (this runs before the Normalize
+        # transform appended below). No-op for datasets without an `action`
+        # key (VL cotraining).
+        if endstate_target is not None and not images_only:
+            rotation, target_dim = endstate_target
+            transform_list.append(EndStateTarget(rotation=rotation, target_dim=target_dim))
+
+        if language_action_target is not None and not images_only:
+            transform_list.append(LanguageActionTarget(**language_action_target))
 
         # Third transform - Add normalization transform
         if self.features is not None and self.normalization_mapping is not None:
@@ -726,5 +858,5 @@ class DataConfig(ChoiceRegistry):
 
 @DataConfig.register_subclass("base")
 @dataclass
-class BaseDatasetConfig(DataConfig):
+class BaseDatasetConfig(RobotDataConfig):
     pass

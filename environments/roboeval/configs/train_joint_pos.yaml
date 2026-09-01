@@ -1,0 +1,7 @@
+# Train Rho on RoboEval joint-position actions.
+
+<<: !include "base/train.yaml"
+
+dataset: !include "joint_pos/roboeval_multidataset.yaml"
+
+environment: !include "joint_pos/environment.yaml"

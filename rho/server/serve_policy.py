@@ -184,6 +184,7 @@ def eval(cfg: EvalConfig) -> None:
     # dataclass.)
     logger.info("Creating policy interface...")
     cfg.policy_interface_cfg.policy = base_policy
+    cfg.policy_interface_cfg.data_config = cfg.dataset
 
     policy_interface = PolicyInterface(cfg.policy_interface_cfg)
 

@@ -273,7 +273,7 @@ class TestDataConfigToDict:
     def test_dataconfig_excludes_runtime_fields(self):
         """DataConfig.to_dict() should not include non-field runtime attributes."""
         from rho.common.types import NormalizationMode, PolicyFeature
-        from rho.datasets.data_config import DataConfig
+        from rho.datasets.data_config import BaseDatasetConfig as DataConfig
 
         # Create a minimal DataConfig
         cfg = DataConfig(
@@ -291,7 +291,7 @@ class TestDataConfigToDict:
     def test_feature_shapes_are_strings(self):
         """Feature shapes should be converted to string format in to_dict output."""
         from rho.common.types import PolicyFeature
-        from rho.datasets.data_config import DataConfig
+        from rho.datasets.data_config import BaseDatasetConfig as DataConfig
 
         cfg = DataConfig(
             features={

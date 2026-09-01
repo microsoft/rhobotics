@@ -9,6 +9,16 @@ import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import StepLR
 
+from rho.checkpoints import (
+    delete_checkpoint_bundle,
+    is_checkpoint_bundle,
+    load_bundle_training_state,
+    load_manifest,
+    remove_bundle_training_state,
+    resolve_latest_checkpoint,
+    save_checkpoint_bundle,
+    validate_checkpoint,
+)
 from rho.common.serialization import serialize_to_dict
 from rho.policies.base import PreTrainedPolicy
 
@@ -19,10 +29,7 @@ serialize_train_config = serialize_to_dict
 
 
 def find_latest_checkpoint(checkpoint_dir: str | Path) -> Path | None:
-    """Find the most recent checkpoint in a directory.
-
-    Looks for ``checkpoint_latest.pt`` first.  If that doesn't exist, falls
-    back to the highest-step ``checkpoint_step_XXXXXXX.pt`` file.
+    """Find the highest valid completed checkpoint in a directory.
 
     Args:
         checkpoint_dir: Directory to search for checkpoints.
@@ -31,21 +38,7 @@ def find_latest_checkpoint(checkpoint_dir: str | Path) -> Path | None:
         Path to the latest checkpoint, or ``None`` if the directory doesn't
         exist or contains no checkpoints.
     """
-    checkpoint_dir = Path(checkpoint_dir)
-    if not checkpoint_dir.is_dir():
-        return None
-
-    # Prefer the explicit "latest" symlink / copy
-    latest = checkpoint_dir / "checkpoint_latest.pt"
-    if latest.exists():
-        return latest
-
-    # Fall back to highest numbered checkpoint_step_*.pt
-    step_files = sorted(checkpoint_dir.glob("checkpoint_step_*.pt"))
-    if step_files:
-        return step_files[-1]
-
-    return None
+    return resolve_latest_checkpoint(checkpoint_dir)
 
 
 def make_policy_interface(
@@ -124,7 +117,18 @@ def make_optimizer_and_scheduler(
     if hasattr(policy.config, "get_optimizer_preset"):
         logger.info("Using optimizer preset from policy config")
         optimizer_factory = policy.config.get_optimizer_preset()
-        optimizer = optimizer_factory.build(policy.parameters())
+
+        named_groups = None
+        if hasattr(policy, "get_named_param_groups"):
+            named_groups = policy.get_named_param_groups()
+
+        if named_groups:
+            for g in named_groups:
+                n_params = sum(p.numel() for p in g["params"])
+                logger.info(f"Optimizer group '{g['name']}': {n_params:,} params, lr={g['lr']:.2e}")
+            optimizer = optimizer_factory.build(named_groups)
+        else:
+            optimizer = optimizer_factory.build(policy.parameters())
     else:
         logger.info("Using default Adam optimizer")
         optimizer = Adam(policy.parameters(), lr=cfg.learning_rate)
@@ -151,6 +155,9 @@ def save_checkpoint(
     sampler=None,
     lr_scheduler: torch.optim.lr_scheduler._LRScheduler | None = None,
     train_logger=None,
+    data_config=None,
+    max_shard_size: int | str = "5GB",
+    keep_training_state_interval: int | None = None,
 ) -> None:
     """Save a training checkpoint.
 
@@ -170,11 +177,10 @@ def save_checkpoint(
     checkpoint_dir = Path(output_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    checkpoint_path = checkpoint_dir / f"checkpoint_step_{step:07d}.pt"
+    checkpoint_path = checkpoint_dir / f"checkpoint_step_{step:07d}"
 
-    checkpoint = {
+    training_state = {
         "step": step,
-        "policy_state_dict": policy.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "metrics": metrics,
     }
@@ -182,23 +188,17 @@ def save_checkpoint(
     # Save lr_scheduler state
     if lr_scheduler is not None:
         if hasattr(lr_scheduler, "state_dict"):
-            checkpoint["lr_scheduler_state_dict"] = lr_scheduler.state_dict()
+            training_state["lr_scheduler_state_dict"] = lr_scheduler.state_dict()
         else:
             logger.warning(
                 f"LR scheduler {type(lr_scheduler).__name__} does not "
                 "support state_dict(); its state will not be saved."
             )
 
-    # Save policy config and feature_dict if available
-    if hasattr(policy, "config"):
-        checkpoint["policy_config"] = policy.config
-        if hasattr(policy.config, "feature_dict"):
-            checkpoint["feature_dict"] = policy.config.feature_dict
-
     # Save sampler state for deterministic resumption
     if sampler is not None:
         if hasattr(sampler, "save_state"):
-            checkpoint["sampler_state_dict"] = sampler.save_state()
+            training_state["sampler_state_dict"] = sampler.save_state()
         else:
             logger.warning(
                 f"Sampler {type(sampler).__name__} does not support save_state(); "
@@ -208,23 +208,55 @@ def save_checkpoint(
     # Save train logger state (cumulative counters, epoch progress, etc.)
     if train_logger is not None:
         if hasattr(train_logger, "save_state"):
-            checkpoint["train_logger_state_dict"] = train_logger.save_state()
+            training_state["train_logger_state_dict"] = train_logger.save_state()
         else:
             logger.warning(
                 f"TrainLogger {type(train_logger).__name__} does not support save_state(); "
                 "logger state will not be saved in checkpoint."
             )
 
-    torch.save(checkpoint, checkpoint_path)  # nosec B614
+    save_checkpoint_bundle(
+        policy,
+        checkpoint_path,
+        step=step,
+        training_state=training_state,
+        data_config=data_config,
+        max_shard_size=max_shard_size,
+    )
+    validate_checkpoint(checkpoint_path)
     logger.info(f"Checkpoint saved at step {step}: {checkpoint_path}")
 
-    # Also save as "latest" checkpoint
-    latest_path = checkpoint_dir / "checkpoint_latest.pt"
-    torch.save(checkpoint, latest_path)  # nosec B614
+    prune_training_states(
+        checkpoint_dir,
+        current_step=step,
+        keep_training_state_interval=keep_training_state_interval,
+    )
 
     # Handle checkpoint cleanup if keep_checkpoint_interval is set
     if keep_checkpoint_interval is not None:
         cleanup_old_checkpoints(checkpoint_dir, step, keep_checkpoint_interval)
+
+
+def prune_training_states(
+    checkpoint_dir: Path,
+    *,
+    current_step: int,
+    keep_training_state_interval: int | None,
+) -> None:
+    """Keep resume state only for the newest checkpoint and configured milestones."""
+    if keep_training_state_interval is not None and keep_training_state_interval <= 0:
+        raise ValueError("keep_training_state_interval must be positive or None")
+
+    for checkpoint_path in checkpoint_dir.glob("checkpoint_step_*"):
+        if not is_checkpoint_bundle(checkpoint_path):
+            continue
+        checkpoint_step = load_manifest(checkpoint_path)["step"]
+        if checkpoint_step == current_step:
+            continue
+        if keep_training_state_interval is not None and checkpoint_step % keep_training_state_interval == 0:
+            continue
+        if remove_bundle_training_state(checkpoint_path):
+            logger.info(f"Removed training state from retained checkpoint: {checkpoint_path}")
 
 
 def cleanup_old_checkpoints(checkpoint_dir: Path, current_step: int, keep_checkpoint_interval: int) -> None:
@@ -235,15 +267,23 @@ def cleanup_old_checkpoints(checkpoint_dir: Path, current_step: int, keep_checkp
         current_step: Current training step
         keep_checkpoint_interval: Interval for keeping checkpoints
     """
-    # Find all checkpoint files matching the pattern checkpoint_step_XXXXXXX.pt
-    checkpoint_pattern = "checkpoint_step_*.pt"
-    checkpoint_files = list(checkpoint_dir.glob(checkpoint_pattern))
+    current_bundle = checkpoint_dir / f"checkpoint_step_{current_step:07d}"
+    current_legacy_checkpoint = current_bundle.with_suffix(".pt")
+    if current_bundle.exists():
+        validate_checkpoint(current_bundle)
+    elif current_legacy_checkpoint.exists():
+        validate_checkpoint(current_legacy_checkpoint)
+    else:
+        raise FileNotFoundError(
+            f"Current checkpoint does not exist for step {current_step}: {current_bundle}"
+        )
+
+    checkpoint_files = list(checkpoint_dir.glob("checkpoint_step_*"))
 
     for checkpoint_file in checkpoint_files:
         # Extract step number from filename
         try:
             filename = checkpoint_file.name
-            # Format is checkpoint_step_XXXXXXX.pt, extract the step number
             step_str = filename.replace("checkpoint_step_", "").replace(".pt", "")
             file_step = int(step_str)
 
@@ -256,7 +296,14 @@ def cleanup_old_checkpoints(checkpoint_dir: Path, current_step: int, keep_checkp
                 continue
 
             # Remove the old checkpoint
-            checkpoint_file.unlink()
+            if checkpoint_file.is_dir():
+                if not delete_checkpoint_bundle(checkpoint_file):
+                    logger.warning(
+                        f"Retaining checkpoint while another process is reading it: {checkpoint_file}"
+                    )
+                    continue
+            else:
+                checkpoint_file.unlink()
             logger.info(f"Removed old checkpoint: {checkpoint_file}")
 
         except (ValueError, AttributeError) as e:
@@ -289,7 +336,35 @@ def load_training_state(
         return 0, optimizer, lr_scheduler, sampler, train_logger
 
     logger.info(f"Loading checkpoint from: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, weights_only=False, map_location="cpu")  # nosec B614
+    if is_checkpoint_bundle(checkpoint_path):
+        checkpoint = load_bundle_training_state(checkpoint_path)
+        if checkpoint is None:
+            logger.info(
+                "Checkpoint contains model artifacts only; optimizer, scheduler, sampler, "
+                "logger, and step state will start from scratch."
+            )
+            optimizer.zero_grad(set_to_none=True)
+            return 0, optimizer, lr_scheduler, sampler, train_logger
+    else:
+        legacy_load_started = time.perf_counter()
+        checkpoint = torch.load(checkpoint_path, weights_only=False, map_location="cpu")  # nosec B614
+        logger.info(
+            "Legacy training checkpoint deserialized in %.2fs from %s",
+            time.perf_counter() - legacy_load_started,
+            checkpoint_path,
+        )
+
+    if "optimizer_state_dict" not in checkpoint:
+        logger.info(
+            "Checkpoint contains policy weights only; optimizer, scheduler, sampler, "
+            "logger, and step state will start from scratch."
+        )
+        optimizer.zero_grad(set_to_none=True)
+        del checkpoint
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        return 0, optimizer, lr_scheduler, sampler, train_logger
 
     step = checkpoint["step"]
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

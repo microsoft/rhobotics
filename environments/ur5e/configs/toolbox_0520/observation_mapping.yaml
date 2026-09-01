@@ -1,6 +1,0 @@
-# LeRobot feature key -> phi5/phi4mm expected key
-observations.images.cam_scene: "observation.image.agentview"
-observations.images.cam_left_wrist: "observation.image.left_wrist"
-observations.images.cam_right_wrist: "observation.image.right_wrist"
-observations.eef_quat_pos: "observation.state"
-action.eef_quat_pos: "action"

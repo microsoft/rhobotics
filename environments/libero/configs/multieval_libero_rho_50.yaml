@@ -1,0 +1,49 @@
+# Full LIBERO benchmark: 50 episodes for each of 10 tasks in every suite.
+pretrained_checkpoint: null
+policy:
+  type: "rho"
+
+eval_num_episodes: 500
+record_videos: false
+
+eval_configs:
+  - <<: !include eval_libero_rho.yaml
+    name: "libero_spatial"
+    eval_num_episodes: 500
+    record_videos: false
+    environment:
+      type: "libero"
+      episodes_per_task: 50
+      task_suite_name: "libero_spatial"
+      n_envs: 10
+      max_episode_steps: 220
+  - <<: !include eval_libero_rho.yaml
+    name: "libero_object"
+    eval_num_episodes: 500
+    record_videos: false
+    environment:
+      type: "libero"
+      episodes_per_task: 50
+      task_suite_name: "libero_object"
+      n_envs: 10
+      max_episode_steps: 280
+  - <<: !include eval_libero_rho.yaml
+    name: "libero_goal"
+    eval_num_episodes: 500
+    record_videos: false
+    environment:
+      type: "libero"
+      episodes_per_task: 50
+      task_suite_name: "libero_goal"
+      n_envs: 10
+      max_episode_steps: 300
+  - <<: !include eval_libero_rho.yaml
+    name: "libero_10"
+    eval_num_episodes: 500
+    record_videos: false
+    environment:
+      type: "libero"
+      task_suite_name: "libero_10"
+      episodes_per_task: 50
+      n_envs: 10
+      max_episode_steps: 520

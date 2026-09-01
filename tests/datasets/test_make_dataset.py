@@ -3,12 +3,15 @@ Integration tests for make_dataset function using a realistic dummy dataset.
 """
 
 import json
+from types import SimpleNamespace
 
+import pytest
 import torch
 
 from rho.common.constants import ACTION, OBSERVATION_IMAGE, OBSERVATION_STATE
 from rho.datasets import make_dataloader, make_dataset
 from rho.datasets.lerobot_dataset import TransformedLeRobotDataset
+from rho.utils import check_dataset
 
 
 class TestMakeDatasetIntegration:
@@ -120,3 +123,55 @@ class TestMakeDatasetIntegration:
         assert batch[OBSERVATION_IMAGE].dtype == torch.float32
         assert batch[OBSERVATION_STATE].dtype == torch.float32
         assert batch[ACTION].dtype == torch.float32
+
+
+def test_dataset_checker_fails_when_first_batch_cannot_load(monkeypatch):
+    class BrokenDataLoader:
+        dataset = []
+
+        def __iter__(self):
+            raise RuntimeError("video decoder failed")
+
+    monkeypatch.setattr(
+        check_dataset,
+        "make_dataloader",
+        lambda dataset, policy: (BrokenDataLoader(), None),
+    )
+    cfg = SimpleNamespace(
+        dataset=SimpleNamespace(repo_id="test/dataset"),
+        policy=object(),
+    )
+
+    assert not check_dataset.check_dataset_loading(cfg, max_retries=0, retry_delay=0)
+
+
+def test_dataset_checker_supports_multi_dataset_configs(monkeypatch):
+    class FakeDataLoader:
+        dataset = [object()]
+
+        def __iter__(self):
+            return iter([{"action": torch.zeros(1)}])
+
+    monkeypatch.setattr(
+        check_dataset,
+        "make_dataloader",
+        lambda dataset, policy: (FakeDataLoader(), None),
+    )
+    cfg = SimpleNamespace(
+        dataset=SimpleNamespace(datasets=[object()]),
+        policy=object(),
+    )
+
+    assert check_dataset.check_dataset_loading(cfg, max_retries=0, retry_delay=0)
+
+
+def test_dataset_checker_cli_raises_after_failed_check(monkeypatch):
+    monkeypatch.setattr(check_dataset, "check_dataset_loading", lambda cfg: False)
+    cfg = SimpleNamespace(
+        dataset=SimpleNamespace(repo_id="test/dataset", batch_size=1),
+        policy=object(),
+        batch_size=None,
+    )
+
+    with pytest.raises(RuntimeError, match="Dataset check failed"):
+        check_dataset.main.__wrapped__(cfg)

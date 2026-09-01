@@ -19,7 +19,7 @@ features:
     shape: (2,)
     type: STATE
 normalization_mapping:
-  ACTION: MIN_MAX #QUANTILE
-  ENV: MIN_MAX #QUANTILE
-  STATE: MIN_MAX #QUANTILE
+  ACTION: MIN_MAX
+  ENV: MIN_MAX
+  STATE: MIN_MAX
   VISUAL: MEAN_STD

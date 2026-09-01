@@ -57,6 +57,11 @@ def list_of_dicts_to_batch(obs: list[dict]) -> dict:
     return batch
 
 
+def initial_state_indices(state_offset: int, n_envs: int, num_states: int) -> np.ndarray:
+    """Return the next contiguous vectorized batch of LIBERO initial states."""
+    return (state_offset + np.arange(n_envs)) % num_states
+
+
 @EnvironmentConfig.register_subclass("libero")
 @dataclass
 class LiberoEnvConfig(EnvironmentConfig):
@@ -216,14 +221,15 @@ class LiberoEnvWrapper(EnvironmentWrapper):
 
         # Set initial state if available
         if self.initial_states is not None:
+            state_offset = getattr(self, "_episodes_completed_for_current_task", 0)
             if self.is_vectorized:
-                # For vectorized envs, use different initial states
-                indices = np.arange(self.n_envs) % len(self.initial_states)
+                # Advance through every prebuilt state exactly once per task.
+                indices = initial_state_indices(state_offset, self.n_envs, len(self.initial_states))
                 init_states_batch = [self.initial_states[i] for i in indices]
                 raw_obs = self.env.set_init_state(init_states_batch)
             else:
-                # For single env, use the specified initial state
-                raw_obs = self.env.set_init_state(self.initial_states[self.config.init_state_id])
+                state_index = (self.config.init_state_id + state_offset) % len(self.initial_states)
+                raw_obs = self.env.set_init_state(self.initial_states[state_index])
 
         # add delay to allow objects to settle
         for _ in range(self.num_wait_steps):

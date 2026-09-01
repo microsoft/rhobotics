@@ -5,7 +5,7 @@ import torch
 from rho.common.constants import ACTION, OBSERVATION_STATE
 from rho.common.transforms import DeltaActions
 from rho.common.types import ActionType, FeatureType, NormalizationMode, PolicyFeature
-from rho.datasets.lerobot_dataset import LeRobotDatasetConfig
+from rho.datasets.lerobot_dataset import LeRobotDatasetConfig, resolve_action_delta_indices_for_dataset
 
 
 def make_mock_features():
@@ -39,6 +39,47 @@ def make_delta_actions_transform_mapping():
             )
         ]
     }
+
+
+class TestActionTimeHorizon:
+    def test_resolves_per_dataset_action_delta_indices_from_fps(self):
+        class Policy:
+            chunk_size = 50
+            action_delta_indices = list(range(50))
+
+        class Metadata:
+            fps = 15
+
+        assert resolve_action_delta_indices_for_dataset(
+            Policy(),
+            Metadata(),
+            action_time_horizon_s=1.0,
+            min_action_chunk_size=8,
+        ) == list(range(15))
+
+    def test_clips_action_delta_indices_to_min_and_policy_chunk(self):
+        class Policy:
+            chunk_size = 50
+            action_delta_indices = list(range(50))
+
+        class LowFpsMetadata:
+            fps = 5
+
+        class HighFpsMetadata:
+            fps = 100
+
+        assert resolve_action_delta_indices_for_dataset(
+            Policy(),
+            LowFpsMetadata(),
+            action_time_horizon_s=1.0,
+            min_action_chunk_size=8,
+        ) == list(range(8))
+        assert resolve_action_delta_indices_for_dataset(
+            Policy(),
+            HighFpsMetadata(),
+            action_time_horizon_s=1.0,
+            min_action_chunk_size=8,
+        ) == list(range(50))
 
 
 class TestLeRobotDatasetConfig:
@@ -109,6 +150,37 @@ class TestLeRobotDatasetConfig:
         assert "new.obs" in result
         assert "old.obs" not in result
         assert "unchanged" in result
+
+    def test_remap_features_carries_is_pad(self):
+        """`{feature}_is_pad` masks should follow their feature through remap/whitelist."""
+        features = make_mock_features()
+        stats = make_mock_stats()
+
+        config = LeRobotDatasetConfig(
+            repo_id="test/dataset",
+            features=features,
+            stats=stats,
+            observation_mapping={"old.obs": "new.obs"},
+            observation_whitelist=["new.obs"],
+        )
+
+        test_batch = {
+            "old.obs": torch.tensor([[1, 2, 3]]),
+            "old.obs_is_pad": torch.tensor([[False, True]]),
+            "dropped.obs": torch.tensor([[7, 8, 9]]),
+            "dropped.obs_is_pad": torch.tensor([[True]]),
+        }
+
+        result = config.remap_features(test_batch)
+
+        # Feature and its pad mask are both renamed and kept.
+        assert "new.obs" in result
+        assert "new.obs_is_pad" in result
+        assert torch.equal(result["new.obs_is_pad"], torch.tensor([[False, True]]))
+        # Non-whitelisted feature and its pad mask are both dropped.
+        assert "dropped.obs" not in result
+        assert "dropped.obs_is_pad" not in result
+        assert "old.obs_is_pad" not in result
 
     def test_get_input_transform_normalizes_data(self):
         """Test that get_input_transform creates a normalization transform."""

@@ -1,0 +1,7 @@
+# Train Rho on RoboEval end-effector 6D pose actions.
+
+<<: !include "base/train.yaml"
+
+dataset: !include "ee_6d_pos/roboeval_multidataset.yaml"
+
+environment: !include "ee_6d_pos/environment.yaml"

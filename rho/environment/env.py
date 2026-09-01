@@ -1,4 +1,5 @@
 import logging
+import re
 from collections import deque
 from dataclasses import dataclass, field  # noqa: I001
 from pathlib import Path
@@ -11,6 +12,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from rho.common.registry import get_registered_choice_type
 from rho.eval.policy_interface import PolicyInterface
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,20 @@ logger = logging.getLogger(__name__)
 # Type aliases
 StepReturn = tuple[dict[str, Any], np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]
 ResetReturn = tuple[dict[str, Any], dict[str, Any]]
+
+
+_FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_FILENAME_COLLAPSE_RE = re.compile(r"_+")
+
+
+def sanitize_for_filename(text: str, max_length: int = 50) -> str:
+    """Convert an arbitrary string into a filesystem-safe label."""
+    if not text:
+        return "task"
+    label = _FILENAME_SAFE_RE.sub("_", text.strip())
+    label = _FILENAME_COLLAPSE_RE.sub("_", label).strip("_.-")
+    label = label[:max_length].rstrip("_.-")
+    return label or "task"
 
 
 @dataclass
@@ -239,8 +255,8 @@ class EvalMetrics:
         if task_name is None and self._current_tasks and self._current_tasks[0]:
             task_name = self._current_tasks[0]
 
-        # Sanitize task name for filename (replace spaces and special chars)
-        task_label = task_name.replace(" ", "_").replace("/", "-")[:50] if task_name else "task"
+        # Sanitize task name for filename (handles spaces, punctuation, unicode)
+        task_label = sanitize_for_filename(task_name) if task_name else "task"
 
         # Format: {task}_{episode}_{result}.mp4
         video_path = output_directory / f"{task_label}_{success_status}.mp4"
@@ -295,6 +311,11 @@ class EnvironmentConfig(draccus.ChoiceRegistry):
     """Configuration for environment interactions"""
 
     name: str = "UNDEFINED"  # Name of the environment
+
+    @property
+    def type(self) -> str:
+        """Return the registered environment identity used for factory dispatch."""
+        return get_registered_choice_type(self, legacy_name=self.name)
 
 
 @dataclass
@@ -574,46 +595,78 @@ def evaluate_policy(
         # Queue holds tensors of shape (batch, action_dim)
         action_queue: deque[torch.Tensor] = deque(maxlen=max_steps)
 
+        # RTC: number of actions popped from the current chunk since the last
+        # inference. Instead of sending the still-in-flight actions back to the
+        # policy (which, after process_action denormalization + output-action-type
+        # conversion, no longer live in the policy's trained action space), we send
+        # this count. PolicyInterface caches the last predicted chunk in policy
+        # space and indexes into it with num_actions_executed to recover the
+        # remaining actions for RTC blending. This index-based recovery is exact
+        # as long as inference_delay + execution_horizon <= chunk_size (true for
+        # any sensible RTC config).
+        #
+        # Re-inference fires once this counter reaches execution_horizon, matching
+        # the paper's s_min threshold (Algorithm 1, line 13). At that point the
+        # queue still holds chunk_size - execution_horizon actions, so
+        # len(prev_actions) == chunk_size - execution_horizon, which is exactly
+        # what _prepare_rtc_mask uses to derive the soft-mask zero boundary.
+        num_executed_since_inference = 0
+
         for step in range(max_steps):
             # ============================================================
             # Core loop - all tensors with shape (batch, seq_len, **)
             # ============================================================
 
-            # For RTC mode, pass remaining actions as prev_actions and inference sooner
+            # For RTC mode, tell the policy how many actions of the previously
+            # predicted chunk have already been executed and let it recover the
+            # still-in-flight actions from its cached policy-space chunk.
+            #
+            # Trigger re-inference by counting executed actions, not by watching
+            # the queue length. After execution_horizon actions have been consumed
+            # the queue holds chunk_size - execution_horizon entries, so
+            # len(prev_actions) inside _prepare_rtc_mask equals
+            # chunk_size - execution_horizon. That is exactly the value the mask's
+            # zero boundary is derived from (s_eff = H - len(prev_actions)), so
+            # the soft-mask decay region aligns with the real action overlap.
             if (
                 eval_mode == "rtc"
-                and len(action_queue) <= policy_interface.execution_horizon
+                and num_executed_since_inference >= policy_interface.execution_horizon
                 and len(action_queue) > 0
             ):
-                # Stack remaining actions: (num_remaining, batch, action_dim)
-                # -> (batch, num_remaining, action_dim)
-                remaining = torch.stack(list(action_queue), dim=0)
-                remaining = remaining.transpose(0, 1)
-                obs["action"] = remaining
+                obs["num_actions_executed"] = num_executed_since_inference
 
                 action_chunk = policy_interface.get_action_chunk(obs)
 
-                # Populate queue: transpose to (chunk_size, batch, action_dim)
-                # then extend queue with each timestep
-                actions_transposed = action_chunk[:, remaining.shape[1] :].transpose(0, 1)
+                # Emulate async execution: while the server was inferencing, the
+                # first `inference_delay` still-in-flight actions keep executing on
+                # the robot, so we retain them from the old chunk and then continue
+                # from the freshly (RTC-blended) chunk at index `inference_delay`.
+                # action_chunk[:, i] and the old queued action at position i both
+                # correspond to the same future frame, so this stays aligned.
+                old_in_flight = list(action_queue)[:inference_delay]
+                action_queue.clear()
+                action_queue.extend(old_in_flight)
+                actions_transposed = action_chunk[:, inference_delay:].transpose(0, 1)
                 action_queue.extend(actions_transposed)
+                num_executed_since_inference = 0
 
             # Check if we need new actions from policy
             elif len(action_queue) == 0:
                 # Get new action chunk from policy
                 # Returns tensor of shape (batch, chunk_size, action_dim)
-                # for key in obs:
-                #    if obs[key] is not None and isinstance(obs[key], torch.Tensor):
-                #        print(f"Observation '{key}' shape: {obs[key].shape}, dtype: {obs[key].dtype}")
+                if eval_mode == "rtc":
+                    obs["num_actions_executed"] = num_executed_since_inference
                 action_chunk = policy_interface.get_action_chunk(obs)
 
                 # Populate queue: transpose to (chunk_size, batch, action_dim)
                 # then extend queue with each timestep
                 actions_transposed = action_chunk.transpose(0, 1)
                 action_queue.extend(actions_transposed)
+                num_executed_since_inference = 0
 
             # Pop next action from queue: (batch, action_dim)
             action = action_queue.popleft()
+            num_executed_since_inference += 1
 
             # Step environment - handles _process_output internally
             # Returns obs as tensors (batch, seq_len, **feature_size)

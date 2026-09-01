@@ -111,7 +111,7 @@ class DSRLConfig:
     resume_buffer: str = ""  # Path to replay buffer (.npz)
 
     # Base policy bookkeeping (informational, used by serve_hil)
-    base_policy_name: str = "rhoalpha"
+    base_policy_name: str = "rho"
     base_policy_checkpoint: str = ""
 
     @property

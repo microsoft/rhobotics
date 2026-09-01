@@ -1,0 +1,12 @@
+# Evaluate a portable Rho checkpoint with joint-position actions.
+pretrained_checkpoint: null
+environment: !include "joint_pos/environment.yaml"
+
+policy:
+  type: "rho"
+
+eval_num_episodes: 10
+record_videos: true
+output_dir: "outputs/eval_roboeval/joint_pos"
+device: "cuda"
+seed: 42

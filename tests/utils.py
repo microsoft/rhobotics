@@ -5,7 +5,7 @@ import pytest
 import torch
 
 # Test device configuration
-DEVICE = os.environ.get("ALKU_TEST_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = os.environ.get("RHO_TEST_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
 
 
 def require_cuda(func):

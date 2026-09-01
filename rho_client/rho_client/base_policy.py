@@ -8,4 +8,3 @@ class BasePolicy(abc.ABC):
 
     def reset(self) -> None:
         """Reset the policy to its initial state."""
-        pass

@@ -5,7 +5,8 @@ import pytest
 import yaml
 
 from rho.common.types import FeatureType, NormalizationMode, PolicyFeature
-from rho.datasets.data_config import DataConfig, convert_dict_list_to_array
+from rho.datasets.data_config import BaseDatasetConfig as DataConfig
+from rho.datasets.data_config import convert_dict_list_to_array
 
 
 class TestConvertDictListToArray:

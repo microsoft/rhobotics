@@ -1,11 +1,36 @@
 import abc
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 import torch
 from draccus import ChoiceRegistry
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import ConstantLR, LambdaLR, LRScheduler
+
+SCHEDULER_TYPES = {
+    "constant",
+    "diffuser",
+    "cosine_decay_with_warmup",
+    "warmup_stable_decay",
+}
+
+
+def migrate_legacy_scheduler_config(config: dict) -> dict:
+    """Return a scheduler config using distinct type and algorithm fields."""
+    migrated = dict(config)
+    if "name" not in migrated:
+        return migrated
+
+    legacy_name = migrated.pop("name")
+    if "type" not in migrated:
+        if legacy_name in SCHEDULER_TYPES:
+            migrated["type"] = legacy_name
+        else:
+            migrated["type"] = "diffuser"
+            migrated["schedule_name"] = legacy_name
+    elif migrated["type"] == "diffuser":
+        migrated["schedule_name"] = legacy_name
+    return migrated
 
 
 @dataclass
@@ -22,8 +47,6 @@ class LRSchedulerConfig(ChoiceRegistry, abc.ABC):
 @LRSchedulerConfig.register_subclass("constant")
 @dataclass
 class ConstantLRConfig(LRSchedulerConfig):
-    name: str = "constant"
-
     def build(self, optimizer: torch.optim.Optimizer, num_training_steps: int) -> LRScheduler:
         return ConstantLR(optimizer, factor=1.0, total_iters=1)
 
@@ -32,13 +55,18 @@ class ConstantLRConfig(LRSchedulerConfig):
 @dataclass
 class DiffuserSchedulerConfig(LRSchedulerConfig):
     num_warmup_steps: int
-    name: str = "cosine"
+    schedule_name: str = "cosine"
 
     def build(self, optimizer: torch.optim.Optimizer, num_training_steps: int) -> LambdaLR:
-        from diffusers.optimization import get_scheduler
+        from diffusers.optimization import get_scheduler as get_diffusers_scheduler
 
-        kwargs = {**asdict(self), "num_training_steps": num_training_steps, "optimizer": optimizer}
-        return get_scheduler(**kwargs)
+        kwargs = {
+            "name": self.schedule_name,
+            "num_warmup_steps": self.num_warmup_steps,
+            "num_training_steps": num_training_steps,
+            "optimizer": optimizer,
+        }
+        return get_diffusers_scheduler(**kwargs)
 
 
 @LRSchedulerConfig.register_subclass("cosine_decay_with_warmup")
@@ -53,8 +81,6 @@ class CosineDecayWithWarmupSchedulerConfig(LRSchedulerConfig):
     decay_start_step: int | None = (
         None  # If set, decay starts after this step instead of immediately after warmup
     )
-
-    name: str = "cosine_decay_with_warmup"
 
     def build(self, optimizer: Optimizer, num_training_steps: int) -> LRScheduler:
         del num_training_steps
@@ -114,8 +140,6 @@ class WSDSchedulerConfig(LRSchedulerConfig):
     decay_lr: float
     num_cycles: int = 1  # 1 = single WSD, >1 = repeated WSD cycles
     num_rewarm_steps: int | None = None  # Warmup steps for cycles 2+; defaults to num_warmup_steps
-
-    name: str = "warmup_stable_decay"
 
     def build(self, optimizer: Optimizer, num_training_steps: int) -> LRScheduler:
         rewarm = self.num_rewarm_steps if self.num_rewarm_steps is not None else self.num_warmup_steps

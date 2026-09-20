@@ -247,6 +247,20 @@ class RhoPolicy(PreTrainedPolicy):
 
     def load_state_dict(self, state_dict: dict, strict: bool = True, assign: bool = False):
         state_dict = self._remap_checkpoint_keys(state_dict)
+        # A checkpoint may carry a folded noise sampler (see rho.policies.rho.noise_policy). Loading it
+        # with `noise_policy` unset is a legitimate request - it means "run this checkpoint the standard
+        # Gaussian way" - so drop those tensors instead of failing the strict load on unexpected keys.
+        if getattr(getattr(self, "model", None), "flow_model", None) is not None and (
+            getattr(self.model.flow_model, "noise_policy", None) is None
+        ):
+            dropped = [k for k in state_dict if ".noise_policy." in k]
+            if dropped:
+                state_dict = {k: v for k, v in state_dict.items() if ".noise_policy." not in k}
+                logger.info(
+                    "Ignoring %d folded noise-policy tensors: config.noise_policy is unset, so this "
+                    "checkpoint runs with Gaussian noise (standard evaluation).",
+                    len(dropped),
+                )
         result = torch.nn.Module.load_state_dict(self, state_dict, strict=strict, assign=assign)
         self._has_uninitialized_backbone = False
         return result

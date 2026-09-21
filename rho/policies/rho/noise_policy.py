@@ -68,8 +68,16 @@ class _MLP(nn.Module):
 class _VLMNoiseStudent(nn.Module):
     """Mean-pooled prefix embedding + proprio -> flattened noise."""
 
-    def __init__(self, emb_dim=2048, state_dim=8, hidden_dims=(1024, 1024, 1024), magnitude=3.0,
-                 noise_steps=16, noise_dim=32, dropout=0.0):
+    def __init__(
+        self,
+        emb_dim=2048,
+        state_dim=8,
+        hidden_dims=(1024, 1024, 1024),
+        magnitude=3.0,
+        noise_steps=16,
+        noise_dim=32,
+        dropout=0.0,
+    ):
         super().__init__()
         self.state_dim, self.noise_steps, self.noise_dim = state_dim, noise_steps, noise_dim
         self.register_buffer("emb_mean", torch.zeros(emb_dim))
@@ -91,10 +99,22 @@ class VLMResidualNoisePolicy(nn.Module):
     noise directly is markedly less robust there.
     """
 
-    def __init__(self, emb_dim=2048, state_dim=8, hidden_dims=(1024, 1024, 1024),
-                 base_magnitude=3.0, head_magnitude=1.5, noise_steps=16, noise_dim=32, scale=1.0):
+    def __init__(
+        self,
+        emb_dim=2048,
+        state_dim=8,
+        hidden_dims=(1024, 1024, 1024),
+        base_magnitude=3.0,
+        head_magnitude=1.5,
+        noise_steps=16,
+        noise_dim=32,
+        scale=1.0,
+    ):
         super().__init__()
-        mk = lambda mag: _VLMNoiseStudent(emb_dim, state_dim, hidden_dims, mag, noise_steps, noise_dim)
+
+        def mk(mag):
+            return _VLMNoiseStudent(emb_dim, state_dim, hidden_dims, mag, noise_steps, noise_dim)
+
         self.base, self.head, self.scale = mk(base_magnitude), mk(head_magnitude), scale
         for p in self.base.parameters():
             p.requires_grad_(False)

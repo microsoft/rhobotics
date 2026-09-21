@@ -1878,11 +1878,18 @@ class FlowMatchingModel(BaseVLMModel):
             # resolve it first and reuse it for the denoise loop below (no second VLM pass).
             if precomputed_hidden_state is None:
                 if self._use_layerwise_cross:
-                    precomputed_hidden_state = self.get_all_hidden_states(image, prompt, image_mask=image_mask)
+                    precomputed_hidden_state = self.get_all_hidden_states(
+                        image, prompt, image_mask=image_mask
+                    )
                 else:
-                    precomputed_hidden_state = self.get_image_text_hidden_state(image, prompt, image_mask=image_mask)
+                    precomputed_hidden_state = self.get_image_text_hidden_state(
+                        image, prompt, image_mask=image_mask
+                    )
             _embed, _mask = precomputed_hidden_state
-            _cond = _embed[min(int(self.hidden_state_idx), len(_embed) - 1)] if isinstance(_embed, (list, tuple)) else _embed
+            if isinstance(_embed, (list, tuple)):
+                _cond = _embed[min(int(self.hidden_state_idx), len(_embed) - 1)]
+            else:
+                _cond = _embed
             with torch.no_grad():
                 x_t = self.noise_policy(_cond, _mask, state, actions_shape).to(dtype=self.dtype)
         elif noise is None:

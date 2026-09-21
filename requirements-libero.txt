@@ -1,16 +1,46 @@
+# LIBERO simulator dependencies, on top of the base install (`pip install -e .`).
+#
+# Two dependencies cannot be expressed as plain requirements and must be installed
+# separately -- see the notes at the bottom of this file.
+
 hydra-core==1.3.4
-easydict==1.9
+easydict==1.13
 robomimic==0.2.0
 thop==0.1.1-2209072238
 robosuite==1.4.0
 bddl==1.0.1
-future==0.18.3
-flash-attn==2.7.4.post1
-matplotlib==3.5.3
-cloudpickle==2.1.0
-gym==0.25.2
-numpy==1.24.4
+future==1.0.0
+matplotlib==3.11.2
+cloudpickle==3.1.2
+numpy==2.2.6
 scipy==1.15.3
-tensorflow_datasets==4.9.9  # used for loading libero data when converting to lerobot
-ipywidgets==8.1.7  # used for jupter notebooks
--e git+https://github.com/Lifelong-Robot-Learning/LIBERO.git#egg=libero
+
+# robosuite 1.4.0 drives MuJoCo through an API that later releases changed. Leaving
+# this unpinned resolves to a version whose joint lookups fail an internal assertion
+# on every environment construction, so pin it.
+mujoco==3.3.3
+mujoco-utils==0.0.6
+
+# rho.policies imports the websocket client eagerly, so evaluation needs the client
+# package even when nothing is served: `pip install -e ./rho_client`.
+websockets>=14.0
+
+tensorflow_datasets==4.9.10  # used for loading libero data when converting to lerobot
+ipywidgets==8.1.9  # used for jupyter notebooks
+
+# Install separately, after the above:
+#
+# 1. flash-attn. Its build imports torch, which pip's isolated build environment does
+#    not provide, and no wheel is published on PyPI. Install the prebuilt wheel that
+#    matches your interpreter, torch build and C++ ABI, for example:
+#      pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/\
+#    flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+#
+# 2. LIBERO. Install from source, then apply two fixes required by this stack:
+#      git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
+#      # libero/libero/envs/venv.py:      import gym  ->  import gymnasium as gym
+#      # libero/libero/benchmark/__init__.py: torch.load(init_states_path)
+#      #                                   -> torch.load(init_states_path, weights_only=False)
+#    Add the checkout to the interpreter's path; `pip install -e` produces an editable
+#    finder with an empty mapping under current setuptools and leaves `libero`
+#    unimportable.

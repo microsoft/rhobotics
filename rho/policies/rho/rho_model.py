@@ -1969,6 +1969,46 @@ class FlowMatchingModel(BaseVLMModel):
             return min(beta, (1.0 - tau) / (tau * r2_tau))
         raise ValueError(f"Unknown guidance_schedule {schedule!r}. Valid choices are 'paper' and 'constant'.")
 
+    def velocity_eval(self, state, x_t, time_scalar, precomputed_hidden_state):
+        """Evaluate the flow velocity v(x_t, t) at a single denoise step.
+
+        Mirrors the inner body of ``sample_actions``'s denoise loop, exposed so an
+        inverter can walk the sampler backwards (see rho.online.noise_inversion).
+        ``precomputed_hidden_state`` is the ``(embed, mask)`` pair from
+        ``get_image_text_hidden_state``, reused across steps without re-running the VLM.
+
+        Returns (B, chunk_size, max_action_dim) in x_t's dtype.
+        """
+        image_text_embed, image_text_mask = precomputed_hidden_state
+        bsize = state.shape[0]
+        time = (
+            torch.tensor(float(time_scalar), dtype=torch.float32, device=state.device)
+            .expand(bsize)
+            .to(self.dtype)
+        )
+        state_embed = self.embed_state(state, x_t.to(self.dtype), time)
+        time_emb = self.embed_time_for_cond(time)
+        output_embed = self.action_expert.forward(
+            image_text_embed, state_embed, time_emb, image_text_attn_mask=image_text_mask
+        )
+        action_token = output_embed[:, -self.config.chunk_size :]
+        return self.action_head(action_token).to(x_t.dtype)
+
+    def sample_actions_from_precomputed(self, state, precomputed_hidden_state, noise, num_steps=None):
+        """``sample_actions`` with the prefix conditioning named explicitly.
+
+        Used to verify an inversion round-trips: decode the recovered noise and
+        compare against the actions it was derived from.
+        """
+        return self.sample_actions(
+            image=None,
+            prompt=None,
+            state=state,
+            noise=noise,
+            precomputed_hidden_state=precomputed_hidden_state,
+            num_steps=num_steps,
+        )
+
     @torch.no_grad
     def sample_actions_rtc(
         self,

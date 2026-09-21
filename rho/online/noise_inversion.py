@@ -18,11 +18,19 @@ which is implicit in ``x_next``. A short fixed-point iteration solves it:
     x_next^(0)   = x_prev + dt_rev * v(x_prev, t_prev)
     x_next^(j+1) = x_prev + dt_rev * v(x_next^(j), t_next)
 
-The contraction factor is roughly 0.1-0.3 per iteration at dt = 1/10, so a handful of
-iterations converges. Because it inverts the same discrete steps the sampler takes, the
-round-trip error is numerical rather than approximation error -- typically ~1e-5 or better.
-Check it: ``error`` is returned alongside the noise precisely so unreliable inversions can be
-dropped instead of poisoning the training target.
+Judge the result by ``error`` -- the round-trip -- and not by whether the recovered noise
+matches the noise a sample happened to start from. **Preimages are not unique.** Measured on
+rho-base, the forward map contracts noise differences by ~0.44 and is near-insensitive along
+some directions, so many different noises decode to nearly the same action chunk. Inverting a
+chunk therefore returns *a* preimage, not *the* one. That is exactly what online adaptation
+needs (noise that reproduces the expert's actions) and ``perstep_fp`` is deterministic, so the
+targets stay self-consistent -- but an equality check against a known input will fail and does
+not indicate a bug.
+
+The fixed point is only contracting while ``dt * ||dv/dx|| < 1``. Where it is not, extra
+iterations make things worse rather than better; that shows up as the round-trip error rising
+with ``fp_per_step``. Raising ``num_steps`` (smaller dt) is the fix, not more iterations.
+``error`` is returned so unreliable inversions can be dropped instead of poisoning the target.
 
 The model must provide ``velocity_eval`` and ``sample_actions_from_precomputed``
 (see ``rho.policies.rho.rho_model``).
@@ -67,21 +75,28 @@ def perstep_fp_noise_map(
     dt_rev = 1.0 / n_steps
     max_action_dim = flow_model.config.max_action_dim
 
-    x_prev = a_target.to(device=device, dtype=dtype)
+    # Accumulate in fp32. The forward sampler takes its Euler step in fp32 and only casts
+    # back to the model dtype to evaluate the velocity; inverting in bf16 instead loses far
+    # more precision than the fixed point converges to, and the round-trip does not close.
+    x_prev = a_target.to(device=device, dtype=torch.float32)
     if x_prev.shape[-1] < max_action_dim:
         x_prev = F.pad(x_prev, (0, max_action_dim - x_prev.shape[-1]))
 
     for step in range(n_steps):
         t_prev = step * dt_rev
         t_next = t_prev + dt_rev
-        v_init = flow_model.velocity_eval(state, x_prev, t_prev, precomputed_hidden_state)
+        v_init = flow_model.velocity_eval(
+            state, x_prev.to(dtype), t_prev, precomputed_hidden_state
+        ).float()
         x_next = x_prev + dt_rev * v_init
         for _ in range(fp_per_step):
-            v_est = flow_model.velocity_eval(state, x_next, t_next, precomputed_hidden_state)
+            v_est = flow_model.velocity_eval(
+                state, x_next.to(dtype), t_next, precomputed_hidden_state
+            ).float()
             x_next = x_prev + dt_rev * v_est
         x_prev = x_next
 
-    noise = x_prev.float()
+    noise = x_prev
 
     # Round-trip: decode the recovered noise and compare against what it came from.
     target = a_target.to(device=device, dtype=torch.float32)

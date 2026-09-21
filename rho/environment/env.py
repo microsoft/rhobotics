@@ -518,7 +518,6 @@ def evaluate_policy(
     num_episodes: int = 3,
     max_steps: int = 100,
     seed: int = 12345,
-    policy_seed: int | None = None,
     record_video: bool = False,
     output_dir: str = "outputs/eval",
     eval_mode: str = "standard",
@@ -539,8 +538,7 @@ def evaluate_policy(
         policy_interface: The policy interface for action generation
         num_episodes: Number of episodes to run
         max_steps: Maximum steps per episode
-        seed: Base seed for environment and scenario resets
-        policy_seed: Base seed for policy sampling. Defaults to ``seed``.
+        seed: Random seed for reproducibility
         record_video: Whether to record videos during evaluation
         output_dir: Directory to save videos
         eval_mode: Evaluation mode ('standard' or 'rtc')
@@ -593,14 +591,9 @@ def evaluate_policy(
         if hasattr(policy_interface, "reset"):
             policy_interface.reset()
 
-        episode_policy_seed = (seed if policy_seed is None else policy_seed) + episode
-        torch.manual_seed(episode_policy_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(episode_policy_seed)
-
         # Initialize action queue using deque (like Phi4MMPolicy.select_action)
         # Queue holds tensors of shape (batch, action_dim)
-        action_queue: deque[torch.Tensor] = deque()
+        action_queue: deque[torch.Tensor] = deque(maxlen=max_steps)
 
         # RTC: number of actions popped from the current chunk since the last
         # inference. Instead of sending the still-in-flight actions back to the
@@ -664,8 +657,6 @@ def evaluate_policy(
                 if eval_mode == "rtc":
                     obs["num_actions_executed"] = num_executed_since_inference
                 action_chunk = policy_interface.get_action_chunk(obs)
-                if eval_mode == "standard":
-                    action_chunk = action_chunk[:, : policy_interface.execution_horizon]
 
                 # Populate queue: transpose to (chunk_size, batch, action_dim)
                 # then extend queue with each timestep

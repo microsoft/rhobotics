@@ -484,12 +484,11 @@ class EvalConfig:
     dataset: DataConfig = field(default_factory=DataConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     policy_interface_cfg: PolicyInterfaceConfig = field(default_factory=PolicyInterfaceConfig)
-    seed: int = 12345  # Base seed for environment and scenario resets
-    policy_seed: int | None = None  # Independent policy RNG seed; defaults to seed
+    seed: int = 12345  # Random seed for reproducibility
 
     eval_mode: str = "standard"
     inference_delay: int = 6  # number of action steps it takes to inference
-    execution_horizon: int | None = None  # actions executed between inferences; overrides checkpoint default
+    execution_horizon: int | None = None  # actions executed between RTC inferences
     beta: int = 10  # weighting of rtc update vs flow matching update
     guidance_schedule: str = "paper"  # guidance coefficient schedule: 'paper' or 'constant'
 

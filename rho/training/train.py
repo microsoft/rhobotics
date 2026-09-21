@@ -8,11 +8,10 @@ from pathlib import Path
 import draccus
 import torch
 from flask import json
-from lerobot.utils.device_utils import get_safe_torch_device
-from lerobot.utils.utils import cycle
 from tqdm import tqdm
 
 from rho.checkpoints import resolve_checkpoint
+from rho.common.determinism import configure_training_determinism
 from rho.common.serialization import serialize_to_dict
 from rho.common.transforms import ConsolidateTransform, TransformConfig
 from rho.common.wandb_logging import WandBConfig, WandBLogger
@@ -31,7 +30,7 @@ from rho.training.train_utils import (
     serialize_train_config,
 )
 from rho.training.validation_probe import ValidationProbe
-from rho.utils import init_logging
+from rho.utils import cycle, get_safe_torch_device, init_logging
 
 # Initialize logging early (before draccus parsing) - will be reconfigured later with accelerator
 # Uses RHO_LOG_LEVEL if set, otherwise defaults to INFO.
@@ -40,6 +39,12 @@ init_logging()
 logger = logging.getLogger(__name__)
 
 DatasetConfig = LeRobotDatasetConfig | MultiDatasetConfig
+
+
+def _seed_dataset(config: DatasetConfig, seed: int) -> None:
+    config.seed = seed
+    for index, child_config in enumerate(getattr(config, "dataset_cfgs", None) or []):
+        _seed_dataset(child_config, seed + index + 1)
 
 
 def resolve_training_checkpoint(cfg: "TrainConfig") -> Path | None:
@@ -141,6 +146,8 @@ class TrainConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Training parameters
+    seed: int = 42
+    deterministic_training: bool = False
     batch_size: int = None  # Default will be set by the dataset config. This value overwrites it
     num_workers: int = 4
     learning_rate: float = 1e-4
@@ -155,7 +162,7 @@ class TrainConfig:
     # scheduler state unless their step matches this interval. None keeps full
     # training state only in the newest checkpoint.
     keep_training_state_interval: int | None = None
-    mixed_precision: str = "no"  # "no", "fp16", "bf16"
+    mixed_precision: str = "bf16"  # "no", "fp16", "bf16"
     gradient_accumulation_steps: int = 1
     logging_interval: int = 100  # Log metrics every N steps
     grad_clip_norm: float | None = 10.0  # Gradient clipping norm
@@ -209,6 +216,12 @@ class TrainConfig:
         """Validate the configuration"""
         logger.debug("Validating training configuration...")
         logger.debug(self.policy)
+        if self.mixed_precision not in {"no", "fp16", "bf16"}:
+            raise ValueError("mixed_precision must be 'no', 'fp16', or 'bf16'")
+        if self.gradient_accumulation_steps < 1:
+            raise ValueError("gradient_accumulation_steps must be positive")
+        if self.grad_clip_norm is not None and self.grad_clip_norm <= 0:
+            raise ValueError("grad_clip_norm must be positive or None")
         if self.keep_training_state_interval is not None and self.keep_training_state_interval <= 0:
             raise ValueError("keep_training_state_interval must be positive or None")
         if self.action_monitor_source not in {"lookahead", "training_fresh", "validation"}:
@@ -217,6 +230,10 @@ class TrainConfig:
                 "'lookahead', 'training_fresh', or 'validation'; "
                 f"got {self.action_monitor_source!r}"
             )
+        if self.deterministic_training:
+            _seed_dataset(self.dataset, self.seed)
+            if self.validation_dataset is not None:
+                _seed_dataset(self.validation_dataset, self.seed + 1)
 
         # Expand environment variables in eval_dataset_root_dir
         if self.eval_dataset_root_dir is not None:
@@ -256,23 +273,67 @@ class TrainConfig:
             self.dataset.chunk_size = self.policy.chunk_size
 
 
-def train_policy_step(policy, batch, optimizer, lr_scheduler, step, device, use_amp=False):
-    """Performs a single training step on the policy"""
+def train_policy_step(
+    policy,
+    batch,
+    optimizer,
+    lr_scheduler,
+    step,
+    device,
+    use_amp=False,
+    *,
+    mixed_precision="no",
+    grad_scaler=None,
+    gradient_accumulation_steps=1,
+    accumulation_step=0,
+    max_grad_norm=None,
+):
+    """Accumulate one microbatch, updating weights at the end of the group."""
+    if mixed_precision not in {"no", "fp16", "bf16"}:
+        raise ValueError("mixed_precision must be 'no', 'fp16', or 'bf16'")
+    if not 0 <= accumulation_step < gradient_accumulation_steps:
+        raise ValueError("accumulation_step must be within gradient_accumulation_steps")
+    if mixed_precision == "fp16" and (grad_scaler is None or not grad_scaler.is_enabled()):
+        raise ValueError("fp16 training requires an enabled GradScaler")
     policy.train()
     for key in batch:
         if isinstance(batch[key], torch.Tensor):
             batch[key] = batch[key].to(device, non_blocking=True)
 
-    with torch.autocast(device_type=device.type) if use_amp else nullcontext():
+    if accumulation_step == 0:
+        optimizer.zero_grad(set_to_none=True)
+
+    amp_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}.get(mixed_precision)
+    amp_context = (
+        torch.autocast(device_type=device.type, dtype=amp_dtype)
+        if use_amp or mixed_precision != "no"
+        else nullcontext()
+    )
+    with amp_context:
         loss, loss_dict = policy.compute_loss(batch)
 
-    optimizer.zero_grad()
-    loss.backward()
+    backward_loss = loss.float() / gradient_accumulation_steps
+    if grad_scaler is not None:
+        grad_scaler.scale(backward_loss).backward()
+    else:
+        backward_loss.backward()
 
-    optimizer.step()
-
-    if lr_scheduler is not None:
-        lr_scheduler.step()
+    if accumulation_step + 1 == gradient_accumulation_steps:
+        if grad_scaler is not None:
+            grad_scaler.unscale_(optimizer)
+        if max_grad_norm is not None:
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
+        optimizer_updated = True
+        if grad_scaler is not None:
+            previous_scale = grad_scaler.get_scale()
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
+            optimizer_updated = grad_scaler.get_scale() >= previous_scale
+        else:
+            optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        if lr_scheduler is not None and optimizer_updated:
+            lr_scheduler.step()
 
     # Log metrics
     metrics = {
@@ -315,7 +376,17 @@ def validate_policy(
     return validation_dict
 
 
-def make_everything(cfg: TrainConfig, device: torch.device = None):
+def get_training_dataset_length(dataset_config, training_dataloader, training_sampler) -> int | None:
+    """Return the number of samples consumed in one training epoch."""
+    if training_sampler is not None:
+        return len(training_sampler)
+    try:
+        return len(training_dataloader.dataset)
+    except TypeError:
+        return dataset_config.get_length()
+
+
+def make_everything(cfg: TrainConfig, device: torch.device = None, *, grad_scaler=None):
     """
     Initializes the training components: dataloader, policy, optimizer, and scheduler
 
@@ -330,10 +401,18 @@ def make_everything(cfg: TrainConfig, device: torch.device = None):
 
     if device is None:
         device = get_safe_torch_device(cfg.device, log=True)
-    training_dataloader, training_sampler = make_dataloader(cfg.dataset, cfg.policy)
+    training_dataloader, training_sampler = make_dataloader(
+        cfg.dataset,
+        cfg.policy,
+        deterministic=cfg.deterministic_training,
+    )
     validation_dataloader = None
     if cfg.validation_dataset is not None:
-        validation_dataloader, _ = make_dataloader(cfg.validation_dataset, cfg.policy)
+        validation_dataloader, _ = make_dataloader(
+            cfg.validation_dataset,
+            cfg.policy,
+            deterministic=cfg.deterministic_training,
+        )
 
     policy = make_policy(cfg.policy)
 
@@ -347,7 +426,7 @@ def make_everything(cfg: TrainConfig, device: torch.device = None):
         transforms_list = [transform.build() for transform in cfg.training_transforms]
     train_transforms = ConsolidateTransform(transforms_list if transforms_list is not None else [])
 
-    dataset_length = cfg.dataset.get_length()
+    dataset_length = get_training_dataset_length(cfg.dataset, training_dataloader, training_sampler)
     training_metrics_recorder = TrainLogger(dataset_length=dataset_length)
 
     if cfg.resolved_checkpoint is None:
@@ -360,11 +439,16 @@ def make_everything(cfg: TrainConfig, device: torch.device = None):
             checkpoint_path,
             cfg.pretrained_checkpoint or getattr(cfg.policy, "pretrained_repo_id", None),
         )
+        policy.load_from_pretrained(checkpoint_path)
         if cfg.resume:
             step, optimizer, lr_scheduler, training_sampler, training_metrics_recorder = load_training_state(
-                checkpoint_path, optimizer, lr_scheduler, training_sampler, training_metrics_recorder
+                checkpoint_path,
+                optimizer,
+                lr_scheduler,
+                training_sampler,
+                training_metrics_recorder,
+                grad_scaler=grad_scaler,
             )
-        policy.load_from_pretrained(checkpoint_path)
 
     policy.train()
     return (
@@ -383,6 +467,8 @@ def make_everything(cfg: TrainConfig, device: torch.device = None):
 @draccus.wrap()
 def train(cfg: TrainConfig) -> None:
     """Main training function"""
+    configure_training_determinism(cfg.seed, deterministic=cfg.deterministic_training)
+
     # Initialize logging
     init_logging(console_level=cfg.log_level)
 
@@ -403,6 +489,7 @@ def train(cfg: TrainConfig) -> None:
         json.dump(serializable_cfg, f, indent=4)
 
     device = get_safe_torch_device(cfg.device, log=True)
+    grad_scaler = torch.amp.GradScaler(device.type) if cfg.mixed_precision == "fp16" else None
 
     env = make_environment(cfg.environment)
     (
@@ -415,7 +502,7 @@ def train(cfg: TrainConfig) -> None:
         step,
         training_sampler,
         training_metrics_recorder,
-    ) = make_everything(cfg, device)
+    ) = make_everything(cfg, device, grad_scaler=grad_scaler)
 
     if cfg.action_monitoring:
         action_sampling_monitor = ActionSamplingMonitor(
@@ -467,16 +554,31 @@ def train(cfg: TrainConfig) -> None:
 
     for _ in progress_bar:
         step += 1
-        with training_metrics_recorder.log_time("train/dataloading_s"):
-            batch = lookahead_batches.popleft() if lookahead_batches else next(training_iter)
-
-        # Apply training transforms and step them
-        train_transforms.train()
-        batch = train_transforms(batch)
+        batch_size = 0
+        accumulated_loss = 0.0
+        for accumulation_step in range(cfg.gradient_accumulation_steps):
+            with training_metrics_recorder.log_time("train/dataloading_s"):
+                batch = lookahead_batches.popleft() if lookahead_batches else next(training_iter)
+            train_transforms.train()
+            batch = train_transforms(batch)
+            batch_size += batch["action"].shape[0]
+            with training_metrics_recorder.log_time("train/update_s"):
+                training_metrics = train_policy_step(
+                    policy,
+                    batch,
+                    optimizer,
+                    lr_scheduler,
+                    step,
+                    device,
+                    mixed_precision=cfg.mixed_precision,
+                    grad_scaler=grad_scaler,
+                    gradient_accumulation_steps=cfg.gradient_accumulation_steps,
+                    accumulation_step=accumulation_step,
+                    max_grad_norm=cfg.grad_clip_norm,
+                )
+            accumulated_loss += training_metrics["loss"]
+        training_metrics["loss"] = accumulated_loss / cfg.gradient_accumulation_steps
         train_transforms.step()
-
-        with training_metrics_recorder.log_time("train/update_s"):
-            training_metrics = train_policy_step(policy, batch, optimizer, lr_scheduler, step, device)
 
         # Log transform scales if transforms are being used
         if cfg.training_transforms is not None:
@@ -488,7 +590,6 @@ def train(cfg: TrainConfig) -> None:
         training_metrics_recorder.log(
             training_metrics,
         )
-        batch_size = batch["action"].shape[0]
         training_metrics_recorder.log_batch(step, batch_size)
         # Update progress bar with current metrics
         current_lr = lr_scheduler.get_last_lr()[0] if lr_scheduler else optimizer.param_groups[0]["lr"]
@@ -560,6 +661,7 @@ def train(cfg: TrainConfig) -> None:
                 train_logger=training_metrics_recorder,
                 data_config=cfg.dataset,
                 keep_training_state_interval=cfg.keep_training_state_interval,
+                grad_scaler=grad_scaler,
             )
 
         if step % cfg.logging_interval == 0:

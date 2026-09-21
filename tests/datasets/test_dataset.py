@@ -1,11 +1,100 @@
 """Tests for rho.datasets module."""
 
+from copy import deepcopy
+from itertools import islice
+
+import pytest
 import torch
 
 from rho.common.constants import ACTION, OBSERVATION_STATE
 from rho.common.transforms import DeltaActions
 from rho.common.types import ActionType, FeatureType, NormalizationMode, PolicyFeature
-from rho.datasets.lerobot_dataset import LeRobotDatasetConfig, resolve_action_delta_indices_for_dataset
+from rho.datasets.lerobot_dataset import (
+    EpisodeAwareSampler,
+    LeRobotDatasetConfig,
+    resolve_action_delta_indices_for_dataset,
+)
+from rho.datasets.multi_dataset import MultiDatasetWeightedSampler, ShuffleType
+
+
+class TestSamplerResume:
+    @pytest.mark.parametrize("shuffle", [False, True])
+    @pytest.mark.parametrize("consumed_count", [0, 3, 11, 12])
+    def test_episode_sampler_continuation(self, shuffle, consumed_count):
+        def make_sampler():
+            return EpisodeAwareSampler([0, 8, 20], [6, 14, 26], [0, 2], shuffle=shuffle, seed=42)
+
+        original = make_sampler()
+        iterator = iter(original)
+        consumed = list(islice(iterator, consumed_count))
+        state = deepcopy(original.save_state())
+        expected = list(iterator)
+
+        restored = make_sampler()
+        restored.load_state(state)
+
+        assert len(consumed) == consumed_count
+        assert len(expected) == len(original) - consumed_count
+        assert list(restored) == expected
+        assert list(restored) == list(original)
+
+    @pytest.mark.parametrize("shuffle", [False, True])
+    @pytest.mark.parametrize("shuffle_type", [ShuffleType.FRAME, ShuffleType.NONE])
+    @pytest.mark.parametrize("consumed_count", [0, 1, 5, 8, 15, 16, 17, 31, 32])
+    def test_multi_dataset_sampler_continuation(self, shuffle, shuffle_type, consumed_count):
+        def make_sampler():
+            return MultiDatasetWeightedSampler(
+                [
+                    EpisodeAwareSampler([0], [8], shuffle=shuffle, seed=11),
+                    EpisodeAwareSampler([0], [12], shuffle=shuffle, seed=22),
+                ],
+                sample_weights=[0.5, 0.5],
+                shuffle_type=shuffle_type,
+                seed=42,
+            )
+
+        original = make_sampler()
+        iterator = iter(original)
+        assert len(list(islice(iterator, consumed_count))) == consumed_count
+        state = deepcopy(original.save_state())
+        expected = list(islice(iterator, 32))
+
+        restored = make_sampler()
+        restored.load_state(state)
+        assert list(islice(iter(restored), 32)) == expected
+
+    def test_save_immediately_after_restore_preserves_position(self):
+        original = EpisodeAwareSampler([0], [10])
+        iterator = iter(original)
+        list(islice(iterator, 3))
+        restored = EpisodeAwareSampler([0], [10])
+        restored.load_state(original.save_state())
+        restored_again = EpisodeAwareSampler([0], [10])
+        restored_again.load_state(restored.save_state())
+        assert list(restored_again) == list(iterator)
+
+    def test_legacy_episode_state_warns_and_restarts_epoch(self, caplog):
+        sampler = EpisodeAwareSampler([0], [5])
+        state = sampler.save_state()
+        del state["position"]
+        sampler.load_state(state)
+        assert list(sampler) == list(range(5))
+        assert "no position" in caplog.text
+
+    @pytest.mark.parametrize("position", [-1, 6, 1.5])
+    def test_invalid_position_is_rejected(self, position):
+        sampler = EpisodeAwareSampler([0], [5])
+        state = sampler.save_state()
+        state["position"] = position
+        with pytest.raises(ValueError, match="Invalid sampler position"):
+            sampler.load_state(state)
+
+    def test_legacy_missing_rng_state_warns(self, caplog):
+        sampler = MultiDatasetWeightedSampler([EpisodeAwareSampler([0], [5])], seed=42)
+        state = sampler.save_state()
+        state["rng_state"] = None
+        sampler.load_state(state)
+        assert "no usable RNG state" in caplog.text
 
 
 def make_mock_features():

@@ -29,8 +29,8 @@ Example usage::
     from rho.environment.env import evaluate_policy
 
     env_cfg = DatasetEnvironmentConfig(
-        repo_id="tabletopsim_handover",
-        root_dir="/data/aloha_handover_box_v4",
+        repo_id="my_robot_dataset",
+        root_dir="/path/to/lerobot_dataset",
         chunk_size=32,
         observation_mapping={
             "observation.images.agentview_image": "observation.image.0",
@@ -229,7 +229,7 @@ class DatasetEnvironment(EnvironmentWrapper):
         self._is_vectorized = False
         self.episodes_per_task = None  # set by evaluate_policy
 
-        from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+        from rho.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 
         # --- resolve raw action key (before mapping) -----------------
         self._obs_mapping = config.observation_mapping or {}

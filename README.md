@@ -2,12 +2,7 @@
 
 Rho is a vision-language-action policy for robot learning. This repository
 provides the code needed to finetune Rho on LeRobot datasets, evaluate it in
-simulation, and serve it over a websocket for deployment. It also includes
-FlowDAgger support for human-in-the-loop adaptation of a frozen Rho policy.
-
-The public release focuses on Rho finetuning and inference. Pretraining code,
-internal datasets, and unrelated experimental policies are intentionally not
-part of the supported surface.
+simulation, and serve it over a websocket for deployment.
 
 ## Features
 
@@ -17,7 +12,6 @@ part of the supported surface.
 - LeRobot dataset loading, transforms, and normalization.
 - LIBERO and RoboEval training and evaluation examples.
 - Websocket policy server and lightweight Python client.
-- FlowDAgger human-in-the-loop adaptation.
 
 ## Requirements
 
@@ -26,13 +20,17 @@ part of the supported surface.
 - A CUDA-capable GPU for practical training and inference
 - Git
 
-Docker is recommended for a reproducible GPU environment. Weights and datasets
-hosted on Hugging Face may require `HF_TOKEN`. Weights & Biases is optional;
-disable it with `--wandb.enabled=false`.
+Docker is recommended for a reproducible GPU environment. Weights & Biases is
+optional; disable it with `--wandb.enabled=false`.
 
 ## Installation
 
-Create a Python environment and install the repository:
+Choose either a native installation below or [Docker](#docker). Docker users
+do not need to create a host Python environment or install FlashAttention on
+the host.
+
+For a native installation, create a Python environment and install the
+repository:
 
 ```bash
 conda create -y -n rho python=3.12
@@ -47,19 +45,51 @@ The websocket client is also independently installable:
 pip install -e rho_client
 ```
 
-For supported NVIDIA GPUs, install FlashAttention separately:
+Rho's default GPU configuration uses FlashAttention 2, which is installed
+separately. Its native build requires a CUDA development toolkit (CUDA 12.0
+or newer, compatible with your PyTorch build), including `nvcc` and CUDA
+headers, plus a C++ compiler. An NVIDIA driver or the CUDA runtime bundled
+with PyTorch is not sufficient.
+
+If the toolkit is installed at `/usr/local/cuda`, configure and check it as
+follows; replace that path with your actual toolkit installation:
 
 ```bash
-pip install flash-attn==2.8.3 --no-build-isolation --no-cache-dir
+export CUDA_HOME=/usr/local/cuda
+export PATH="$CUDA_HOME/bin:$PATH"
+nvcc --version
+python -c "import torch; print('PyTorch CUDA:', torch.version.cuda)"
+```
+
+If `nvcc` is missing, install the
+[CUDA toolkit](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/)
+first, or use Docker. Setting `CUDA_HOME` alone does not install the toolkit.
+If PyTorch reports `None`, install a CUDA-enabled PyTorch build before
+continuing. Once these prerequisites are available:
+
+```bash
+python -m pip install packaging ninja
+python -m pip install flash-attn==2.8.3 --no-build-isolation --no-cache-dir
 ```
 
 ## Docker
+
+The Dockerfile supplies the CUDA development toolkit and installs
+FlashAttention inside the image; a host `nvcc` installation is not required.
+Running the container with GPUs still requires an NVIDIA driver and the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+on the host.
 
 Build the base training image:
 
 ```bash
 ./docker/training/build.sh
 ```
+
+Docker builds may require substantial temporary space for image layers and
+build cache. Plan for approximately 100 GB of free space. Inspect usage with
+`docker system df`; use `docker builder prune` only when its listed build cache
+is safe to remove.
 
 Start an interactive container from the repository root:
 
@@ -74,7 +104,42 @@ a host dataset directory at `/data`:
 RHO_DATA_DIR=/path/to/datasets ./docker/training/interactive.sh
 ```
 
+## PushT smoke test
+
+The public PushT configuration uses unnormalized image inputs compatible with
+Rho's image processor. From the base training environment, run:
+
+```bash
+python -m rho.train \
+  --config_path=config/train_pusht.yaml \
+  --steps=10 \
+  --batch_size=1 \
+  --num_workers=0 \
+  --policy.num_flow_samples=1 \
+  --wandb.enabled=false
+```
+
+A successful smoke test prints steps, losses, and learning rates through step
+10 and exits with status zero. The default checkpoint interval is 5,000 steps,
+so this command verifies training without writing a checkpoint.
+
 ## Checkpoints
+
+Alongside the base pretrained model
+[`microsoft/rho-base`](https://huggingface.co/microsoft/rho-base), we provide
+robot-specific midtrained checkpoints as starting points for task-specific
+finetuning:
+
+| Robot platform | Midtrained checkpoint |
+| --- | --- |
+| [UR AI Trainer](https://www.universal-robots.com/products/ur-ai-trainer/) | [`microsoft/rho-ur-ai-trainer`](https://huggingface.co/microsoft/rho-ur-ai-trainer) |
+| [Franka FR3 Duo](https://franka.de/fr3-duo) | [`microsoft/rho-fr3-duo`](https://huggingface.co/microsoft/rho-fr3-duo) |
+| [YAM Box](https://i2rt.com/products/yam-box) | [`microsoft/rho-yam-box`](https://huggingface.co/microsoft/rho-yam-box) |
+
+Select a midtrained checkpoint with the top-level `pretrained_checkpoint`
+setting, for example `--pretrained_checkpoint=microsoft/rho-ur-ai-trainer`.
+See [Choosing a starting checkpoint](docs/tutorials/finetuning_custom_datasets.md#choosing-a-starting-checkpoint)
+for finetuning guidance.
 
 Rho supports local checkpoint paths and Hugging Face repository IDs. Public
 pretrained model checkpoints contain:
@@ -114,57 +179,71 @@ different Hugging Face repository or a locally available checkpoint. Set
 
 Training and evaluation use YAML configuration files. Configurations can
 compose shared files with `!include`, and any field can be overridden from the
-command line with dotted names:
+command line with dotted names. The shared `rho.train` entry point
+automatically selects single-process training or the Accelerate
+implementation based on the launch environment.
 
-The shared `rho.train` entry point automatically selects single-process
-training or the Accelerate implementation based on the launch environment.
-Environment-specific training scripts register their adapters and then
-delegate to this entry point, so use the corresponding script for LIBERO and
-RoboEval configurations.
+For example, override the public PushT configuration:
 
 ```bash
-python environments/libero/train.py \
-  --config_path=environments/libero/configs/train_libero_rho.yaml \
-  --steps=10 \
-  --batch_size=1 \
-  --policy.num_flow_samples=1 \
+python -m rho.train \
+  --config_path=config/train_pusht.yaml \
+  --batch_size=4 \
+  --steps=100 \
   --wandb.enabled=false
 ```
 
-For a distributed smoke test:
+Distributed launches require at least as many visible physical GPUs as
+processes. For two GPUs:
 
 ```bash
 accelerate launch --multi-gpu \
   --num_processes=2 \
-  environments/libero/train.py \
-  --config_path=environments/libero/configs/train_libero_rho.yaml \
-  --steps=10 \
-  --batch_size=1 \
-  --policy.num_flow_samples=1 \
+  -m rho.train \
+  --config_path=config/train_pusht.yaml \
   --wandb.enabled=false
 ```
+
+Environment-specific training scripts register their adapters and delegate to
+the same training implementation. Run LIBERO commands only after building and
+entering the LIBERO container below.
 
 ## LIBERO
 
 Build and launch the LIBERO image after building `rho-training:latest`:
 
 ```bash
+export RHO_DATA_DIR=/path/to/large/storage
 ./environments/libero/docker/build.sh
 ./environments/libero/docker/run_interactive.sh
 ```
 
+The launcher mounts `RHO_DATA_DIR` at `/data`. Store generated runs there to
+avoid filling the repository filesystem. The current container runs as root,
+so files written to the host data directory may be root-owned.
+
 Run a short single-GPU smoke test:
 
 ```bash
+mkdir -p /data/rho_runs/libero_smoke
+
 python environments/libero/train.py \
   --config_path=environments/libero/configs/train_libero_rho.yaml \
   --steps=10 \
   --batch_size=1 \
+  --num_workers=0 \
   --policy.num_flow_samples=1 \
-  --wandb.enabled=false
+  --wandb.enabled=false \
+  --output_dir=/data/rho_runs/libero_smoke
 ```
 
-### Reproducing the published LIBERO finetuning recipe
+A successful run authenticates to the hosted checkpoint, loads the LIBERO
+dataset, prints loss and learning-rate values through step 10, and exits with
+status zero. Initialization alone is not a successful smoke test. The default
+checkpoint interval is 5,000 steps, so no checkpoint is expected from this
+10-step command.
+
+### Run full LIBERO training
 
 The canonical configuration trains for 40,000 optimizer steps with a global
 effective batch size of 128. The published-result topology uses four H100
@@ -174,7 +253,8 @@ GPUs, per-device batch size 32, and no gradient accumulation:
 accelerate launch --multi-gpu \
   --num_processes=4 \
   environments/libero/train.py \
-  --config_path=environments/libero/configs/train_libero_rho.yaml
+  --config_path=environments/libero/configs/train_libero_rho.yaml \
+  --output_dir=/data/rho_runs/libero_full
 ```
 
 The effective batch size is:
@@ -194,7 +274,8 @@ accelerate launch \
   environments/libero/train.py \
   --config_path=environments/libero/configs/train_libero_rho.yaml \
   --batch_size=32 \
-  --gradient_accumulation_steps=4
+  --gradient_accumulation_steps=4 \
+  --output_dir=/data/rho_runs/libero_full
 ```
 
 If batch size 32 does not fit, use batch size 16 with accumulation 8, or batch
@@ -207,12 +288,13 @@ gradient_accumulation_steps = 128 ÷ (batch_size × number of processes)
 The canonical configuration also uses BF16, a learning rate of `1e-4`, 2,500
 warmup steps, cosine decay to `5e-6` over 40,000 steps, and checkpoints every
 5,000 steps. It trains with the vision and language backbone unfrozen, predicts
-16-step action chunks, executes 8 actions per inference, and draws 8 flow
-samples per training example (`policy.num_flow_samples=8`). The flow-sample
-setting matches the published recipe but is not required for ordinary
-finetuning, which can use the policy default of 1. On an H100, the published
-global batch of 128 with 8 flow samples takes approximately 7.2 seconds per
-optimizer step; exact throughput depends on hardware and launch topology.
+16-step action chunks, and draws 8 flow samples per training example
+(`policy.num_flow_samples=8`). LIBERO evaluation executes all 16 predicted
+actions before requesting another chunk. The flow-sample setting matches the
+published recipe but is not required for ordinary finetuning, which can use
+one sample for lower memory and compute cost. On an H100, the published global
+batch of 128 with 8 flow samples takes approximately 7.2 seconds per optimizer
+step; exact throughput depends on hardware and launch topology.
 A checkpoint for this model is roughly 10.5 GB for model weights alone or
 20.6 GB when it also retains the optimizer and scheduler state required to
 resume training. Plan output storage accordingly.
@@ -221,14 +303,15 @@ On Python 3.12, worker startup may print a warning about forking a
 multithreaded process. The validated container completed normally; if worker
 startup stalls on another host, use `--num_workers=0`.
 
-Run evaluation separately and explicitly select the resulting finetuned
-checkpoint. Leaving `pretrained_checkpoint` unset would evaluate the hosted
-base checkpoint instead:
+### Evaluate the published LIBERO checkpoint
+
+The LIBERO evaluation configurations use the hosted
+[`microsoft/rho-libero`](https://huggingface.co/microsoft/rho-libero)
+checkpoint and execute 16 actions per inference:
 
 ```bash
 python environments/libero/eval.py \
-  --config_path=environments/libero/configs/eval_libero_rho.yaml \
-  --pretrained_checkpoint=/path/to/training-run/checkpoints/checkpoint_step_0040000
+  --config_path=environments/libero/configs/eval_libero_rho.yaml
 ```
 
 For a short four-suite validation, run one episode for each of the 10 tasks in
@@ -236,8 +319,7 @@ each suite, for 40 episodes total:
 
 ```bash
 python environments/libero/eval.py \
-  --config_path=environments/libero/configs/multieval_libero_rho_smoke.yaml \
-  --pretrained_checkpoint=/path/to/training-run/checkpoints/checkpoint_step_0040000
+  --config_path=environments/libero/configs/multieval_libero_rho_smoke.yaml
 ```
 
 The full published evaluation runs 50 episodes for each of 10 tasks in each
@@ -245,9 +327,24 @@ suite: 500 episodes per suite and 2,000 episodes total.
 
 ```bash
 python environments/libero/eval.py \
-  --config_path=environments/libero/configs/multieval_libero_rho_50.yaml \
+  --config_path=environments/libero/configs/multieval_libero_rho_50.yaml
+```
+
+To evaluate a checkpoint produced by your own full training run, override the
+hosted checkpoint explicitly:
+
+```bash
+python environments/libero/eval.py \
+  --config_path=environments/libero/configs/eval_libero_rho.yaml \
   --pretrained_checkpoint=/path/to/training-run/checkpoints/checkpoint_step_0040000
 ```
+
+Multi-evaluation writes a `multieval_summary_*.json` even when suites fail.
+Each suite has an explicit `status` and failed suites include an `error`.
+Any suite failure makes the command exit unsuccessfully after the remaining
+suites have been attempted. An incomplete run has no overall
+`aggregate.mean_success_rt` (JSON `null`); its successful-suite-only mean is
+reported separately as `aggregate.mean_success_rt_completed`.
 
 ## RoboEval
 
@@ -267,17 +364,6 @@ pip install -e ".[server]"
 
 Environment integrations provide the observation and action conversion needed
 between a policy server and a robot or simulator client.
-
-## FlowDAgger
-
-FlowDAgger wraps a frozen Rho policy with a deterministic noise policy. Human
-interventions are inverted through Rho's flow model, and the noise policy is
-updated online with supervised regression. FlowDAgger uses the HIL transport
-and trainer modules under `rho/hil` and the selected implementation under
-`rho/policies/dsrl`.
-
-The public workflow requires a Rho checkpoint, dataset-specific preprocessing,
-and a robot-side client that publishes intervention transitions.
 
 ## Dataset utilities
 

@@ -25,6 +25,11 @@ from rho.environment import EnvironmentConfig, EnvironmentWrapper, register_envi
 logger = logging.getLogger(__name__)
 
 
+def initial_state_indices(state_offset: int, n_envs: int, num_states: int) -> np.ndarray:
+    """Return the next contiguous vectorized batch of LIBERO initial states."""
+    return (state_offset + np.arange(n_envs)) % num_states
+
+
 def _quat2axisangle(quat):
     # clip quaternion
     if quat[3] > 1.0:
@@ -55,11 +60,6 @@ def list_of_dicts_to_batch(obs: list[dict]) -> dict:
         for key in obs[0]:
             batch[key] = np.stack([o[key] for o in obs], axis=0)
     return batch
-
-
-def initial_state_indices(state_offset: int, n_envs: int, num_states: int) -> np.ndarray:
-    """Return the next contiguous vectorized batch of LIBERO initial states."""
-    return (state_offset + np.arange(n_envs)) % num_states
 
 
 @EnvironmentConfig.register_subclass("libero")

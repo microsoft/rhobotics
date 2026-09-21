@@ -356,7 +356,7 @@ class TaskDescriptionSelector(Transform):
 @dataclasses.dataclass(frozen=True)
 class CenterCrop:
     """Center crop image to target size using torchvision.
-    Supports both 3D (CHW) and 4D (BCHW) tensors.
+    Supports image tensors ending in (C, H, W), including temporal batches.
     """
 
     height: int
@@ -365,10 +365,10 @@ class CenterCrop:
     type: str = "center_crop"
 
     def __call__(self, data: Tensor) -> Tensor:
-        if len(data.shape) not in [3, 4]:
-            raise ValueError(f"Expected 3D (CHW) or 4D (BCHW) tensor, got {len(data.shape)}D")
+        if data.ndim < 3:
+            raise ValueError(f"Expected an image tensor ending in (C, H, W), got shape {tuple(data.shape)}")
 
-        # Use torchvision's implementation (already handles batches)
+        # Torchvision preserves leading batch/temporal dimensions.
         transform = T.CenterCrop(size=(self.height, self.width))
         return transform(data)
 
@@ -557,8 +557,8 @@ class _CenterResizedCrop(Transform):
         return max(1, min(crop_h, h)), max(1, min(crop_w, w))
 
     def __call__(self, data: Tensor) -> Tensor:
-        if len(data.shape) not in [3, 4]:
-            raise ValueError(f"Expected 3D (CHW) or 4D (BCHW) tensor, got {len(data.shape)}D")
+        if data.ndim < 3:
+            raise ValueError(f"Expected an image tensor ending in (C, H, W), got shape {tuple(data.shape)}")
 
         h, w = data.shape[-2:]
         crop_h, crop_w = self._crop_size(h, w)
@@ -576,19 +576,19 @@ class _CenterResizedCrop(Transform):
 @dataclass(frozen=True)
 class RandomResizedCrop(Transform):
     """Randomly crop and resize to target size using torchvision.
-    Supports both 3D (CHW) and 4D (BCHW) tensors.
+    Supports image tensors ending in (C, H, W), including temporal batches.
     """
 
     height: int
     width: int
-    scale: tuple[float, float] = (0.08, 1.0)
-    ratio: tuple[float, float] = (3.0 / 4.0, 4.0 / 3.0)
+    scale: tuple[float, float] = (0.9, 1.0)
+    ratio: tuple[float, float] = (0.98, 1.02)
     input_type: str = "Tensor"
     type: str = "random_resized_crop"
 
     def __call__(self, data: Tensor) -> Tensor:
-        if len(data.shape) not in [3, 4]:
-            raise ValueError(f"Expected 3D (CHW) or 4D (BCHW) tensor, got {len(data.shape)}D")
+        if data.ndim < 3:
+            raise ValueError(f"Expected an image tensor ending in (C, H, W), got shape {tuple(data.shape)}")
         # Cache the torchvision transform instance keyed by params. The
         # constructor does internal validation and op registration which is
         # non-trivial when called per-sample at eff_bs=512 across 3 image keys
@@ -869,7 +869,7 @@ class ConvertStatsTo6d(Transform):
     action_type: ActionType = ActionType.EE_QUAT_POS_XYZW
     type: str = "convert_stats_to_6d"
     input_type: str = "Dict"
-    post_norm: bool = True
+    post_norm: bool = False
 
     def __call__(
         self,
@@ -1021,9 +1021,13 @@ class DeltaActions(Transform):
         Result: actions - state (broadcasted across all timesteps)
 
     When relative_to_state=False:
-        Actions become relative to their previous neighbor (temporal differences).
-        Result: delta[t] = action[t+1] - action[t] for t in [0, T-1]
-        Note: The last action's delta is not computed (remains zero).
+        The first action is relative to state; subsequent actions are relative
+        to the preceding action.
+
+    Gripper channels remain absolute by default for supported end-effector formats.
+    absolute_idx keeps additional zero-based channels absolute for any action type,
+    independently of use_absolute_grippers. Rotation coordinates must be selected
+    as complete blocks so the transform remains invertible.
 
     When action_type is EE_QUAT_POS_XYZW, rotation should be in quaternion format (x, y, z, w).
     When action_type is EE_QUAT_POS_WXYZ, rotation should be in quaternion format (w, x, y, z).
@@ -1034,10 +1038,22 @@ class DeltaActions(Transform):
     action_key: str = "action"
     action_type: ActionType = ActionType.POSITION
     input_type: str = "Dict"
-    post_norm: bool = True
-    relative_to_state: bool = False
-    use_absolute_grippers: bool = False
+    post_norm: bool = False
+    relative_to_state: bool = True
+    use_absolute_grippers: bool = True
+    absolute_idx: list[int] | None = None
     type: str = "delta_actions"
+
+    def __post_init__(self):
+        self._validate_absolute_idx(self.absolute_idx)
+
+    @staticmethod
+    def _validate_absolute_idx(absolute_idx: list[int] | None) -> None:
+        if absolute_idx is not None and (
+            not isinstance(absolute_idx, list)
+            or any(type(index) is not int or index < 0 for index in absolute_idx)
+        ):
+            raise ValueError("absolute_idx must be a list of non-negative integer indices or None")
 
     @staticmethod
     def _gripper_slices(action_type: ActionType, action_dim: int) -> list[slice]:
@@ -1054,6 +1070,42 @@ class DeltaActions(Transform):
             for start in range(0, action_dim, dims_per_arm)
         ]
 
+    @staticmethod
+    def _absolute_indices(
+        action_type: ActionType,
+        action_dim: int,
+        use_absolute_grippers: bool,
+        absolute_idx: list[int] | None,
+    ) -> list[int]:
+        DeltaActions._validate_absolute_idx(absolute_idx)
+        indices = set(absolute_idx or [])
+        if any(index >= action_dim for index in indices):
+            raise ValueError(
+                f"absolute_idx {absolute_idx} contains an index outside action dimension {action_dim}"
+            )
+        if indices and action_type != ActionType.POSITION:
+            rotation_dim = {
+                ActionType.EE_EULER_POS: 3,
+                ActionType.EULER: 3,
+                ActionType.EE_QUAT_POS_XYZW: 4,
+                ActionType.QUAT_XYZW: 4,
+                ActionType.EE_QUAT_POS_WXYZ: 4,
+                ActionType.QUAT_WXYZ: 4,
+                ActionType.EE_6D_POS: 6,
+                ActionType.SIX_D: 6,
+            }.get(action_type)
+            if rotation_dim is not None:
+                has_gripper = bool(DeltaActions._gripper_slices(action_type, action_dim))
+                offset = 3 if has_gripper else 0
+                stride = rotation_dim + 4 if has_gripper else rotation_dim
+                for start in range(offset, action_dim, stride):
+                    rotation = set(range(start, start + rotation_dim))
+                    if indices & rotation and not rotation <= indices:
+                        raise ValueError("absolute_idx must include an entire rotation block, not part of it")
+        if use_absolute_grippers:
+            indices.update(s.start for s in DeltaActions._gripper_slices(action_type, action_dim))
+        return sorted(indices)
+
     def __call__(self, data: dict[str, Tensor]) -> dict[str, Tensor]:
         if self.state_key not in data or self.action_key not in data:
             # Skip if keys are missing (e.g., dataset doesn't have these keys)
@@ -1061,6 +1113,9 @@ class DeltaActions(Transform):
 
         state = data[self.state_key]
         actions = data[self.action_key]
+        absolute_idx = self._absolute_indices(
+            self.action_type, actions.shape[-1], self.use_absolute_grippers, self.absolute_idx
+        )
 
         # Normalize actions to 3D: (batch, chunk, action_dim).
         orig_action_dim = len(actions.shape)
@@ -1135,9 +1190,8 @@ class DeltaActions(Transform):
         else:
             raise ValueError(f"Unknown action_type: {self.action_type}")
 
-        if self.use_absolute_grippers:
-            for grip_slice in self._gripper_slices(self.action_type, actions.shape[-1]):
-                delta_actions[..., grip_slice] = actions[..., grip_slice]
+        if absolute_idx:
+            delta_actions[..., absolute_idx] = actions[..., absolute_idx]
 
         if orig_action_dim == 2:
             delta_actions = delta_actions.squeeze(0)
@@ -1186,18 +1240,23 @@ class AbsoluteActions(Transform):
     When action_type is EE_QUAT_POS_XYZW, rotation should be in quaternion format (x, y, z, w).
     When action_type is EE_QUAT_POS_WXYZ, rotation should be in quaternion format (w, x, y, z).
 
-    Reconstructs absolute actions from state and delta actions using cumulative sum.
-    Result is state + cumsum(delta_actions).
+    Defaults match DeltaActions: add state to each action independently and
+    preserve absolute grippers. Set relative_to_state=False for cumulative deltas.
+    Channels in absolute_idx pass through unchanged, matching DeltaActions.
     """
 
     state_key: str = "observation.state"
     action_key: str = "action"
     action_type: ActionType = ActionType.POSITION
     input_type: str = "Dict"
-    post_norm: bool = True
-    relative_to_state: bool = False
-    use_absolute_grippers: bool = False
+    post_norm: bool = False
+    relative_to_state: bool = True
+    use_absolute_grippers: bool = True
+    absolute_idx: list[int] | None = None
     type: str = "absolute_actions"
+
+    def __post_init__(self):
+        DeltaActions._validate_absolute_idx(self.absolute_idx)
 
     def __call__(self, data: dict[str, Tensor]) -> dict[str, Tensor]:
         if self.state_key not in data or self.action_key not in data:
@@ -1206,6 +1265,9 @@ class AbsoluteActions(Transform):
 
         state = data[self.state_key]
         actions = data[self.action_key]
+        absolute_idx = DeltaActions._absolute_indices(
+            self.action_type, actions.shape[-1], self.use_absolute_grippers, self.absolute_idx
+        )
 
         # Check the shape of actions
         # if (sequence_length, action_dim) change to (1, sequence_length, action_dim)
@@ -1284,9 +1346,8 @@ class AbsoluteActions(Transform):
         else:
             raise ValueError(f"Unknown action_type: {self.action_type}")
 
-        if self.use_absolute_grippers:
-            for grip_slice in DeltaActions._gripper_slices(self.action_type, actions.shape[-1]):
-                absolute_actions[..., grip_slice] = actions[..., grip_slice]
+        if absolute_idx:
+            absolute_actions[..., absolute_idx] = actions[..., absolute_idx]
 
         if orig_action_dim == 2:
             absolute_actions = absolute_actions.squeeze(0)
@@ -1312,7 +1373,7 @@ class ConvertTo6dActions(Transform):
     action_type: ActionType = ActionType.EE_QUAT_POS_XYZW
     type: str = "convert_to_6d_actions"
     input_type: str = "Dict"
-    post_norm: bool = True
+    post_norm: bool = False
 
     def __call__(self, data: dict[str, Tensor]) -> dict[str, Tensor]:
         if self.action_key not in data:

@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import draccus
@@ -11,16 +12,36 @@ from rho.policies.rho import RhoConfig
 from rho.training.train import TrainConfig, initialize_checkpoint_folder, resolve_training_checkpoint
 
 
+@pytest.mark.parametrize("overrides", [{}, {"mixed_precision": "no", "grad_clip_norm": 1.0}])
+def test_training_precision_and_clipping_defaults_allow_overrides(overrides):
+    config = draccus.decode(
+        TrainConfig,
+        {
+            "dataset": {"features": {}, "stats": {}},
+            "policy": {"type": "rho"},
+            **overrides,
+        },
+    )
+
+    assert config.mixed_precision == overrides.get("mixed_precision", "bf16")
+    assert config.grad_clip_norm == overrides.get("grad_clip_norm", 10.0)
+    assert config.policy.num_flow_samples == 8
+
+
 def test_train_cli_accepts_nested_dataset_overrides(tmp_path):
     config_path = tmp_path / "train.yaml"
     config_path.write_text(
         """
 dataset:
   repo_id: lerobot/pusht
+  features: {}
+  stats: {}
 validation_dataset:
   repo_id: lerobot/pusht
+  features: {}
+  stats: {}
 policy:
-  type: behavioral_cloning
+  type: rho
 """
     )
 
@@ -35,6 +56,7 @@ policy:
         ],
     )
 
+    assert isinstance(config.policy, RhoConfig)
     assert isinstance(config.dataset, LeRobotDatasetConfig)
     assert config.dataset.root_dir == str(tmp_path / "train-data")
     assert config.dataset.streaming is True
@@ -54,6 +76,26 @@ def test_train_config_post_init(sample_features):
 
     # batch_size should be applied to dataset config
     assert config.dataset.batch_size == 64
+
+
+@pytest.mark.parametrize("num_workers", [0, 4])
+def test_deterministic_training_seeds_datasets_without_overriding_workers(num_workers):
+    child = SimpleNamespace(seed=0, num_workers=2)
+    dataset_config = SimpleNamespace(seed=0, chunk_size=None, dataset_cfgs=[child])
+    validation_config = SimpleNamespace(seed=0)
+    config = TrainConfig(
+        dataset=dataset_config,
+        validation_dataset=validation_config,
+        policy=PolicyConfig(feature_dict={}),
+        seed=123,
+        deterministic_training=True,
+        num_workers=num_workers,
+    )
+
+    assert config.num_workers == config.dataset.num_workers == validation_config.num_workers == num_workers
+    assert config.dataset.seed == 123
+    assert child.seed == validation_config.seed == 124
+    assert child.num_workers == 2
 
 
 def test_timestamped_checkpoint_folder_is_initialized_once(tmp_path, sample_features):

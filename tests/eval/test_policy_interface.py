@@ -225,6 +225,24 @@ def policy_interface(mock_policy, identity_transforms):
 class TestPolicyInterfaceInit:
     """Tests for PolicyInterface initialization."""
 
+    @pytest.mark.parametrize("horizon", [0, -1, 5])
+    def test_standard_rejects_invalid_execution_horizon(self, horizon):
+        cfg = _make_pi_config(policy=_MockPolicy(), execution_horizon=horizon)
+        with pytest.raises(ValueError, match="execution_horizon"):
+            PolicyInterface(cfg)
+
+    def test_standard_execution_horizon_override_keeps_full_chunk_api(self):
+        cfg = _make_pi_config(
+            policy=_MockPolicy(),
+            device="cpu",
+            execution_horizon=2,
+            input_transforms=_identity_transform,
+            output_transforms=_identity_transform,
+        )
+        pi = PolicyInterface(cfg)
+        assert pi.execution_horizon == 2
+        assert pi.get_action_chunk({"observation.state": torch.zeros(1, 1, 2)}).shape == (1, 4, 2)
+
     def test_init_wires_config_values(self):
         """PolicyInterface should propagate non-default config values."""
         config = _MockPolicyConfig(chunk_size=7, n_action_steps=3)

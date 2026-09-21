@@ -576,9 +576,10 @@ def test_dummy_environment_process_input_string():
 class MockPolicyInterface:
     """A mock PolicyInterface that returns random action chunks."""
 
-    def __init__(self, action_dim=4, chunk_size=4):
+    def __init__(self, action_dim=4, chunk_size=4, execution_horizon=None):
         self.action_dim = action_dim
         self.chunk_size = chunk_size
+        self.execution_horizon = chunk_size if execution_horizon is None else execution_horizon
 
     def reset(self):
         pass
@@ -592,6 +593,55 @@ class MockPolicyInterface:
                 break
         # Return (batch, chunk_size, action_dim)
         return torch.randn(batch_size, self.chunk_size, self.action_dim)
+
+
+@pytest.mark.parametrize("eval_mode,inference_delay", [("standard", 0), ("rtc", 2)])
+@pytest.mark.parametrize("chunk_size,horizon,max_steps", [(16, 8, 20), (16, 8, 3), (4, 4, 12), (8, 1, 12)])
+def test_evaluate_policy_execution_horizon(eval_mode, inference_delay, chunk_size, horizon, max_steps):
+    from rho.environment.env import DummyEnvironment, DummyEnvironmentConfig, evaluate_policy
+
+    if eval_mode == "rtc" and horizon + inference_delay > chunk_size:
+        inference_delay = 0
+
+    class RecordingEnvironment(DummyEnvironment):
+        def __init__(self):
+            super().__init__(DummyEnvironmentConfig(action_dim=1, max_steps=max_steps))
+            self.actions = []
+
+        def step(self, action):
+            self.actions.append(action.item())
+            return super().step(action)
+
+    class RecordingPolicyInterface(MockPolicyInterface):
+        def __init__(self):
+            super().__init__(action_dim=1, chunk_size=chunk_size, execution_horizon=horizon)
+            self.inference_steps = []
+            self.executed_counts = []
+
+        def get_action_chunk(self, obs):
+            self.inference_steps.append(len(env.actions))
+            self.executed_counts.append(obs.get("num_actions_executed"))
+            chunk_id = len(self.inference_steps) - 1
+            return (100 * chunk_id + torch.arange(chunk_size)).reshape(1, chunk_size, 1)
+
+    env = RecordingEnvironment()
+    policy = RecordingPolicyInterface()
+    evaluate_policy(
+        env, policy, num_episodes=1, max_steps=max_steps, eval_mode=eval_mode, inference_delay=inference_delay
+    )
+
+    assert policy.inference_steps == list(range(0, max_steps, horizon))
+    if eval_mode == "standard":
+        assert env.actions == [100 * (step // horizon) + step % horizon for step in range(max_steps)]
+        assert policy.executed_counts == [None] * len(policy.inference_steps)
+    else:
+        assert env.actions[: min(horizon, max_steps)] == list(range(min(horizon, max_steps)))
+        assert policy.executed_counts == [0] + [horizon] * (len(policy.inference_steps) - 1)
+        if max_steps > horizon + inference_delay:
+            assert env.actions[horizon : horizon + inference_delay] == list(
+                range(horizon, horizon + inference_delay)
+            )
+            assert env.actions[horizon + inference_delay] == 100 + inference_delay
 
 
 def test_evaluate_policy_with_dummy_env():
@@ -632,6 +682,39 @@ def test_evaluate_policy_with_dummy_env():
     assert isinstance(results["mean_reward"], float)
     assert isinstance(results["mean_steps"], float)
     assert 0 <= results["mean_success_rt"] <= 1
+
+
+def test_evaluate_policy_uses_independent_policy_seed():
+    """Policy sampling can vary without changing the environment seed."""
+    from rho.environment.env import DummyEnvironment, DummyEnvironmentConfig, evaluate_policy
+
+    class RecordingPolicyInterface(MockPolicyInterface):
+        def __init__(self):
+            super().__init__(action_dim=4, chunk_size=2)
+            self.first_chunk = None
+
+        def get_action_chunk(self, obs):
+            chunk = super().get_action_chunk(obs)
+            if self.first_chunk is None:
+                self.first_chunk = chunk.clone()
+            return chunk
+
+    def first_chunk(policy_seed):
+        env = DummyEnvironment(config=DummyEnvironmentConfig(obs_dim=10, action_dim=4, max_steps=2, n_envs=1))
+        policy = RecordingPolicyInterface()
+        evaluate_policy(
+            env=env,
+            policy_interface=policy,
+            num_episodes=1,
+            max_steps=2,
+            seed=42,
+            policy_seed=policy_seed,
+            record_video=False,
+        )
+        return policy.first_chunk
+
+    assert torch.equal(first_chunk(100), first_chunk(100))
+    assert not torch.equal(first_chunk(100), first_chunk(101))
 
 
 def test_evaluate_policy_with_video(tmp_path):

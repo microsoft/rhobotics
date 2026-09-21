@@ -1,5 +1,6 @@
-# Evaluate a portable Rho checkpoint on LIBERO.
+# Evaluate the released LIBERO policy, or an explicit checkpoint override.
 pretrained_checkpoint: null
+execution_horizon: 16
 
 eval_num_episodes: 10
 record_videos: true
@@ -14,5 +15,7 @@ environment:
 
 policy:
   type: "rho"
+  pretrained_repo_id: "microsoft/rho-libero"
 
 seed: 42
+policy_seed: 42

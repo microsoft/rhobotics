@@ -15,7 +15,6 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import torch.nn.functional as F
-from lerobot.policies.utils import populate_queues
 from torch import Tensor
 
 from rho.common.constants import ACTION
@@ -25,7 +24,7 @@ from rho.common.constants import OBSERVATION_LANG as OBS_TASK
 from rho.common.constants import OBSERVATION_STATE as OBS_ROBOT
 from rho.common.transforms import build_key_padding_transform, get_target_sequence_lengths
 from rho.common.types import FeatureType
-from rho.policies.base import PreTrainedPolicy
+from rho.policies.base import PreTrainedPolicy, populate_queues
 from rho.policies.rho.backbone import create_backbone_adapter
 from rho.policies.rho.configuration_rho import RhoConfig
 from rho.policies.rho.rho_model import RhoModel
@@ -34,6 +33,18 @@ from rho.policies.rho.rho_processor import RhoProcessor
 logger = logging.getLogger(__name__)
 
 OBS_IMAGES_IS_PAD = f"{OBS_IMAGES}_is_pad"
+_SIGLIP2_LEGACY_CHECKPOINT_PREFIX = ".vision_tower.vision_tower.vision_model."
+_SIGLIP2_CURRENT_CHECKPOINT_PREFIX = ".vision_tower.vision_tower."
+
+
+def _remap_siglip2_checkpoint_keys(state_dict: dict, *, uses_nested_vision_model: bool) -> dict:
+    """Adapt SigLIP2 checkpoint keys to the installed Transformers module layout."""
+    if uses_nested_vision_model:
+        return state_dict
+    return {
+        key.replace(_SIGLIP2_LEGACY_CHECKPOINT_PREFIX, _SIGLIP2_CURRENT_CHECKPOINT_PREFIX): value
+        for key, value in state_dict.items()
+    }
 
 
 @dataclass(frozen=True)
@@ -222,14 +233,26 @@ class RhoPolicy(PreTrainedPolicy):
     # ------------------------------------------------------------------
     # Checkpoint loading
     # ------------------------------------------------------------------
-    def load_state_dict(self, state_dict: dict, strict: bool = True, assign: bool = False):
+    def _remap_checkpoint_keys(self, state_dict: dict) -> dict:
         state_dict = convert_rhoalpha_state_dict(state_dict)
+        flow_model = getattr(getattr(self, "model", None), "flow_model", None)
+        vision_tower = getattr(
+            getattr(getattr(flow_model, "vlm_backbone", None), "model", None), "vision_tower", None
+        )
+        inner_vision_model = getattr(vision_tower, "vision_tower", None)
+        return _remap_siglip2_checkpoint_keys(
+            state_dict,
+            uses_nested_vision_model=hasattr(inner_vision_model, "vision_model"),
+        )
+
+    def load_state_dict(self, state_dict: dict, strict: bool = True, assign: bool = False):
+        state_dict = self._remap_checkpoint_keys(state_dict)
         result = torch.nn.Module.load_state_dict(self, state_dict, strict=strict, assign=assign)
         self._has_uninitialized_backbone = False
         return result
 
     def _remap_backwards_compatible_keys(self, state_dict: dict) -> dict:
-        return convert_rhoalpha_state_dict(state_dict)
+        return self._remap_checkpoint_keys(state_dict)
 
     # ------------------------------------------------------------------
     # Image consolidation
@@ -312,7 +335,6 @@ class RhoPolicy(PreTrainedPolicy):
     @torch.no_grad()
     def sample_actions(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
         self.eval()
-        orig_batch = batch
         inputs = self._prepare_model_inputs(batch)
         actions = self.model.sample_actions(
             inputs.image,
@@ -321,10 +343,6 @@ class RhoPolicy(PreTrainedPolicy):
             noise=noise,
             image_mask=inputs.image_mask,
         )
-
-        flow_model = getattr(self.model, "flow_model", self.model)
-        if hasattr(flow_model, "_last_initial_noise"):
-            orig_batch["__dsrl_noise_used__"] = flow_model._last_initial_noise
 
         original_action_dim = self.config.action_feature.shape[0]
         actions = actions[:, :, :original_action_dim]

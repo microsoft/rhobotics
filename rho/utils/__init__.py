@@ -1,9 +1,58 @@
 import logging
 import os
+from collections.abc import Iterable, Iterator
 from datetime import datetime
 from pathlib import Path
+from typing import TypeVar
 
+import torch
 from accelerate import Accelerator
+
+T = TypeVar("T")
+
+
+def cycle(iterable: Iterable[T]) -> Iterator[T]:
+    """Repeat an iterable, recreating its iterator without caching batches."""
+    iterator = iter(iterable)
+    while True:
+        try:
+            item = next(iterator)
+        except StopIteration:
+            iterator = iter(iterable)
+            try:
+                item = next(iterator)
+            except StopIteration:
+                raise ValueError("Cannot cycle an empty or exhausted iterable.") from None
+        yield item
+
+
+def get_safe_torch_device(try_device: str | torch.device, log: bool = False) -> torch.device:
+    """Resolve a device, rejecting unavailable accelerators rather than falling back."""
+    device = torch.device(try_device)
+    if device.type in {"cuda", "mps", "xpu"}:
+        backend = torch.backends.mps if device.type == "mps" else getattr(torch, device.type, None)
+        if backend is None or not backend.is_available():
+            raise RuntimeError(f"Requested device {device} is not available.")
+    if log and device.type == "cpu":
+        logging.warning("Using CPU, this will be slow.")
+    elif log and device.type not in {"cuda", "mps", "xpu"}:
+        logging.warning("Using custom %s device.", device)
+    return device
+
+
+def get_safe_dtype(dtype: torch.dtype, device: str | torch.device) -> torch.dtype:
+    """Avoid float64 on accelerators that do not support it."""
+    device_type = torch.device(device).type
+    if dtype != torch.float64:
+        return dtype
+    if device_type == "mps":
+        return torch.float32
+    if device_type == "xpu":
+        capability_query = getattr(getattr(torch, "xpu", None), "get_device_capability", None)
+        if capability_query is None or not capability_query().get("has_fp64", False):
+            logging.warning("Device %s does not report float64 support; using float32 instead.", device)
+            return torch.float32
+    return dtype
 
 
 def get_logger(name: str) -> logging.Logger:

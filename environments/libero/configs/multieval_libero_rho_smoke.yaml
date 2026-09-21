@@ -1,13 +1,16 @@
 # Short validation: one episode for each of 10 tasks in every LIBERO suite.
 pretrained_checkpoint: null
+execution_horizon: 16
 policy:
   type: "rho"
+  pretrained_repo_id: "microsoft/rho-libero"
 
 eval_num_episodes: 10
 record_videos: false
 
 eval_configs:
   - <<: !include eval_libero_rho.yaml
+    execution_horizon: null
     name: "libero_spatial"
     eval_num_episodes: 10
     record_videos: false
@@ -18,6 +21,7 @@ eval_configs:
       n_envs: 10
       max_episode_steps: 220
   - <<: !include eval_libero_rho.yaml
+    execution_horizon: null
     name: "libero_object"
     eval_num_episodes: 10
     record_videos: false
@@ -28,6 +32,7 @@ eval_configs:
       n_envs: 10
       max_episode_steps: 280
   - <<: !include eval_libero_rho.yaml
+    execution_horizon: null
     name: "libero_goal"
     eval_num_episodes: 10
     record_videos: false
@@ -38,6 +43,7 @@ eval_configs:
       n_envs: 10
       max_episode_steps: 300
   - <<: !include eval_libero_rho.yaml
+    execution_horizon: null
     name: "libero_10"
     eval_num_episodes: 10
     record_videos: false

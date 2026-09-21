@@ -23,4 +23,9 @@ actions = result["action"]
 ```
 
 Call `reset()` between episodes when the server or policy implementation uses
-episode state.
+episode state. It adds `_reset_: true` to the next `infer()` request, without
+modifying your observation dictionary. The Rho server clears observation
+history and cached RTC actions before processing that request. The reset
+remains pending if the request fails, and is sent only once after a successful
+response. Discard any client-side queued actions at the same episode boundary;
+if using `num_actions_executed`, start the new episode with zero.

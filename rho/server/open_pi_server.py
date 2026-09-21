@@ -10,9 +10,9 @@ import traceback
 
 import websockets.asyncio.server as _server
 import websockets.frames
-from rho_client.msgpack_numpy import Packer, unpackb
 
 from rho.eval.policy_interface import PolicyInterface
+from rho_client.msgpack_numpy import Packer, unpackb
 
 logger = logging.getLogger(__name__)
 
@@ -57,15 +57,10 @@ class WebsocketPolicyServer:
             try:
                 input = unpackb(await websocket.recv())
 
-                # DSRL clients can seed the flow ODE with a specific initial
-                # noise instead of letting the policy sample N(0, I). Extract
-                # it before env.process_input touches the dict.
-                initial_noise = input.pop("__dsrl_initial_noise__", None)
-
                 obs = self.env.process_input(input)
 
                 infer_time = time.monotonic()
-                action = self.policy_interface.get_action_chunk(obs, noise=initial_noise)
+                action = self.policy_interface.get_action_chunk(obs)
                 infer_time = time.monotonic() - infer_time
 
                 action = self.env.process_output(action)
@@ -73,14 +68,6 @@ class WebsocketPolicyServer:
                 output = {}
                 output["infer_ms"] = [infer_time * 1000]
                 output["action"] = action
-
-                # Return the noise actually used so the robot can record it on
-                # the Transition. Base policy stashes the sampled noise in obs
-                # via sample_actions; otherwise echo back what the client sent.
-                if "__dsrl_noise_used__" in obs:
-                    output["__dsrl_noise_used__"] = obs["__dsrl_noise_used__"]
-                elif initial_noise is not None:
-                    output["__dsrl_noise_used__"] = initial_noise
 
                 await websocket.send(packer.pack(output))
 

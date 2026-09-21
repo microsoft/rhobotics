@@ -1,4 +1,4 @@
-hydra-core==1.2.0
+hydra-core==1.3.4
 easydict==1.9
 robomimic==0.2.0
 thop==0.1.1-2209072238

@@ -1,22 +1,146 @@
 """Tests for train_config.json parsing and config loading in rho.eval.eval_config."""
 
 import json
+from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
+from draccus.parsers.config_parsers import YAMLParser
 
 from rho.eval.eval import (
     _initialize_default_checkpoint,
     _make_multi_eval_config,
     _make_policy_interface_config,
+    _run_multi_eval,
+    _run_single_eval,
 )
 from rho.eval.eval_config import (
+    EvalConfig,
     _normalize_dataset_dict,
     _normalize_policy_dict,
     find_dataset_by_root_dir,
     load_configs_from_train_config,
     load_policy_config_from_json,
 )
+
+
+def test_checkpoint_loading_preserves_execution_horizon_override(monkeypatch, tmp_path):
+    from rho.datasets.data_config import RobotDataConfig
+    from rho.policies.rho import RhoConfig
+
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.touch()
+    checkpoint_policy = RhoConfig(chunk_size=16, n_action_steps=16, feature_dict={})
+    monkeypatch.setattr("rho.eval.eval_config.resolve_checkpoint", lambda *args, **kwargs: checkpoint)
+    monkeypatch.setattr(
+        "rho.eval.eval_config.load_configs_from_checkpoint",
+        lambda *args, **kwargs: (checkpoint_policy, RobotDataConfig()),
+    )
+    cfg = EvalConfig(pretrained_checkpoint=str(checkpoint), execution_horizon=8)
+    assert cfg.policy.n_action_steps == 16
+    assert cfg.execution_horizon == 8
+    assert cfg.policy_interface_cfg.execution_horizon == 8
+
+
+def test_server_base_exposes_action_type_for_websocket_metadata():
+    from rho.common.types import ActionType
+    from rho.environment.env import EnvironmentConfig
+    from rho.server.open_pi_server import WebsocketPolicyServer
+    from rho.server.serve_policy import Server
+
+    @dataclass
+    class AdapterConfig(EnvironmentConfig):
+        policy_action_type: ActionType = ActionType.POSITION
+
+    adapter = Server(AdapterConfig())
+    server = WebsocketPolicyServer(SimpleNamespace(execution_horizon=8), adapter, host="127.0.0.1", port=7000)
+    assert server._metadata["action_type"] == ActionType.POSITION
+    assert server._metadata["execution_horizon"] == 8
+
+
+@pytest.mark.parametrize("failed_tasks", [(), ("a",), ("a", "b")])
+@pytest.mark.parametrize("failure_stage", ["configuration", "evaluation"])
+def test_multi_eval_records_failures_and_raises(monkeypatch, tmp_path, failed_tasks, failure_stage):
+    cfg = SimpleNamespace(
+        pretrained_checkpoint=tmp_path / "checkpoint_step_0000001",
+        output_dir=str(tmp_path),
+        policy=object(),
+        eval_configs=[
+            SimpleNamespace(name=name, environment=SimpleNamespace(name=f"env_{name}")) for name in ("a", "b")
+        ],
+    )
+    policy = MagicMock()
+    monkeypatch.setattr("rho.eval.eval.make_policy", lambda _: policy)
+    monkeypatch.setattr("rho.eval.eval._cleanup_gpu", lambda: None)
+    calls = []
+
+    def configure(parent, entry, checkpoint, output_dir, task_name):
+        if failure_stage == "configuration" and task_name in failed_tasks:
+            raise ValueError("bad configuration")
+        return SimpleNamespace(name=task_name, environment=entry.environment)
+
+    def evaluate(entry):
+        calls.append(entry.name)
+        if failure_stage == "evaluation" and entry.name in failed_tasks:
+            raise RuntimeError("suite failed")
+        return {"mean_success_rt": 0.5, "num_episodes": 2}
+
+    monkeypatch.setattr("rho.eval.eval._make_multi_eval_config", configure)
+    monkeypatch.setattr("rho.eval.eval._run_single_eval", evaluate)
+    stale_results = tmp_path / "a" / "evaluation_results.json"
+    stale_results.parent.mkdir()
+    stale_results.write_text(json.dumps({"mean_success_rt": 1.0}))
+    if failed_tasks:
+        with pytest.raises(RuntimeError, match=f"failed for {len(failed_tasks)}/2 tasks"):
+            _run_multi_eval(cfg)
+    else:
+        _run_multi_eval(cfg)
+    assert calls == [
+        name for name in ("a", "b") if failure_stage != "configuration" or name not in failed_tasks
+    ]
+    (summary_path,) = tmp_path.glob("multieval_summary_*.json")
+    summary = json.loads(summary_path.read_text())
+    assert set(summary["per_task"]) == {"a", "b"}
+    assert summary["aggregate"]["num_failed"] == len(failed_tasks)
+    assert summary["aggregate"]["num_completed"] == 2 - len(failed_tasks)
+    assert summary["aggregate"]["complete"] == (not failed_tasks)
+    assert summary["aggregate"]["mean_success_rt"] == (None if failed_tasks else 0.5)
+    assert summary["status"] == (
+        "success" if not failed_tasks else "partial" if len(failed_tasks) == 1 else "failed"
+    )
+    for name in failed_tasks:
+        assert summary["per_task"][name]["status"] == "failed"
+        assert "error" in summary["per_task"][name]
+        assert json.loads((tmp_path / name / "evaluation_results.json").read_text())["status"] == "failed"
+    policy.load_from_pretrained.assert_called_once()
+
+
+@pytest.mark.parametrize("names", [[], ["duplicate", "duplicate"]])
+def test_multi_eval_rejects_missing_or_duplicate_tasks(names, tmp_path):
+    cfg = SimpleNamespace(
+        pretrained_checkpoint=tmp_path / "checkpoint",
+        eval_configs=[SimpleNamespace(name=name) for name in names],
+    )
+    with pytest.raises(ValueError, match="at least one evaluation and unique task names"):
+        _run_multi_eval(cfg)
+
+
+def test_single_eval_closes_resources_on_failure(monkeypatch):
+    env = MagicMock()
+    wandb_logger = MagicMock()
+    monkeypatch.setattr("rho.eval.eval.make_environment", lambda _: env)
+    monkeypatch.setattr("rho.eval.eval.init_wandb_from_training_run", lambda _: wandb_logger)
+
+    def fail(*args):
+        raise RuntimeError("inference failed")
+
+    monkeypatch.setattr("rho.eval.eval._evaluate_in_environment", fail)
+    with pytest.raises(RuntimeError, match="inference failed"):
+        _run_single_eval(SimpleNamespace(environment=object()))
+    env.close.assert_called_once()
+    wandb_logger.finish.assert_called_once()
 
 
 def test_sim_eval_wires_rtc_policy_interface_config():
@@ -68,6 +192,23 @@ def test_eval_requires_checkpoint_source():
         _initialize_default_checkpoint(cfg)
 
 
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "environments/libero/configs/eval_libero_rho.yaml",
+        "environments/libero/configs/multieval_libero_rho_smoke.yaml",
+        "environments/libero/configs/multieval_libero_rho_50.yaml",
+    ],
+)
+def test_libero_eval_configs_use_published_checkpoint_and_full_action_horizon(relative_path):
+    repository_root = Path(__file__).resolve().parents[2]
+    with (repository_root / relative_path).open() as config_file:
+        config = YAMLParser.load_config(config_file)
+
+    assert config["policy"]["pretrained_repo_id"] == "microsoft/rho-libero"
+    assert config["execution_horizon"] == 16
+
+
 def test_multi_eval_preserves_dataset_and_policy(monkeypatch, tmp_path):
     dataset = object()
     policy = object()
@@ -77,6 +218,7 @@ def test_multi_eval_preserves_dataset_and_policy(monkeypatch, tmp_path):
         record_videos=False,
         device="cpu",
         seed=42,
+        policy_seed=None,
         dataset=object(),
         policy=object(),
         dataset_root_dir=None,
@@ -111,6 +253,42 @@ def test_multi_eval_preserves_dataset_and_policy(monkeypatch, tmp_path):
     assert result.policy is policy
     assert result.environment is environment
     assert captured["output_dir"].endswith("libero_spatial")
+
+
+def test_multi_eval_inherits_parent_execution_horizon_when_entry_is_unset(monkeypatch, tmp_path):
+    parent = SimpleNamespace(
+        eval_num_episodes=4,
+        record_videos=False,
+        device="cpu",
+        seed=42,
+        policy_seed=None,
+        dataset=object(),
+        policy=object(),
+        dataset_root_dir=None,
+        eval_mode="standard",
+        inference_delay=6,
+        execution_horizon=16,
+        beta=10,
+        guidance_schedule="paper",
+    )
+    entry = SimpleNamespace(environment=object(), execution_horizon=None)
+    captured = {}
+
+    def capture_config(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr("rho.eval.eval.SimEvalConfig", capture_config)
+
+    _make_multi_eval_config(
+        parent,
+        entry,
+        tmp_path / "checkpoint",
+        tmp_path / "output",
+        "libero_spatial",
+    )
+
+    assert captured["execution_horizon"] == 16
 
 
 # =============================================================================

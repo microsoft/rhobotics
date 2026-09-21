@@ -1,5 +1,5 @@
-from dataclasses import fields
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import draccus
@@ -14,6 +14,7 @@ from rho.common.types import FeatureType, PolicyFeature
 from rho.policies import POLICY_REGISTRY, make_policy_from_checkpoint
 from rho.policies.base import PolicyConfig
 from rho.policies.rho import RhoConfig, RhoPolicy
+from rho.policies.rho.rho_model import FlowMatchingModel
 from rho.policies.rho.rho_policy import convert_rhoalpha_state_dict
 from rho.policies.rho.rho_processor import RhoProcessor
 
@@ -67,20 +68,62 @@ def test_rho_is_registered_as_distinct_policy():
     assert config.attention_type == "cross"
     assert config.adaln_mode == "shared"
     assert config.gqa_groups == 4
+    assert config.dropout_p == 0.02
+    assert config.num_flow_samples == 8
     assert POLICY_REGISTRY["rho"] is RhoPolicy
 
 
-def test_rho_config_excludes_rhoalpha_optional_heads():
-    field_names = {field.name for field in fields(RhoConfig)}
+@pytest.mark.parametrize("dropout_p", [-0.1, 1.01, float("nan")])
+def test_rho_rejects_dropout_outside_allowed_range(dropout_p):
+    with pytest.raises(ValueError, match="dropout_p must be between 0.0 and 1.0"):
+        RhoConfig(feature_dict={}, dropout_p=dropout_p)
 
-    assert "vlm_backend" not in field_names
-    assert "vlm_backbone_folder" not in field_names
-    assert "training_modes" not in field_names
-    assert "tactile_mask" not in field_names
-    assert "knowledge_insulation_alpha" not in field_names
-    assert "vl_loss_weight" not in field_names
-    assert "use_action_lora" not in field_names
-    assert "empty_cameras" not in field_names
+
+@pytest.mark.parametrize("dropout_p", [0.0, 0.01, 0.019, 0.02, 0.1, 1.0])
+def test_rho_preserves_valid_dropout(dropout_p):
+    assert RhoConfig(feature_dict={}, dropout_p=dropout_p).dropout_p == dropout_p
+
+
+def test_rho_allows_single_flow_sample_override():
+    config = draccus.decode(PolicyConfig, {"type": "rho", "feature_dict": {}, "num_flow_samples": 1})
+    assert config.num_flow_samples == 1
+
+
+@pytest.mark.parametrize(("alpha", "beta"), [(1.0, 1.0), (1.5, 1.0), (1.0, 1.5)])
+def test_rho_beta_sampler_matches_distribution_moments(alpha, beta):
+    model = object.__new__(FlowMatchingModel)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(123)
+        samples = model.sample_beta(alpha, beta, 100_000, torch.device("cpu"))
+
+    expected_mean = alpha / (alpha + beta)
+    expected_variance = alpha * beta / ((alpha + beta) ** 2 * (alpha + beta + 1))
+    assert samples.dtype == torch.float32
+    assert samples.shape == (100_000,)
+    assert ((samples > 0) & (samples < 1)).all()
+    assert samples.mean().item() == pytest.approx(expected_mean, abs=0.004)
+    assert samples.var().item() == pytest.approx(expected_variance, abs=0.002)
+
+
+@pytest.mark.parametrize(("strategy", "alpha", "beta"), [("beta", 1.5, 1.0), ("beta_reverse", 1.0, 1.5)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_rho_time_sampler_preserves_rng_restore_scaling_and_dtype(strategy, alpha, beta, dtype):
+    model = object.__new__(FlowMatchingModel)
+    nn.Module.__init__(model)
+    model.config = RhoConfig(feature_dict={}, time_sampling_strategy=strategy)
+    model.dtype = dtype
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(123)
+        rng_state = torch.get_rng_state()
+        times = model.sample_time(128, torch.device("cpu"))
+        torch.set_rng_state(rng_state)
+        expected = model.sample_beta(alpha, beta, 128, torch.device("cpu"))
+        torch.set_rng_state(rng_state)
+        resumed = model.sample_time(128, torch.device("cpu"))
+
+    assert times.dtype == dtype
+    assert torch.equal(times, (expected * 0.999 + 0.001).to(dtype))
+    assert torch.equal(times, resumed)
 
 
 @pytest.mark.parametrize("scale", [1.0, 255.0])
@@ -256,6 +299,34 @@ def test_rho_maps_legacy_direct_flow_weights():
         "model.flow_model.vlm_backbone.weight",
         "model.flow_model.action_head.weight",
     }
+
+
+def test_rho_remaps_legacy_siglip2_checkpoint_keys_for_transformers_510():
+    policy = object.__new__(RhoPolicy)
+    nn.Module.__init__(policy)
+    policy.model = SimpleNamespace(
+        flow_model=SimpleNamespace(
+            vlm_backbone=SimpleNamespace(
+                model=SimpleNamespace(
+                    vision_tower=SimpleNamespace(
+                        vision_tower=SimpleNamespace(),
+                    )
+                )
+            )
+        )
+    )
+    tensor = torch.tensor([1.0])
+    legacy_key = (
+        "model.flow_model.vlm_backbone.model.vision_tower."
+        "vision_tower.vision_model.encoder.layers.0.layer_norm1.weight"
+    )
+
+    remapped = policy._remap_backwards_compatible_keys({legacy_key: tensor})
+
+    assert list(remapped) == [
+        "model.flow_model.vlm_backbone.model.vision_tower.vision_tower.encoder.layers.0.layer_norm1.weight"
+    ]
+    assert remapped[next(iter(remapped))] is tensor
 
 
 def test_loading_weights_clears_uninitialized_backbone_guard():

@@ -66,6 +66,7 @@ class EpisodeAwareSampler:
         # Number of samples already yielded in the current epoch.
         # Non-zero only after load_state() to fast-forward on the next __iter__ call.
         self._start_offset = 0
+        self._position = 0
 
     def _get_order(self) -> list[int] | torch.Tensor:
         """Return the iteration order for the current epoch."""
@@ -76,20 +77,24 @@ class EpisodeAwareSampler:
         return list(self.indices)
 
     def __iter__(self) -> Iterator[int]:
-        order = self._get_order()
-
-        # Fast-forward past samples that were already yielded before a checkpoint.
         start = self._start_offset
-        self._start_offset = 0  # consumed — reset so subsequent iters start from 0
+        self._start_offset = 0
+        self._position = start
+        return self._iterate(start)
 
+    def _iterate(self, start: int) -> Iterator[int]:
+        order = self._get_order()
         if isinstance(order, torch.Tensor):
             for i in range(start, len(order)):
+                self._position = i + 1
                 yield self.indices[int(order[i])]
         else:
             for i in range(start, len(order)):
+                self._position = i + 1
                 yield order[i]
 
         self._epoch += 1
+        self._position = 0
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -101,13 +106,15 @@ class EpisodeAwareSampler:
         """Return a serialisable snapshot of the sampler state.
 
         The returned dict captures enough information to resume iteration
-        from the exact same position via load_state().
+        from the exact same yielded position via load_state(). This does not
+        include batches already prefetched by a dataloader or training loop.
         """
         return {
             "indices": self.indices,
             "shuffle": self.shuffle,
             "seed": self._seed,
             "epoch": self._epoch,
+            "position": self._position,
         }
 
     def load_state(self, state_dict: dict) -> None:
@@ -117,10 +124,17 @@ class EpisodeAwareSampler:
         reproduce the exact same ordering and skip samples that had
         already been yielded.
         """
+        position = state_dict.get("position", 0)
+        if not isinstance(position, int) or not 0 <= position <= len(state_dict["indices"]):
+            raise ValueError(f"Invalid sampler position: {position!r}")
+        if "position" not in state_dict:
+            logger.warning("Sampler checkpoint has no position; restarting the saved epoch.")
         self.indices = state_dict["indices"]
         self.shuffle = state_dict["shuffle"]
         self._seed = state_dict["seed"]
         self._epoch = state_dict["epoch"]
+        self._position = position
+        self._start_offset = position
 
 
 def metadata_from_lerobot_dataset(
@@ -130,9 +144,7 @@ def metadata_from_lerobot_dataset(
     ds_meta = LeRobotDatasetMetadata(repo_id, root=root)
     if observation_mapping is not None:
         # Remap observation keys according to the mapping
-        ds_meta.info.features = {
-            observation_mapping.get(k, k): v for k, v in ds_meta.info.features.items()
-        }
+        ds_meta.info.features = {observation_mapping.get(k, k): v for k, v in ds_meta.info.features.items()}
         ds_meta.stats = {observation_mapping.get(k, k): v for k, v in ds_meta.stats.items()}
     return ds_meta
 
@@ -680,6 +692,7 @@ class LeRobotDatasetConfig(RobotDataConfig):
                 dataset.meta.episodes["dataset_to_index"],
                 episode_indices_to_use=episode_indices_to_use,
                 shuffle=True,
+                seed=self.seed,
             )
         else:
             sampler = None

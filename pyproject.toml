@@ -1,8 +1,8 @@
 [project]
 name = "rho"
-version = "0.1.1"
+version = "2026.9.20"
 description = "Rho robotics foundation models for training, evaluation, and deployment"
-authors = [{ name = "Microsoft Research", email = "msrresearch@microsoft.com" }]
+authors = [{ name = "Microsoft Research" }]
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -31,7 +31,6 @@ dependencies = [
     "packaging>=24.2",
     "peft==0.18.0",
     "pillow>=11.2.0",
-    "pyzmq>=26.2.1",
     "roma>=1.5.4",
     "safetensors>=0.8.0rc.0,<1.0.0",
     "torch>=2.8.0",
@@ -43,13 +42,13 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/microsoft/rho"
-Issues = "https://github.com/microsoft/rho/issues"
+Homepage = "https://github.com/microsoft/rhobotics"
+Issues = "https://github.com/microsoft/rhobotics/issues"
 
 [project.optional-dependencies]
 server = [
     "aiohttp>=3.9.0",
-    "rho-client>=0.1.0",
+    "rho-client>=2026.9.20",
     "websockets>=14.0",
 ]
 pusht = ["gym-pusht>=0.1.5"]

@@ -18,7 +18,6 @@ import math
 import torch
 import torch.nn.functional as F  # noqa: N812
 import torch.utils.checkpoint as checkpoint
-from lerobot.utils.device_utils import get_safe_dtype
 from peft import LoraConfig, TaskType
 from torch import Tensor, nn
 from torch.nn.utils.rnn import pad_sequence as torch_pad_sequence
@@ -27,6 +26,7 @@ from transformers import GenerationConfig
 from rho.policies.base import PolicyConfig
 from rho.policies.rho.backbone import create_backbone_adapter
 from rho.training.hidden_state_stats import hidden_state_stats
+from rho.utils import get_safe_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -480,7 +480,7 @@ class SimpleActionExpert(nn.Module):
     Transformer-based action expert that processes embeddings.
 
     Assumes embeddings have already been projected into a shared embed_dim space.
-    Takes image/lang embeddings from phi4mm backbone and robot state,
+    Takes image/language embeddings from the VLM backbone and robot state,
     passes through transformer blocks, and provides output embeddings.
     """
 
@@ -924,7 +924,7 @@ class LayerwiseCrossAttentionExpert(nn.Module):
 
 
 # ============================================================================
-# Base RhoAlpha Model
+# Base VLM Model
 # ============================================================================
 
 
@@ -934,7 +934,7 @@ class BaseVLMModel(nn.Module):
 
     This class provides the foundation for all VLM-based robotics models:
     - Initializes and manages the VLM backbone via BackboneAdapter
-    - Supports multiple backends (Phi4MM, Phi5) selected via config.vlm_backend
+    - Delegates backbone-specific operations to an adapter
     - Provides image/text processing utilities
     - Projects robot state into embedding space
     - Defines abstract methods for specialized heads to implement
@@ -955,7 +955,7 @@ class BaseVLMModel(nn.Module):
         backbone_factory=create_backbone_adapter,
     ):
         """
-        Initialize RhoAlphaModel.
+        Initialize BaseVLMModel.
 
         Args:
             config: Model configuration
@@ -990,8 +990,7 @@ class BaseVLMModel(nn.Module):
         else:
             self.vlm_backbone = vlm_backbone
 
-        # Configure Phi4MM's built-in vision/speech LoRAs
-        # These are created by Phi4MM's __init__ and loaded from checkpoint
+        # Configure backbone-provided LoRA adapters only when this model owns them.
         if owns_vlm_backbone:
             self._configure_builtin_loras()
 
@@ -1056,17 +1055,9 @@ class BaseVLMModel(nn.Module):
 
     def _configure_builtin_loras(self):
         """
-        Configure built-in LoRAs for backends that support them (e.g. Phi4MM).
-
-        For backends with built-in LoRA (Phi4MM):
-        - Removes audio encoder and audio LoRA (saves ~600M params, not used by us)
-        - Handles vision LoRA activation or merging
-
-        For backends without built-in LoRA (Phi5, Qwen):
-        - Calls remove_audio_components (no-op for backends without audio)
-        - Skips LoRA configuration entirely
+        Remove audio components through the adapter, then activate or merge
+        vision LoRAs when the backbone provides them.
         """
-        # Remove audio components if the backend has them (no-op for Qwen/Phi5)
         self._backend.remove_audio_components(self.vlm_backbone)
 
         # Only handle vision LoRA for backends that ship with built-in adapters
@@ -1143,9 +1134,7 @@ class BaseVLMModel(nn.Module):
             task_type=TaskType.CAUSAL_LM,
         )
 
-        # Phi4MM always has peft_config (creates vision/speech LoRAs in __init__)
-        # So we just add our action adapter to the existing PEFT model
-        # Note: transformers integration uses (config, name) order
+        # Transformers integration uses (config, name) order.
         self.vlm_backbone.add_adapter(action_lora_config, adapter_name="action")
         logger.info(
             f"Added action LoRA (r={self.config.action_lora_r}, "
@@ -1273,7 +1262,7 @@ class BaseVLMModel(nn.Module):
             p.numel() for n, p in self.vlm_backbone.named_parameters() if "lora_" in n and p.requires_grad
         )
         if lora_params > 0:
-            # Get active adapter info from Phi4MM's internal PEFT model
+            # Get active adapter info from the backbone's PEFT model.
             active_adapter = None
             if hasattr(self.vlm_backbone, "model") and hasattr(self.vlm_backbone.model, "active_adapter"):
                 adapter_list = self.vlm_backbone.model.active_adapter
@@ -1374,8 +1363,7 @@ class BaseVLMModel(nn.Module):
         """
         Extract image and text hidden states from VLM backbone.
 
-        Delegates to the backend adapter which handles backbone-specific processing
-        (e.g., Phi4MM HD/non-HD branching, Phi5 direct path).
+        Delegates backbone-specific processing to the backend adapter.
 
         Args:
             image: List[List[PIL.Image.Image]] OR dict with observation.images - batch_size x num_images
@@ -1583,9 +1571,9 @@ class FlowMatchingModel(BaseVLMModel):
 
     def sample_beta(self, alpha, beta, bsize, device):
         """Sample from Beta distribution for time sampling."""
-        g1 = torch.empty((bsize,), device=device, dtype=torch.float32).uniform_(0, 1).pow(1 / alpha)
-        g2 = torch.empty((bsize,), device=device, dtype=torch.float32).uniform_(0, 1).pow(1 / beta)
-        return g1 / (g1 + g2)
+        alpha = torch.tensor(alpha, device=device, dtype=torch.float32)
+        beta = torch.tensor(beta, device=device, dtype=torch.float32)
+        return torch.distributions.Beta(alpha, beta).sample((bsize,))
 
     def sample_time(self, bsize, device):
         """Sample time steps for flow matching."""
@@ -1841,56 +1829,6 @@ class FlowMatchingModel(BaseVLMModel):
 
         return losses
 
-    def velocity_eval(self, state, x_t, time_scalar, precomputed_hidden_state):
-        """Evaluate the flow velocity v(x_t, t) at a single denoise step.
-
-        Shared interface used by rho.hil.noise_inverse_map. Other flow models
-        implement this with matching semantics; the inverter
-        treats ``precomputed_hidden_state`` opaquely.
-
-        Mirrors the inner body of ``sample_actions``'s denoise loop.
-
-        Args:
-            state: Robot state tensor (B, n_obs_steps, state_dim).
-            x_t:   Current noise/action latent (B, chunk_size, max_action_dim).
-            time_scalar: Float in [0, 1] -- the current diffusion time.
-            precomputed_hidden_state: ``(image_text_embed, image_text_mask)`` from
-                ``get_image_text_hidden_state``. Reused across steps without
-                re-running the VLM.
-
-        Returns:
-            v_t: Velocity tensor (B, chunk_size, max_action_dim) in x_t's dtype.
-        """
-        image_text_embed, image_text_mask = precomputed_hidden_state
-        bsize = state.shape[0]
-        device = state.device
-        time = (
-            torch.tensor(float(time_scalar), dtype=torch.float32, device=device).expand(bsize).to(self.dtype)
-        )
-        state_embed = self.embed_state(state, x_t.to(self.dtype), time)
-        time_emb = self.embed_time_for_cond(time)
-        output_embed = self.action_expert.forward(
-            image_text_embed, state_embed, time_emb, image_text_attn_mask=image_text_mask
-        )
-        action_token = output_embed[:, -self.config.chunk_size :]
-        return self.action_head(action_token).to(x_t.dtype)
-
-    def sample_actions_from_precomputed(self, state, precomputed_hidden_state, noise, num_steps=None):
-        """Round-trip denoising entry point used by inversion verification.
-
-        Thin wrapper over ``sample_actions`` that names the precomputed prefix
-        conditioning explicitly and drops the image/prompt args (unused when
-        ``precomputed_hidden_state`` is provided).
-        """
-        return self.sample_actions(
-            image=None,
-            prompt=None,
-            state=state,
-            noise=noise,
-            precomputed_hidden_state=precomputed_hidden_state,
-            num_steps=num_steps,
-        )
-
     def sample_actions(
         self,
         image,
@@ -1928,10 +1866,6 @@ class FlowMatchingModel(BaseVLMModel):
             x_t = self.sample_noise(actions_shape, device)
         else:
             x_t = noise.to(dtype=self.dtype)
-
-        # Stash the initial noise so the policy wrapper can return it to the
-        # DSRL trainer for transition recording.
-        self._last_initial_noise = x_t.detach().float().cpu().numpy()
 
         n_steps = num_steps if num_steps is not None else self.config.num_steps
         dt32 = torch.tensor(-1.0 / n_steps, dtype=torch.float32, device=device)

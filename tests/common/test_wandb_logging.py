@@ -88,7 +88,7 @@ def test_wandb_logger_log_config(mock_wandb):
 
     # Create a test train config
     train_config = TrainConfig(
-        learning_rate=0.002, batch_size=64, epochs=20, model_name="phi4mm", optimizer="adamw"
+        learning_rate=0.002, batch_size=64, epochs=20, model_name="rho", optimizer="adamw"
     )
 
     # Test logging config
@@ -117,7 +117,7 @@ def test_wandb_logger_log_config_dict(mock_wandb):
         "learning_rate": 0.003,
         "batch_size": 128,
         "epochs": 50,
-        "model_name": "phi4mm_large",
+        "model_name": "rho_large",
         "optimizer": "sgd",
         "nested_config": {"dropout": 0.1, "layers": 12},
     }

@@ -1,8 +1,7 @@
 """
 Backbone adapter interface for the Rho policy.
 
-Internal policies can inject a different factory into the shared model
-implementation.
+The shared model accepts a backbone factory for custom integrations.
 """
 
 import logging

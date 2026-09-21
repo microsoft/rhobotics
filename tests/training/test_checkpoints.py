@@ -276,7 +276,7 @@ def test_huggingface_resolver_downloads_only_portable_artifacts(tmp_path):
 
     with patch("rho.checkpoints.snapshot_download", return_value=str(bundle)) as download:
         resolved = resolve_checkpoint(
-            "technology-and-research/rho",
+            "example/rho-checkpoint",
             revision="test-revision",
             cache_dir=tmp_path / "cache",
         )
@@ -299,7 +299,7 @@ def test_huggingface_resolver_can_request_trusted_training_state(tmp_path):
     )
 
     with patch("rho.checkpoints.snapshot_download", return_value=str(bundle)) as download:
-        resolve_checkpoint("technology-and-research/rho", include_training_state=True)
+        resolve_checkpoint("example/rho-checkpoint", include_training_state=True)
 
     assert TRAINING_STATE_FILE in download.call_args.kwargs["allow_patterns"]
 

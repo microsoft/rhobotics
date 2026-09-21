@@ -9,30 +9,34 @@ Supports computing:
 - Chunked delta action statistics (mean, std, min, max, q01/q99 and q02/q98 by default)
 - Both types of statistics
 
+For chunked statistics, create an action mapping for your dataset as described
+in docs/tutorials/finetuning_custom_datasets.md.
+
 Usage:
     # Compute only quantile stats (q01/q99) - updates meta/stats.json in place
     python rho/utils/recompute_lerobot_stats_parquet.py \
-        --dataset_path /data/simran/agibot_test/task_362 \
+        --dataset_path /path/to/lerobot_dataset \
         --stats_type quantile
 
     # Compute only chunked delta action stats
     python rho/utils/recompute_lerobot_stats_parquet.py \
-        --dataset_path /data/simran/agibot_test/task_362 \
+        --dataset_path /path/to/lerobot_dataset \
         --stats_type chunk \
-        --action_mapping config/datasets/agibot/action_mapping.yaml \
-        --output_path config/datasets/agibot/task_362
+        --action_mapping /path/to/action_mapping.yaml \
+        --output_path /path/to/output_stats
 
     # Compute both quantile and chunked stats
     python rho/utils/recompute_lerobot_stats_parquet.py \
-        --dataset_path /data/simran/agibot_test/task_362 \
+        --dataset_path /path/to/lerobot_dataset \
         --stats_type both \
-        --action_mapping config/datasets/agibot/action_mapping.yaml \
-        --output_path config/datasets/agibot/task_362
+        --action_mapping /path/to/action_mapping.yaml \
+        --output_path /path/to/output_stats
 """
 
 import argparse
 import json
 from pathlib import Path
+from typing import NotRequired, TypedDict
 
 import numpy as np
 import pandas as pd
@@ -43,6 +47,13 @@ from tqdm import tqdm
 from rho.common.transforms import DeltaActions
 from rho.common.types import ActionType
 from rho.utils.normalize import RunningStats, RunningStatsChunked, quantile_stat_key
+
+
+class ActionMappingEntry(TypedDict):
+    state_key: str
+    action_type: str
+    absolute_idx: NotRequired[list[int] | None]
+
 
 # =============================================================================
 # Common Utilities
@@ -633,7 +644,8 @@ def apply_delta_transform(
     action_key: str,
     state_key: str,
     action_type: str | ActionType,
-    use_absolute_grippers: bool = False,
+    use_absolute_grippers: bool = DeltaActions.use_absolute_grippers,
+    absolute_idx: list[int] | None = None,
 ) -> torch.Tensor:
     """
     Apply DeltaActions transform to action chunks.
@@ -644,6 +656,7 @@ def apply_delta_transform(
         action_key: Key for action data.
         state_key: Key for state data.
         action_type: Type of action for proper delta computation.
+        absolute_idx: Zero-based channels to preserve in absolute form.
 
     Returns:
         Delta actions tensor of shape (N, chunk_size, action_dim).
@@ -666,6 +679,7 @@ def apply_delta_transform(
         post_norm=False,
         action_type=normalize_action_type(action_type),
         use_absolute_grippers=use_absolute_grippers,
+        absolute_idx=absolute_idx,
     )
 
     transformed = delta_transform(data)
@@ -681,7 +695,8 @@ def compute_chunked_stats_from_parquet(
     compute_mode: str = "single_pass",
     output_path: Path | None = None,
     chunk_quantiles: list[tuple[float, float]] | tuple[float, float] = ((0.01, 0.99), (0.02, 0.98)),
-    use_absolute_grippers: bool = False,
+    use_absolute_grippers: bool = DeltaActions.use_absolute_grippers,
+    action_to_absolute_idx_mapping: dict[str, list[int] | None] | None = None,
 ) -> dict:
     """
     Compute chunked statistics directly from parquet files.
@@ -695,6 +710,7 @@ def compute_chunked_stats_from_parquet(
         compute_mode: "single_pass", "two_pass", or "quantile_only".
         output_path: Path to save output stats.
         chunk_quantiles: Lower and upper quantile pairs for chunk quantile stats.
+        action_to_absolute_idx_mapping: Per-action absolute channels in the source representation.
 
     Returns:
         Dict of computed statistics.
@@ -794,6 +810,7 @@ def compute_chunked_stats_from_parquet(
                         state_key,
                         action_type,
                         use_absolute_grippers=use_absolute_grippers,
+                        absolute_idx=(action_to_absolute_idx_mapping or {}).get(action_key),
                     )
                     delta_actions_np = delta_actions.numpy()
 
@@ -1030,7 +1047,7 @@ def replace_stats_with_identity(indices_dict: dict[str, list[int]], stats: dict)
     return stats
 
 
-def load_action_mapping(path: str | None) -> dict[str, dict[str, str]] | None:
+def load_action_mapping(path: str | None) -> dict[str, ActionMappingEntry] | None:
     """
     Load action mapping from a YAML file.
 
@@ -1038,6 +1055,7 @@ def load_action_mapping(path: str | None) -> dict[str, dict[str, str]] | None:
         action.joint_position:
             state_key: observation.joint_position
             action_type: joint_position
+            absolute_idx: [6, 13]
         action.ee_quat_pos:
             state_key: observation.ee_quat_pos
             action_type: ee_quat_pos
@@ -1046,7 +1064,7 @@ def load_action_mapping(path: str | None) -> dict[str, dict[str, str]] | None:
         path: Path to the YAML file containing action mappings.
 
     Returns:
-        Dictionary mapping action keys to their state_key and action_type,
+        Dictionary mapping action keys to their state_key, action_type and optional absolute_idx,
         or None if no path provided.
     """
     if path is None:
@@ -1057,9 +1075,11 @@ def load_action_mapping(path: str | None) -> dict[str, dict[str, str]] | None:
         raise FileNotFoundError(f"Action mapping file not found: {path}")
 
     with open(mapping_path) as f:
-        mapping = yaml.safe_load(f)
+        mapping: dict[str, ActionMappingEntry] = yaml.safe_load(f)
 
     # Validate the mapping structure
+    if not isinstance(mapping, dict):
+        raise ValueError("Action mapping must be a dictionary keyed by action name")
     for action_key, config in mapping.items():
         if not isinstance(config, dict):
             raise ValueError(
@@ -1069,6 +1089,10 @@ def load_action_mapping(path: str | None) -> dict[str, dict[str, str]] | None:
             raise ValueError(f"Missing 'state_key' for action '{action_key}'")
         if "action_type" not in config:
             raise ValueError(f"Missing 'action_type' for action '{action_key}'")
+        try:
+            DeltaActions._validate_absolute_idx(config.get("absolute_idx"))
+        except ValueError as error:
+            raise ValueError(f"Invalid absolute_idx for action '{action_key}': {error}") from error
 
     print(f"Loaded action mapping with {len(mapping)} entries from {path}")
     return mapping
@@ -1129,8 +1153,8 @@ Examples:
         "--action_mapping",
         type=str,
         default=None,
-        help="Path to YAML file mapping action keys to state_key and action_type. "
-        "Format: action_key: {state_key: ..., action_type: ...}. "
+        help="Path to YAML file mapping action keys to state_key, action_type and optional absolute_idx. "
+        "Format: action_key: {state_key: ..., action_type: ..., absolute_idx: [6, 13]}. "
         "Required for chunk stats.",
     )
     parser.add_argument(
@@ -1160,8 +1184,11 @@ Examples:
     )
     parser.add_argument(
         "--use_absolute_grippers",
-        action="store_true",
-        help="Keep gripper channels absolute when computing delta action chunk stats.",
+        action=argparse.BooleanOptionalAction,
+        default=DeltaActions.use_absolute_grippers,
+        help="Keep gripper channels absolute when computing delta action chunk stats (default: true). "
+        "Use --no-use_absolute_grippers to match transforms configured with use_absolute_grippers=false. "
+        "Explicit absolute_idx selections in the action mapping are preserved regardless of this flag.",
     )
     parser.add_argument(
         "--indices_dict",
@@ -1239,8 +1266,14 @@ Examples:
             action_to_type_mapping = {k: infer_action_type_from_key(k) for k in action_keys}
 
         print(f"Action keys: {action_keys}")
+        action_to_absolute_idx_mapping = {
+            key: config.get("absolute_idx") for key, config in (action_mapping or {}).items()
+        }
         for k in action_keys:
-            print(f"  {k} -> state: {action_to_state_mapping[k]}, type: {action_to_type_mapping[k]}")
+            print(
+                f"  {k} -> state: {action_to_state_mapping[k]}, type: {action_to_type_mapping[k]}, "
+                f"absolute_idx: {action_to_absolute_idx_mapping.get(k)}"
+            )
 
         chunk_stats = compute_chunked_stats_from_parquet(
             dataset_path=dataset_path,
@@ -1252,6 +1285,7 @@ Examples:
             output_path=output_path,
             chunk_quantiles=chunk_quantiles,
             use_absolute_grippers=args.use_absolute_grippers,
+            action_to_absolute_idx_mapping=action_to_absolute_idx_mapping,
         )
 
         # Merge chunk stats with combined stats

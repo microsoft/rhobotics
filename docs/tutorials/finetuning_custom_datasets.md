@@ -4,6 +4,31 @@ This tutorial covers the steps necessary to finetune Rho on a custom dataset.
 Rho uses the hosted checkpoint configured by `RhoConfig.pretrained_repo_id` by
 default, so `pretrained_checkpoint` is optional.
 
+## Choosing a starting checkpoint
+
+The default pretrained checkpoint is
+[`microsoft/rho-base`](https://huggingface.co/microsoft/rho-base). We also
+provide robot-specific midtrained models for the following platforms:
+
+| Robot platform | Midtrained checkpoint |
+| --- | --- |
+| [UR AI Trainer](https://www.universal-robots.com/products/ur-ai-trainer/) | [`microsoft/rho-ur-ai-trainer`](https://huggingface.co/microsoft/rho-ur-ai-trainer) |
+| [Franka FR3 Duo](https://franka.de/fr3-duo) | [`microsoft/rho-fr3-duo`](https://huggingface.co/microsoft/rho-fr3-duo) |
+| [YAM Box](https://i2rt.com/products/yam-box) | [`microsoft/rho-yam-box`](https://huggingface.co/microsoft/rho-yam-box) |
+
+Use the checkpoint for your platform as a starting point for task-specific
+finetuning. Set the top-level fields in your training YAML, for example:
+
+```yaml
+pretrained_checkpoint: microsoft/rho-ur-ai-trainer
+resume: false
+```
+
+Alternatively, pass `--pretrained_checkpoint=microsoft/rho-ur-ai-trainer`
+when launching training. Keep `resume=false` to start fresh training state.
+Configure your dataset's observations, actions, and normalization as described
+below, and match any policy architecture overrides to the selected checkpoint.
+
 ## 1. Preparing the dataset
 
 ### 1a. LeRobot V3 dataset format
@@ -21,7 +46,7 @@ To compute custom stats you must complete the following steps:
 
 **A. Create an `action_mapping.yaml` file.**
 
-This file defines the relationship between observations and actions in the target dataset and is used to compute observation-relative action chunk statistics. Here is an example:
+This file defines the relationship between observations and actions in the target dataset and is used to compute observation-relative action chunk statistics. For example, for a bimanual dataset with six joints followed by one gripper channel per arm:
 
 ```yaml
 action_eef:
@@ -30,6 +55,7 @@ action_eef:
 action_original:
   state_key: observation.state_original
   action_type: POSITION
+  absolute_idx: [6, 13]
 ```
 
 **B. Run the stats computation script.**
@@ -38,11 +64,27 @@ action_original:
 python rho/utils/recompute_lerobot_stats_parquet.py \
     --dataset_path /path/to/your/dataset \
     --stats_type both \
-    --action_mapping config/datasets/your_dataset_config.yaml \
+    --action_mapping config/datasets/action_mapping.yaml \
     --output_path config/datasets/your_dataset_stats
 ```
 
 Once you have created a new stats file you can either overwrite the original stats file or save it in a separate directory. It is safe to overwrite the original stats file since all the original statistics are preserved — this script only appends new fields in the same format that is ignored by the standard LeRobot dataloader. If you save the statistics in a separate file you can use the `dataset.stats` parameter in your configuration file to load them separately.
+
+Chunk statistics preserve end-effector gripper channels as absolute values by
+default, matching `delta_actions.use_absolute_grippers: true`. For a dataset
+that explicitly uses delta grippers, pass `--no-use_absolute_grippers` to the
+stats command and set `use_absolute_grippers: false` in the transform. Existing
+statistics must match the selected convention; changing defaults does not
+regenerate them.
+
+`absolute_idx` is optional and applies independently to each action key in the
+mapping. It preserves the listed channels even with
+`--no-use_absolute_grippers`; omit it or use `[]` to select no additional
+absolute channels. Both stats scripts honor it. Indices are zero-based and
+refer to the raw action vector in the dataset, not observation-remapped keys
+or a later converted representation. Match these selections in the training
+transform below. Regenerate chunk statistics, including first-pass bounds,
+when changing the selections; do not reuse bounds from the old convention.
 
 ## 2. Create your dataset configuration file
 
@@ -120,6 +162,7 @@ transform_mapping:
       action_key: "action"
       state_key: "observation.state"
       relative_to_state: true
+      use_absolute_grippers: true
       post_norm: false
 
   "observation.image.0":
@@ -146,7 +189,51 @@ transform_mapping:
 
 Our model is pretrained using a bimanual end effector action space with orientation represented in a 6D format. For best results when using end effector space, we use the `convert_to_6d_actions` transform to convert from the current action space into the 6D representation. When you serve the policy, any transforms defined here are automatically reversed (including denormalization) to return actions in the original space found in the dataset. Converting to 6D actions also has the secondary effect of deactivating normalization for the orientation features — we therefore use it even when the original data is already in `EE_6DOF` format.
 
-We also recommend using the `delta_actions` transform. This leads to the policy learning more precise control than learning absolute positions, although it can lead to drift when encountering out-of-distribution states. This transform must be matched with `ACTIONCHUNK_` statistics for the best performance.
+For datasets with absolute end-effector targets, we recommend the
+`delta_actions` transform with matching `ACTIONCHUNK_` statistics. Its defaults
+are `relative_to_state: true`, `use_absolute_grippers: true`, and
+`post_norm: false`: poses are relative to the current observation, grippers
+remain absolute, and conversion happens before normalization.
+`convert_to_6d_actions` also defaults to `post_norm: false`.
+All these flags remain explicitly overridable; use
+`relative_to_state: false` for temporal differences and
+`use_absolute_grippers: false` for delta grippers. Generated inverse transforms
+use the same settings.
+
+For `action_type: POSITION`, joint/gripper layout cannot be inferred. Specify
+`absolute_idx` to keep selected channels absolute while making the remaining
+channels relative. For the six-joint-per-arm bimanual layout in the stats
+example above:
+
+```yaml
+transform_mapping:
+  action:
+    - type: delta_actions
+      action_type: POSITION
+      absolute_idx: [6, 13]
+```
+
+`absolute_idx` defaults to `null` (no explicit selection) and is propagated to
+the generated `absolute_actions` inverse. It works with both state-relative
+and temporal deltas and is independent of `use_absolute_grippers`. For EEF
+actions, it adds to the automatically selected gripper channels unless that
+flag is disabled. To make all channels relative, use
+`use_absolute_grippers: false` with `absolute_idx: []`.
+
+Use non-negative integer indices within the action width **at the point
+`delta_actions` runs**. For example, converting a single-arm quaternion EEF
+vector to 6D moves its gripper from index 7 to index 9, so explicit indices in
+the raw stats mapping and converted training transform differ. Automatic EEF
+gripper selection already accounts for this change. For rotation-bearing
+action types, select an entire rotation block or none of it; partial
+quaternion, Euler, or 6D selections are rejected because they are not
+independently invertible. The example above is not a universal gripper
+layout; existing robot YAML recipes are unchanged.
+
+These transforms are not automatically added to datasets. In particular, do
+not add the absolute-EEF conversion chain to the standard LIBERO controller
+actions. Observation-relative actions can also drift under out-of-distribution
+states, so the action convention must match the system.
 
 #### Image transforms
 
@@ -163,7 +250,14 @@ Image transforms are applied per-camera by keying on the post-mapping image name
 | `random_rot90` | Randomly rotates the image by 90-degree multiples. | `p` (probability, default 0.5) |
 | `channel_reorder` | Reorders image channels (e.g. BGR to RGB). | (see `rho.common.transforms`) |
 
-For most finetuning tasks we recommend at minimum a `random_resized_crop` with a narrow scale range (e.g. `[0.9, 0.9]`) to add slight spatial variation, paired with a mild `color_jitter` to improve robustness to lighting changes. Use `center_crop` or `resize_with_padding` instead of `random_resized_crop` if you do not want random augmentation (e.g. during evaluation). Remember that the `shape` in your `features` block must reflect the post-transform image dimensions.
+When explicitly selected, `random_resized_crop` defaults to
+`scale: [0.9, 1.0]` and `ratio: [0.98, 1.02]`; `height` and `width` remain
+required. Override these ranges for the camera's field of view, or choose
+`resize_with_padding` to preserve the full frame. No image transform is
+automatically inserted into the dataset pipeline. Evaluation/serving uses the
+deterministic centered counterpart of a configured random crop and drops color
+jitter. Remember that the `shape` in your `features` block must reflect the
+post-transform image dimensions.
 
 
 ### Using MultiDatasetConfig
@@ -238,7 +332,11 @@ The repository includes working multi-dataset configs you can use as references:
       weight: 0.25
   ```
 
-- **`config/datasets/aloha_taskbox.yaml`** — A real-world example that combines four Aloha taskbox datasets. It demonstrates using `<<: !include` to merge a shared base config (features, observation mapping, normalization) into each dataset entry while overriding `repo_id` and `root_dir` per dataset. It also uses environment variables (e.g. `${ALOHA_TASKBOX_DATA_ROOT}`) for portable root paths, and defines a top-level `features` block, `observation_whitelist`, and `shuffle_buffer_size` at the multi-dataset level.
+- **`environments/roboeval/configs/ee_6d_pos/roboeval_multidataset.yaml`** — A
+  RoboEval example combining eight tasks with equal sampling weights. Each
+  dataset merges shared features with `<<: !include features.yaml` and uses
+  `${ROBOEVAL_DATA_ROOT}` for its dataset root. The configuration also defines
+  an `observation_whitelist` for the shared model inputs.
 
 
 ## 3. Create a training configuration file
@@ -275,7 +373,8 @@ output_dir: "outputs/my_custom_training"
 save_checkpoint_every: 1000
 keep_checkpoint_interval: 10000
 logging_interval: 200
-mixed_precision: "no"       # Options: "no", "fp16", "bf16"
+mixed_precision: "bf16"     # Default; alternatives: "no", "fp16"
+grad_clip_norm: 10.0        # Default; null disables clipping
 gradient_accumulation_steps: 1
 
 # Evaluation settings
@@ -289,14 +388,36 @@ pretrained_checkpoint: null  # Optional override; null uses Rho's hosted default
 
 ### Key Parameters
 
+- **`seed`**: Seeds Python, NumPy, and PyTorch. Strict mode also propagates it
+  to dataset samplers, including children of dataset mixtures.
+- **`deterministic_training`**: Opt-in single-process strict-kernel mode.
+  Set `num_workers: 0` for every active dataloader; incompatible worker counts
+  now raise an error instead of being silently overridden. Loader RNGs remain
+  separate from the model RNG, and TF32 stays disabled for regression precision.
+  See `environments/libero/configs/train_libero_rho_deterministic.yaml`.
 - **`batch_size`**: This is the per-GPU batch size and overwrites the
   placeholder value in the dataset config. Effective batch size is
   `batch_size × number of processes × gradient_accumulation_steps`.
+- **`gradient_accumulation_steps`**: Both the plain Python and Accelerate
+  trainers accumulate this many microbatches per update. Step counts,
+  scheduler updates, and checkpoint intervals use optimizer-update boundaries.
+- **`mixed_precision`**: Defaults to `"bf16"`; `"no"` or `"fp16"` explicitly overrides it. Controls training
+  autocast independently of the policy's stored parameter dtype. The plain
+  trainer saves and restores its FP16 loss scaler with training state.
+- **`grad_clip_norm`**: Defaults to `10.0`. Clip accumulated gradients once per update, after
+  unscaling when using FP16. Set to `null` to disable clipping.
 - **`learning_rate`**: This is overwritten by the policy. Ignore it.
 - **`save_checkpoint_every`**: This determines how frequently checkpoints are created.
 - **`keep_checkpoint_interval`**: If set all checkpoints that are not modulo this interval are deleted when the next chekpoint is created.
 - **`resume`**: Restore trusted optimizer, scheduler, sampler, and step state
   from a full training checkpoint. Leave this false for ordinary finetuning.
+  New sampler states preserve the next yielded index, including child
+  positions and dataset-selection RNG state for multi-dataset sampling.
+  Older states without positions or usable RNG state warn when exact sampler
+  continuation is unavailable. Sampler state does not include batches already
+  prefetched by dataloader workers, Accelerate, or lookahead monitors, nor
+  arbitrary iterable-dataset state; it is not by itself a guarantee of
+  identical training continuation.
 - **`pretrained_checkpoint`**: Optional Hugging Face repository ID or local
   checkpoint override. When unset, Rho uses `policy.pretrained_repo_id`.
 
@@ -307,6 +428,10 @@ pretrained_checkpoint: null  # Optional override; null uses Rho's hosted default
 - **`policy.embed_dim`**: The action expert embedding dimension. Use `1024` for a smaller model that fits on ~20 GB VRAM GPUs (e.g. RTX 4090). Use `2048` for larger models that require at least 40 GB VRAM (e.g. A100).
 - **`policy.attention_type`**: The cross-attention mechanism. `layerwise_cross` provides the best performance for language-rich tasks but is slower to train.
 - **`policy.chunk_size`**: The total length of the action sequence predicted at each step. This value is automatically propagated to the dataset config.
+- **`policy.num_flow_samples`**: Defaults to `8` time/noise samples per
+  observation, reusing the VLM context. Set to `1` for lower action-expert memory
+  and compute cost. This does not multiply the number of distinct observations
+  in the batch.
 - **`pretrained_checkpoint`**: Use this only to override the hosted default
   with another Hugging Face repository or a local checkpoint.
 

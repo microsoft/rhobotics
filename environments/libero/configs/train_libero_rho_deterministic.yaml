@@ -1,0 +1,50 @@
+# Deterministic single-GPU regression training for the Rho flow policy on LIBERO.
+wandb:
+  project: "rho"
+  tags: ["libero", "rho", "deterministic-regression"]
+  group: "libero_deterministic_regression"
+  enabled: false
+
+dataset: !include "libero_dataset.yaml"
+
+environment: null
+
+policy:
+  type: "rho"
+  resize_imgs_with_padding: null
+  chunk_size: 16
+  n_action_steps: 8
+  num_flow_samples: 1
+  freeze_vlm_backbone: false
+  freeze_vision_encoder: false
+  freeze_language_model: false
+  # The trainable VLM path currently reaches an antialiased bilinear-resize
+  # backward kernel that PyTorch marks nondeterministic on CUDA.
+  train_expert_only: true
+  dropout_p: 0.02
+  optimizer_lr: 1e-4
+  lr_scheduler:
+    type: "cosine_decay_with_warmup"
+    peak_lr: 1e-4
+    decay_lr: 5e-6
+    num_decay_steps: 500
+    num_warmup_steps: 50
+
+seed: 42
+deterministic_training: true
+batch_size: 1
+num_workers: 0
+steps: 500
+
+output_dir: "outputs/deterministic_libero"
+save_checkpoint_every: 500
+keep_checkpoint_interval: 500
+logging_interval: 1
+mixed_precision: "bf16"
+gradient_accumulation_steps: 1
+record_videos: false
+eval_interval: 999999
+validation_interval: 999999
+
+resume: false
+pretrained_checkpoint: null

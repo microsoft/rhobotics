@@ -97,7 +97,13 @@ def make_sampler(
     return config.make_sampler(dataset, policy_cfg)
 
 
-def make_dataloader(config: DatasetConfigT, policy_cfg: "PolicyConfig" = None, device="cuda") -> DataLoader:
+def make_dataloader(
+    config: DatasetConfigT,
+    policy_cfg: "PolicyConfig" = None,
+    device="cuda",
+    *,
+    deterministic: bool = False,
+) -> DataLoader:
     """
     Create a PyTorch DataLoader for a rho dataset config.
 
@@ -105,10 +111,15 @@ def make_dataloader(config: DatasetConfigT, policy_cfg: "PolicyConfig" = None, d
         config: A LeRobotDatasetConfig or MultiDatasetConfig.
         policy_cfg: Optional PolicyConfig for additional configurations
         device: Device to use for the DataLoader (default: "cuda")
+        deterministic: Require zero workers and isolate the loader RNG from
+            the global training RNG.
 
     Returns:
         DataLoader: Configured PyTorch DataLoader for the dataset
     """
+    if deterministic and config.num_workers != 0:
+        raise ValueError("deterministic_training requires num_workers=0 for every dataloader")
+
     dataset = config.make_dataset(policy_cfg)
     sampler = config.make_sampler(dataset, policy_cfg)
 
@@ -138,19 +149,14 @@ def make_dataloader(config: DatasetConfigT, policy_cfg: "PolicyConfig" = None, d
         # IterableDataset has no __len__, so drop the ragged tail to avoid a partial final batch.
         "drop_last": is_iterable and not yields_batches,
     }
+    if deterministic:
+        dataloader_kwargs["generator"] = torch.Generator().manual_seed(getattr(config, "seed", 0))
     if config.num_workers > 0:
         in_order_env = os.environ.get("RHO_DATALOADER_IN_ORDER", "0")
-        dataloader_kwargs["in_order"] = in_order_env.strip().lower() not in {
-            "0",
-            "false",
-            "no",
-        }
+        dataloader_kwargs["in_order"] = in_order_env.strip().lower() not in {"0", "false", "no"}
+        dataloader_kwargs["prefetch_factor"] = config.prefetch_factor
     if yields_batches:
         # DataLoader wraps the single yielded item in a list; unwrap it.
         dataloader_kwargs["collate_fn"] = lambda batch_list: batch_list[0]
-    if config.num_workers > 0:
-        dataloader_kwargs["prefetch_factor"] = config.prefetch_factor
 
-    dataloader: DataLoader = DataLoader(dataset, **dataloader_kwargs)
-
-    return dataloader, sampler
+    return DataLoader(dataset, **dataloader_kwargs), sampler

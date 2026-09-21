@@ -169,7 +169,7 @@ class PolicyInterfaceConfig:
 
     eval_mode: str = "standard"  # Options: 'standard', 'rtc'
     inference_delay: int = None  # Number of steps policy inference takes
-    execution_horizon: int | None = None  # Actions executed between RTC inferences
+    execution_horizon: int | None = None  # Actions executed between inferences; defaults to n_action_steps
     beta: int = None  # Weighting parameter for RTC update vs standard update
     guidance_schedule: str = "paper"  # Guidance coefficient schedule: 'paper' or 'constant'
 
@@ -200,6 +200,10 @@ class PolicyInterface:
         self.execution_horizon = (
             cfg.execution_horizon if cfg.execution_horizon is not None else self.policy.config.n_action_steps
         )
+        if self.execution_horizon <= 0:
+            raise ValueError("execution_horizon must be positive.")
+        if self.eval_mode == "standard" and self.execution_horizon > self.horizon:
+            raise ValueError("Standard execution_horizon must not exceed chunk_size.")
 
         # Most recent action chunk after output transforms, in the absolute
         # action representation consumed by the environment. Before RTC reuses
@@ -219,8 +223,6 @@ class PolicyInterface:
             assert self.inference_delay is not None and self.beta is not None, (
                 "RTC mode requires inference_delay and beta to be set."
             )
-            if self.execution_horizon <= 0:
-                raise ValueError("RTC mode requires execution_horizon to be positive.")
             try:
                 validate_rtc_horizons(self.inference_delay, self.execution_horizon, self.horizon)
             except ValueError as exc:
@@ -573,7 +575,6 @@ class PolicyInterface:
             if isinstance(value, torch.Tensor):
                 obs[key] = value.to(self.device)
 
-        orig_obs = obs
         obs = self.process_observation(obs)
 
         # Convert the initial noise to a device tensor if provided.
@@ -615,12 +616,6 @@ class PolicyInterface:
         if self.eval_mode == "rtc":
             self.prev_action_chunk = action.detach().clone()
 
-        # Propagate the actual noise used by the flow model back to the
-        # caller's obs dict so server code can return it to the robot for
-        # Transition recording.
-        if "__dsrl_noise_used__" in obs and orig_obs is not obs:
-            orig_obs["__dsrl_noise_used__"] = obs["__dsrl_noise_used__"]
-
         return action
 
 
@@ -641,8 +636,8 @@ def main():
     from pathlib import Path
 
     import matplotlib.pyplot as plt
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
+    from rho.datasets.lerobot_dataset import LeRobotDataset
     from rho.eval.eval_config import EvalConfig
     from rho.policies import make_policy
     from rho.utils import init_logging

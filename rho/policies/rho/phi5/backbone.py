@@ -15,7 +15,6 @@ from pathlib import Path
 import torch
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
-from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
 try:
     from transformers.initialization import no_init_weights
@@ -32,6 +31,18 @@ logger = logging.getLogger(__name__)
 # for this value and splices in vision embeddings at those positions.
 IMAGE_TOKEN_INDEX = -200
 DEFAULT_IMAGE_TOKEN = "<image>"  # nosec B105
+
+
+def _restore_pretrained_rotary_buffers(language_model: nn.Module, source_dtype: torch.dtype) -> None:
+    """Recreate nonpersistent RoPE buffers through the pretrained load dtype."""
+    rotary_emb = language_model.rotary_emb
+    if rotary_emb.rope_type != "default":
+        raise ValueError(f"Unsupported Phi5 RoPE type: {rotary_emb.rope_type!r}")
+
+    inv_freq, _ = rotary_emb.compute_default_rope_parameters(rotary_emb.config, rotary_emb.inv_freq.device)
+    inv_freq = inv_freq.to(source_dtype).to(rotary_emb.inv_freq.dtype)
+    rotary_emb.inv_freq.copy_(inv_freq)
+    rotary_emb.original_inv_freq.copy_(inv_freq)
 
 
 def _tokenizer_image_token(prompt, tokenizer, return_tensors=None):
@@ -216,6 +227,10 @@ class Phi5Backbone(BackboneAdapter):
 
         logger.info("Moving backbone to device=%s, dtype=%s...", self.device, self.dtype)
         backbone.to(device=self.device, dtype=self.dtype)
+        if getattr(self, "_backbone_has_uninitialized_weights", False):
+            # These buffers are absent from checkpoints. Match the normal
+            # from_pretrained(float16) -> policy dtype conversion path.
+            _restore_pretrained_rotary_buffers(self.get_language_model(backbone), source_dtype=torch.float16)
         logger.info("Backbone loaded successfully.")
         return backbone
 
@@ -304,13 +319,14 @@ class Phi5Backbone(BackboneAdapter):
 
         vt_wrapper = backbone.model.vision_tower
         inner_vt = vt_wrapper.vision_tower  # Siglip2VisionModel
-        encoder_layers = inner_vt.vision_model.encoder.layers  # 27x Siglip2EncoderLayer
+        vision_model = getattr(inner_vt, "vision_model", inner_vt)
+        encoder_layers = vision_model.encoder.layers  # 27x Siglip2EncoderLayer
         for layer in encoder_layers:
             _wrap_forward_with_pinned_sdpa(layer)
         # Optional pooling head has its own SDPA call; disabled by default in
         # this checkpoint but wrap defensively so the fix stays correct if a
         # future config enables it.
-        head = getattr(inner_vt.vision_model, "head", None)
+        head = getattr(vision_model, "head", None)
         if head is not None:
             _wrap_forward_with_pinned_sdpa(head)
         logger.info(
@@ -376,33 +392,8 @@ class Phi5Backbone(BackboneAdapter):
     # tokenized sequence. Discovered empirically from the tokenizer vocab.
     _IMAGE_PLACEHOLDER_TOKEN_ID = 200010
 
-    def process_batch(
-        self,
-        processor,
-        images,
-        texts,
-        image_mask,
-        pad_sequence_fn,
-        cat_with_pad_fn,
-        max_length=8192,
-    ) -> dict:
-        """
-        Process a batch of images + texts into model inputs.
-
-        Uses tokenizer_image_token() so that <image> placeholders become
-        IMAGE_TOKEN_INDEX (-200) in input_ids — required by
-        BunnyPhi4ForCausalLM.prepare_inputs_labels_for_multimodal()
-        to splice vision embeddings into the sequence.
-
-        Args:
-            processor: BunnyPhi4Processor with Phi5ImageProcessor.
-            images: Tensor shaped (batch, cameras, C, H, W), or the legacy
-                nested-list representation.
-            texts: List[str] — batch prompts (with <image> tokens).
-            image_mask: (batch, cameras) or None.
-            pad_sequence_fn: padding utility.
-            cat_with_pad_fn: cat-with-pad utility.
-        """
+    def _process_images(self, processor, images, image_mask) -> dict:
+        """Extract NaFlex patches and apply per-image validity masks."""
         if isinstance(images, torch.Tensor):
             if images.ndim != 5:
                 raise ValueError(
@@ -417,27 +408,49 @@ class Phi5Backbone(BackboneAdapter):
             flat_images = torch.stack(
                 [img for sample in images for img in sample]
             )  # B * N * (C, H, W) -> (B*N, C, H, W)
-        image_processor = processor.image_processor
+        if image_mask is not None:
+            if not isinstance(image_mask, torch.Tensor):
+                image_mask = torch.stack(image_mask)
+            if image_mask.shape != (batch_size, n_imgs):
+                raise ValueError(
+                    f"Phi5 image_mask must have shape {(batch_size, n_imgs)}, got {tuple(image_mask.shape)}."
+                )
 
-        if image_mask is None:
-            image_mask = torch.ones(
-                batch_size,
-                n_imgs,
-                dtype=torch.long,
-                device=self.device,
-            )
+        vision_out = processor.image_processor.process_batched(flat_images)
+        if image_mask is not None:
+            patch_mask = vision_out["pixel_attention_mask"]
+            valid_images = image_mask.reshape(-1, 1).to(device=patch_mask.device, dtype=torch.bool)
+            # Keep slots aligned with sentinels; SigLIP removes all masked patches before LM splicing.
+            vision_out["pixel_attention_mask"] = patch_mask * valid_images
+        return vision_out
 
-        # ==========================================================
-        # 1. Batch image processing (NaFlex patch extraction on GPU)
-        # ==========================================================
-        vision_out = image_processor.process_batched(flat_images)
-        all_pixel_values = vision_out["pixel_values"]
-        all_pixel_attention_mask = vision_out["pixel_attention_mask"]
-        all_spatial_shapes = vision_out["spatial_shapes"]
+    def process_batch(
+        self,
+        processor,
+        images,
+        texts,
+        image_mask,
+        pad_sequence_fn,
+        cat_with_pad_fn,
+        max_length=8192,
+    ) -> dict:
+        """
+        Process a batch of images + texts into model inputs.
 
-        # ==========================================================
-        # 2. Tokenize with IMAGE_TOKEN_INDEX (-200) sentinels
-        # ==========================================================
+        Uses tokenizer_image_token() so that <image> placeholders become
+        IMAGE_TOKEN_INDEX (-200) in input_ids, allowing the backbone to splice
+        valid vision embeddings into the sequence.
+
+        Args:
+            processor: BunnyPhi4Processor with Phi5ImageProcessor.
+            images: Tensor shaped (batch, images, C, H, W), or the legacy
+                nested-list representation.
+            texts: List[str] of batch prompts with <image> tokens.
+            image_mask: (batch, images) validity mask (1 = valid), or None.
+            pad_sequence_fn: padding utility.
+            cat_with_pad_fn: cat-with-pad utility.
+        """
+        vision_out = self._process_images(processor, images, image_mask)
         input_ids_list = []
         for text in texts:
             ids = _tokenizer_image_token(
@@ -460,9 +473,9 @@ class Phi5Backbone(BackboneAdapter):
             "input_ids": input_ids.to(self.device),
             "labels": None,
             "attention_mask": attention_mask,
-            "pixel_values": all_pixel_values,
-            "pixel_attention_mask": all_pixel_attention_mask,
-            "spatial_shapes": all_spatial_shapes,
+            "pixel_values": vision_out["pixel_values"],
+            "pixel_attention_mask": vision_out["pixel_attention_mask"],
+            "spatial_shapes": vision_out["spatial_shapes"],
         }
 
     def _build_lm_inputs(
@@ -539,12 +552,7 @@ class Phi5Backbone(BackboneAdapter):
             "vl_lm/truncated_samples": float(truncated),
         }
 
-        batch_size = len(images)
-        n_imgs = len(images[0]) if batch_size > 0 else 0
-        if image_mask is None:
-            image_mask = torch.ones(batch_size, n_imgs, dtype=torch.long, device=self.device)
-        flat_images = torch.stack([img for sample in images for img in sample])
-        vision_out = processor.image_processor.process_batched(flat_images)
+        vision_out = self._process_images(processor, images, image_mask)
 
         return {
             "input_ids": input_ids.to(self.device),
@@ -709,36 +717,22 @@ class Phi5Backbone(BackboneAdapter):
             images,
         )
 
-        if position_ids is None:
-            position_ids = torch.arange(inputs_embeds.shape[1], device=inputs_embeds.device).unsqueeze(0)
-
-        mask_function = (
-            create_causal_mask
-            if language_model.config.sliding_window is None
-            else create_sliding_window_causal_mask
-        )
-        causal_mask = mask_function(
-            config=language_model.config,
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=None,
-        )
-
-        hidden = inputs_embeds
-        position_embeddings = language_model.rotary_emb(hidden, position_ids=position_ids)
-        for decoder_layer in language_model.layers[:hidden_state_idx]:
-            hidden = decoder_layer(
-                hidden,
-                attention_mask=causal_mask,
+        original_num_hidden_layers = language_model.config.num_hidden_layers
+        try:
+            # Transformers replaces the final captured hidden state with the
+            # post-norm output, so run one extra layer to preserve index parity.
+            language_model.config.num_hidden_layers = min(hidden_state_idx + 1, original_num_hidden_layers)
+            outputs = backbone(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
                 position_ids=position_ids,
-                past_key_values=None,
+                output_hidden_states=True,
                 use_cache=False,
-                position_embeddings=position_embeddings,
+                logits_to_keep=1,
             )
-
-        if hidden_state_idx == num_hidden_layers:
-            hidden = language_model.norm(hidden)
+        finally:
+            language_model.config.num_hidden_layers = original_num_hidden_layers
+        hidden = outputs.hidden_states[hidden_state_idx]
 
         hidden = vlm_projector(hidden)
 

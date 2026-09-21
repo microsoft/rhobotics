@@ -22,4 +22,4 @@ normalization_mapping:
   ACTION: MIN_MAX
   ENV: MIN_MAX
   STATE: MIN_MAX
-  VISUAL: MEAN_STD
+  VISUAL: IDENTITY

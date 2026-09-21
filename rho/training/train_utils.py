@@ -19,6 +19,7 @@ from rho.checkpoints import (
     save_checkpoint_bundle,
     validate_checkpoint,
 )
+from rho.common.determinism import capture_rng_state, restore_rng_state
 from rho.common.serialization import serialize_to_dict
 from rho.policies.base import PreTrainedPolicy
 
@@ -158,6 +159,7 @@ def save_checkpoint(
     data_config=None,
     max_shard_size: int | str = "5GB",
     keep_training_state_interval: int | None = None,
+    grad_scaler: torch.amp.GradScaler | None = None,
 ) -> None:
     """Save a training checkpoint.
 
@@ -173,6 +175,7 @@ def save_checkpoint(
             deterministic resumption
         lr_scheduler: Optional learning-rate scheduler to save
         train_logger: Optional TrainLogger with save_state() support
+        grad_scaler: Optional AMP loss scaler to preserve across resumption.
     """
     checkpoint_dir = Path(output_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -183,7 +186,10 @@ def save_checkpoint(
         "step": step,
         "optimizer_state_dict": optimizer.state_dict(),
         "metrics": metrics,
+        "rng_state_dict": capture_rng_state(),
     }
+    if grad_scaler is not None:
+        training_state["grad_scaler_state_dict"] = grad_scaler.state_dict()
 
     # Save lr_scheduler state
     if lr_scheduler is not None:
@@ -318,6 +324,8 @@ def load_training_state(
     lr_scheduler: torch.optim.lr_scheduler._LRScheduler,
     sampler=None,
     train_logger=None,
+    *,
+    grad_scaler: torch.amp.GradScaler | None = None,
 ) -> tuple:
     """Load training state from checkpoint.
 
@@ -327,6 +335,7 @@ def load_training_state(
         lr_scheduler: The learning rate scheduler to restore.
         sampler: Optional sampler with load_state() support for deterministic resumption.
         train_logger: Optional TrainLogger with load_state() support.
+        grad_scaler: Optional AMP loss scaler to restore.
 
     Returns:
         Tuple of (step, optimizer, lr_scheduler, sampler, train_logger).
@@ -368,6 +377,11 @@ def load_training_state(
 
     step = checkpoint["step"]
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    if grad_scaler is not None:
+        if "grad_scaler_state_dict" in checkpoint:
+            grad_scaler.load_state_dict(checkpoint["grad_scaler_state_dict"])
+        else:
+            logger.warning("No GradScaler state found in checkpoint; loss scaling will start from scratch.")
 
     # Restore lr_scheduler state if available
     if lr_scheduler is not None and "lr_scheduler_state_dict" in checkpoint:
@@ -407,6 +421,14 @@ def load_training_state(
             )
     elif train_logger is not None:
         logger.warning("No train_logger state found in checkpoint; logger will start from scratch.")
+
+    if "rng_state_dict" in checkpoint:
+        restore_rng_state(checkpoint["rng_state_dict"])
+        logger.info("Training RNG state restored from checkpoint.")
+    else:
+        logger.warning(
+            "No RNG state found in checkpoint; random streams will restart from the configured seed."
+        )
 
     # Clear any stale gradients, set_to_none=True frees memory
     optimizer.zero_grad(set_to_none=True)
@@ -582,7 +604,7 @@ class TrainLogger:
         Args:
             state: Dict previously returned by :meth:`save_state`.
         """
-        if "dataset_length" in state and state["dataset_length"] is not None:
+        if self.dataset_length is None and state.get("dataset_length") is not None:
             self.dataset_length = state["dataset_length"]
 
         for name, entry in state.get("metrics", {}).items():
@@ -595,6 +617,8 @@ class TrainLogger:
                     self.metrics[name] = CumulativeValue(name, entry["value"])
                 else:
                     self.metrics[name] = LatestValue(name, entry["value"])
+        if self.dataset_length is not None and self.dataset_length > 0:
+            self.metrics["epoch_progress"].value = self.metrics["samples"].value / self.dataset_length
         logger.info("TrainLogger state restored from checkpoint.")
 
     @contextmanager

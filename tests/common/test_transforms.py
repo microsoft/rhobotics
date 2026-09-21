@@ -1,25 +1,282 @@
 from unittest.mock import MagicMock, patch
 
+import draccus
 import pytest
 import torch
 
 from rho.common.constants import ACTION, OBSERVATION_STATE
 from rho.common.transforms import (
     AbsoluteActions,
+    CenterCrop,
     ColorJitter,
     CombineKeys,
+    ConvertTo6dActions,
     DeltaActions,
     RandomFlipLeftRight,
     RandomFlipUpDown,
     RandomResizedCrop,
     RandomRot90,
     TaskDescriptionSelector,
+    Transform,
     build_key_padding_transform,
     get_target_sequence_lengths,
 )
 from rho.common.types import ActionType, FeatureType, PolicyFeature
-from rho.datasets.data_config import TransformWrapper
+from rho.datasets.data_config import BaseDatasetConfig, TransformWrapper, extract_transform_config
 from rho.datasets.lerobot_dataset import LeRobotDatasetConfig
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected"),
+    [
+        (
+            {"type": "random_resized_crop", "height": 32, "width": 32},
+            {"scale": (0.9, 1.0), "ratio": (0.98, 1.02)},
+        ),
+        (
+            {
+                "type": "random_resized_crop",
+                "height": 32,
+                "width": 32,
+                "scale": [0.08, 1.0],
+                "ratio": [0.75, 1.33],
+            },
+            {"scale": (0.08, 1.0), "ratio": (0.75, 1.33)},
+        ),
+        ({"type": "convert_to_6d_actions"}, {"post_norm": False}),
+        ({"type": "convert_to_6d_actions", "post_norm": True}, {"post_norm": True}),
+        (
+            {"type": "delta_actions"},
+            {"post_norm": False, "relative_to_state": True, "use_absolute_grippers": True},
+        ),
+        (
+            {
+                "type": "delta_actions",
+                "post_norm": True,
+                "relative_to_state": False,
+                "use_absolute_grippers": False,
+            },
+            {"post_norm": True, "relative_to_state": False, "use_absolute_grippers": False},
+        ),
+    ],
+)
+def test_opt_in_transform_defaults_and_overrides(settings, expected):
+    transform = draccus.decode(Transform, settings)
+    for name, value in expected.items():
+        assert getattr(transform, name) == value
+    if isinstance(transform, RandomResizedCrop):
+        deterministic = transform.deterministic()
+        assert deterministic.scale == transform.scale
+        assert deterministic.ratio == transform.ratio
+
+
+@pytest.mark.parametrize("raw_dict", [False, True])
+def test_default_eef_pipeline_converts_stats_normalizes_and_inverts(raw_dict):
+    transforms = [
+        {"type": "convert_to_6d_actions", "action_key": OBSERVATION_STATE},
+        {"type": "convert_to_6d_actions"},
+        {"type": "delta_actions", "action_type": "EE_6D_POS"},
+    ]
+    stats = {
+        "mean": [0.0] * 8,
+        "std": [2.0] * 8,
+        "q01_chunk50": [[-2.0] * 8] * 50,
+        "q99_chunk50": [[2.0] * 8] * 50,
+    }
+    settings = {
+        "action_type": "EE_QUAT_POS_XYZW",
+        "chunk_size": 2,
+        "features": {
+            ACTION: {"shape": [8], "type": "ACTION"},
+            OBSERVATION_STATE: {"shape": [8], "type": "STATE"},
+        },
+        "stats": {ACTION: stats, OBSERVATION_STATE: stats},
+        "normalization_mapping": {"ACTION": "ACTIONCHUNK_QUANTILE", "STATE": "MEAN_STD"},
+        "transform_mapping": {ACTION: transforms},
+    }
+    config = BaseDatasetConfig(**settings) if raw_dict else draccus.decode(BaseDatasetConfig, settings)
+    state = torch.tensor([[1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.2]])
+    actions = torch.tensor(
+        [[[1.5, 2.5, 3.5, 0.0, 0.0, 0.0, 1.0, 0.7], [2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 1.0, 0.8]]]
+    )
+    processed = config.get_transforms(remap=False)({ACTION: actions.clone(), OBSERVATION_STATE: state})
+
+    assert config.transformed_features[ACTION].shape == (10,)
+    assert config.transformed_features[OBSERVATION_STATE].shape == (10,)
+    assert torch.equal(config.transformed_stats[ACTION]["q01_chunk50"][0, 3:9], -torch.ones(6))
+    torch.testing.assert_close(processed[ACTION][..., :3], (actions[..., :3] - state[:, None, :3]) / 2)
+    torch.testing.assert_close(processed[ACTION][..., -1], actions[..., -1] / 2)
+    assert not config._reverse_transforms_post_norm
+    inverse = config._reverse_transforms[0]
+    assert inverse.relative_to_state and inverse.use_absolute_grippers and not inverse.post_norm
+
+    recovered = config.get_action_denormalization()(processed)
+    torch.testing.assert_close(recovered[ACTION], actions)
+    torch.testing.assert_close(recovered[OBSERVATION_STATE], state)
+
+
+def test_raw_transform_extraction_resolves_defaults():
+    for transform_class in (DeltaActions, ConvertTo6dActions):
+        defaults = transform_class()
+        raw = extract_transform_config({"type": defaults.type}, transform_class, defaults.type)
+        resolved = extract_transform_config(defaults, transform_class, defaults.type)
+        assert raw == resolved
+
+
+def test_explicit_legacy_delta_flags_are_preserved_in_inverse():
+    config = BaseDatasetConfig(
+        transform_mapping={
+            ACTION: [
+                {
+                    "type": "delta_actions",
+                    "post_norm": True,
+                    "relative_to_state": False,
+                    "use_absolute_grippers": False,
+                }
+            ]
+        }
+    )
+    assert not config._reverse_transforms
+    inverse = config._reverse_transforms_post_norm[0]
+    assert inverse.post_norm
+    assert not inverse.relative_to_state
+    assert not inverse.use_absolute_grippers
+
+
+@pytest.mark.parametrize("use_absolute_grippers", [None, False])
+def test_chunk_stats_gripper_default_matches_delta_transform(use_absolute_grippers):
+    from rho.utils.recompute_lerobot_stats_parquet import apply_delta_transform
+
+    state = torch.tensor([[1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.2]])
+    actions = torch.tensor([[[2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 1.0, 0.7]]])
+    overrides = {} if use_absolute_grippers is None else {"use_absolute_grippers": use_absolute_grippers}
+    actual = apply_delta_transform(actions, state, ACTION, OBSERVATION_STATE, "EE_QUAT_POS_XYZW", **overrides)
+    expected = DeltaActions(action_type=ActionType.EE_QUAT_POS_XYZW, **overrides)(
+        {ACTION: actions.clone(), OBSERVATION_STATE: state}
+    )[ACTION]
+    torch.testing.assert_close(actual, expected)
+    assert actual[0, 0, -1].item() == pytest.approx(0.7 if use_absolute_grippers is None else 0.5)
+
+
+@pytest.mark.parametrize("relative_to_state", [False, True])
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("state_history", [False, True])
+@pytest.mark.parametrize("absolute_idx", [None, [], [6, 13], [0, 6, 6, 13]])
+def test_position_absolute_indices_roundtrip(relative_to_state, batched, state_history, absolute_idx):
+    actions = torch.arange(84, dtype=torch.float32).reshape(2, 3, 14) / 10
+    state = torch.arange(28, dtype=torch.float32).reshape(2, 14) / 7
+    expected = (
+        actions - state[:, None, :]
+        if relative_to_state
+        else torch.cat([actions[:, :1] - state[:, None, :], actions[:, 1:] - actions[:, :-1]], dim=1)
+    )
+    indices = sorted(set(absolute_idx or []))
+    expected[..., indices] = actions[..., indices]
+    if state_history:
+        state = torch.stack([state + 20, state], dim=1)
+    if not batched:
+        actions, state, expected = actions[0], state[0], expected[0]
+    settings = {
+        "action_type": ActionType.POSITION,
+        "relative_to_state": relative_to_state,
+        "use_absolute_grippers": False,
+        "absolute_idx": absolute_idx,
+    }
+    transformed = DeltaActions(**settings)({ACTION: actions, OBSERVATION_STATE: state})
+    torch.testing.assert_close(transformed[ACTION], expected)
+    torch.testing.assert_close(AbsoluteActions(**settings)(transformed)[ACTION], actions)
+
+
+@pytest.mark.parametrize("raw_dict", [False, True])
+@pytest.mark.parametrize("post_norm", [False, True])
+def test_absolute_indices_survive_serialization_and_generated_inverse(raw_dict, post_norm):
+    settings = {
+        "transform_mapping": {
+            ACTION: [{"type": "delta_actions", "absolute_idx": [6, 13], "post_norm": post_norm}]
+        }
+    }
+    config = BaseDatasetConfig(**settings) if raw_dict else draccus.decode(BaseDatasetConfig, settings)
+    inverse = (config._reverse_transforms_post_norm if post_norm else config._reverse_transforms)[0]
+    assert inverse.absolute_idx == [6, 13]
+    restored = draccus.decode(Transform, draccus.encode(inverse))
+    assert restored == inverse
+
+
+@pytest.mark.parametrize("transform_class", [DeltaActions, AbsoluteActions])
+@pytest.mark.parametrize("absolute_idx", [[-1], [1.5], [True], ["1"], 1, "1"])
+def test_absolute_indices_reject_invalid_selections(transform_class, absolute_idx):
+    with pytest.raises(ValueError, match="absolute_idx"):
+        transform_class(absolute_idx=absolute_idx)
+
+
+@pytest.mark.parametrize("transform_class", [DeltaActions, AbsoluteActions])
+def test_absolute_indices_reject_out_of_bounds(transform_class):
+    with pytest.raises(ValueError, match="outside action dimension 2"):
+        transform_class(absolute_idx=[2])({ACTION: torch.zeros(3, 2), OBSERVATION_STATE: torch.zeros(2)})
+
+
+@pytest.mark.parametrize("relative_to_state", [False, True])
+@pytest.mark.parametrize("use_absolute_grippers", [False, True])
+def test_explicit_absolute_indices_and_automatic_eef_grippers(relative_to_state, use_absolute_grippers):
+    state = torch.tensor([1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0, 0.2])
+    actions = torch.tensor(
+        [
+            [2.0, 3.0, 4.0, 0.0, 0.0, 0.6, 0.8, 0.7],
+            [3.0, 4.0, 5.0, 0.0, 0.6, 0.0, 0.8, 0.9],
+        ]
+    )
+    settings = {
+        "action_type": ActionType.EE_QUAT_POS_XYZW,
+        "relative_to_state": relative_to_state,
+        "use_absolute_grippers": use_absolute_grippers,
+        "absolute_idx": [0],
+    }
+    transformed = DeltaActions(**settings)({ACTION: actions, OBSERVATION_STATE: state})
+    torch.testing.assert_close(transformed[ACTION][:, 0], actions[:, 0])
+    expected_grippers = (
+        actions[:, -1]
+        if use_absolute_grippers
+        else (actions[:, -1] - state[-1] if relative_to_state else torch.tensor([0.5, 0.2]))
+    )
+    torch.testing.assert_close(transformed[ACTION][:, -1], expected_grippers)
+    torch.testing.assert_close(AbsoluteActions(**settings)(transformed)[ACTION], actions)
+
+
+@pytest.mark.parametrize(
+    "action_type,rotation",
+    [
+        (ActionType.EE_QUAT_POS_XYZW, [0.0, 0.0, 0.0, 1.0]),
+        (ActionType.EE_QUAT_POS_WXYZ, [1.0, 0.0, 0.0, 0.0]),
+        (ActionType.EE_EULER_POS, [0.1, 0.2, 0.3]),
+        (ActionType.EE_6D_POS, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+        (ActionType.QUAT_XYZW, [0.0, 0.0, 0.0, 1.0]),
+        (ActionType.QUAT_WXYZ, [1.0, 0.0, 0.0, 0.0]),
+        (ActionType.EULER, [0.1, 0.2, 0.3]),
+        (ActionType.SIX_D, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+    ],
+)
+@pytest.mark.parametrize("relative_to_state", [False, True])
+def test_absolute_rotation_indices_require_complete_blocks(action_type, rotation, relative_to_state):
+    eef = action_type.value.startswith("EE_")
+    arm = [1.0, 2.0, 3.0, *rotation, 0.5] if eef else rotation
+    state = torch.tensor(arm * 2)
+    actions = state.repeat(3, 1)
+    start = len(arm) + (3 if eef else 0)
+    for transform_class in (DeltaActions, AbsoluteActions):
+        with pytest.raises(ValueError, match="entire rotation block"):
+            transform_class(action_type=action_type, absolute_idx=[start])(
+                {ACTION: actions, OBSERVATION_STATE: state}
+            )
+    settings = {
+        "action_type": action_type,
+        "absolute_idx": list(range(start, start + len(rotation))),
+        "relative_to_state": relative_to_state,
+    }
+    transformed = DeltaActions(**settings)({ACTION: actions, OBSERVATION_STATE: state})
+    torch.testing.assert_close(
+        transformed[ACTION][..., settings["absolute_idx"]], actions[..., settings["absolute_idx"]]
+    )
+    torch.testing.assert_close(AbsoluteActions(**settings)(transformed)[ACTION], actions)
 
 
 class TestTransformWrapper:
@@ -339,6 +596,7 @@ class TestDeltaActions:
         delta_transform = DeltaActions(
             state_key="observation.state",
             action_key="action",
+            relative_to_state=False,
         )
 
         # Apply transform
@@ -392,7 +650,7 @@ class TestDeltaActions:
             ),
         }
 
-        delta_transform = DeltaActions()
+        delta_transform = DeltaActions(relative_to_state=False)
 
         result = delta_transform(batch)
 
@@ -455,7 +713,7 @@ class TestDeltaActions:
         assert torch.equal(result["action"], expected)
 
     def test_delta_actions_relative_to_state_false(self):
-        """Test DeltaActions with relative_to_state=False (default behavior)."""
+        """Test explicitly selected temporal differences."""
         batch = {
             "observation.state": torch.tensor([[1.0, 2.0]]),
             "action": torch.tensor(
@@ -571,8 +829,6 @@ class TestDeltaActions:
 
         delta_transform = DeltaActions(
             action_type=ActionType.EE_6D_POS,
-            relative_to_state=True,
-            use_absolute_grippers=True,
         )
         result = delta_transform(batch)
 
@@ -583,8 +839,6 @@ class TestDeltaActions:
 
         absolute_transform = AbsoluteActions(
             action_type=ActionType.EE_6D_POS,
-            relative_to_state=True,
-            use_absolute_grippers=True,
         )
         recovered = absolute_transform({"observation.state": state, "action": result["action"].clone()})
 
@@ -614,6 +868,7 @@ class TestAbsoluteActions:
         absolute_transform = AbsoluteActions(
             state_key="observation.state",
             action_key="action",
+            relative_to_state=False,
         )
 
         # Apply transform
@@ -666,7 +921,7 @@ class TestAbsoluteActions:
             ),
         }
 
-        absolute_transform = AbsoluteActions()
+        absolute_transform = AbsoluteActions(relative_to_state=False)
 
         result = absolute_transform(batch)
 
@@ -706,10 +961,7 @@ class TestAbsoluteActions:
         absolute_transform = AbsoluteActions()
         recovered_batch = absolute_transform(delta_batch.copy())  # <- Added .copy() here
 
-        # The roundtrip should recover the original actions since DeltaActions computes:
-        # Position 0: action[0] - state
-        # Position 1+: action[t] - action[t-1]
-        # And AbsoluteActions reverses this via cumsum
+        # Defaults subtract and then add the same observation state at every timestep.
         expected_recovery = torch.tensor(
             [
                 [
@@ -769,7 +1021,7 @@ class TestAbsoluteActions:
         assert torch.equal(result["action"], expected)
 
     def test_absolute_actions_relative_to_state_false(self):
-        """Test AbsoluteActions with relative_to_state=False (default behavior)."""
+        """Test explicitly selected cumulative reconstruction."""
         batch = {
             "observation.state": torch.tensor([[10.0, 20.0]]),
             "action": torch.tensor(
@@ -930,6 +1182,25 @@ class TestDeterministicTransforms:
         crop_h, crop_w = rrc.deterministic()._crop_size(448, 448)
         area_fraction = (crop_h * crop_w) / (448 * 448)
         assert area_fraction == pytest.approx(0.5, abs=1e-3)
+
+    @pytest.mark.parametrize("leading_dims", [(), (2,), (1, 2), (2, 1, 2)])
+    def test_spatial_crops_preserve_batch_and_temporal_dimensions(self, leading_dims):
+        image = torch.rand((*leading_dims, 3, 480, 640))
+        centered = CenterCrop(height=480, width=480)(image)
+        crop = RandomResizedCrop(height=256, width=256, scale=(0.9, 0.9), ratio=(1.0, 1.0))
+
+        assert centered.shape == (*leading_dims, 3, 480, 480)
+        assert torch.equal(centered, image[..., 80:560])
+        assert crop(centered).shape == (*leading_dims, 3, 256, 256)
+        eval_crop = crop.deterministic()
+        assert eval_crop(centered).shape == (*leading_dims, 3, 256, 256)
+        assert torch.equal(eval_crop(centered), eval_crop(centered))
+
+    def test_spatial_crops_reject_non_image_tensors(self):
+        crop = RandomResizedCrop(height=2, width=2)
+        for transform in (CenterCrop(height=2, width=2), crop, crop.deterministic()):
+            with pytest.raises(ValueError, match="ending in"):
+                transform(torch.zeros(4, 4))
 
     def test_random_resized_crop_matches_torchvision_fallback(self):
         """Non-square inputs use torchvision's central-crop fallback geometry."""

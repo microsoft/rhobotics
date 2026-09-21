@@ -578,7 +578,9 @@ class MultiDatasetWeightedSampler:
         # indices of samplers that still hold data
         # keep track of active samplers and how many items each sampler
         # has already produced in this pass
-        iters = [None] * len(self.samplers)
+        # Consume each child's pending resume offset now, including children
+        # whose quota is exhausted, so it cannot leak into the next pass.
+        iters = [iter(sampler) for sampler in self.samplers]
         while True:
             active = [
                 idx
@@ -594,10 +596,7 @@ class MultiDatasetWeightedSampler:
                 if self.shuffle_type == ShuffleType.FRAME:
                     chosen_dataset_idx = self._rng.choice(active, p=probs)
                 else:
-                    chosen_dataset_idx = np.argmax(probs)
-
-                if iters[chosen_dataset_idx] is None:
-                    iters[chosen_dataset_idx] = iter(self.samplers[chosen_dataset_idx])
+                    chosen_dataset_idx = active[int(np.argmax(probs))]
 
                 try:
                     sample_idx = next(iters[chosen_dataset_idx])
@@ -620,7 +619,7 @@ class MultiDatasetWeightedSampler:
 
             # reset iterators and yielded counts for the next pass
             self.yielded = [0] * len(self.samplers)
-            iters = [None] * len(self.samplers)
+            iters = [iter(sampler) for sampler in self.samplers]
             self._epoch += 1
             logger.info("All samplers have hit their allocation.")
 
@@ -644,7 +643,7 @@ class MultiDatasetWeightedSampler:
                 )
                 sampler_states.append(None)
         return {
-            "rng_state": self._rng.__getstate__(),
+            "rng_state": self._rng.bit_generator.state,
             "yielded": list(self.yielded),
             "epoch": self._epoch,
             "sampler_states": sampler_states,
@@ -652,7 +651,12 @@ class MultiDatasetWeightedSampler:
 
     def load_state(self, state_dict: dict) -> None:
         """Restore sampler state from a previously saved snapshot."""
-        self._rng.__setstate__(state_dict["rng_state"])
+        if state_dict["rng_state"] is None:
+            logger.warning(
+                "Sampler checkpoint has no usable RNG state; dataset selection cannot resume exactly."
+            )
+        else:
+            self._rng.bit_generator.state = state_dict["rng_state"]
         self.yielded = list(state_dict["yielded"])
         self._epoch = state_dict["epoch"]
         for sampler, sampler_state in zip(self.samplers, state_dict["sampler_states"], strict=True):

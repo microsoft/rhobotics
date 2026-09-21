@@ -10,9 +10,9 @@ import torch
 import torch.distributed as dist
 from accelerate import Accelerator
 from accelerate.utils import broadcast_object_list
-from lerobot.utils.utils import cycle
 from tqdm import tqdm
 
+from rho.common.determinism import configure_training_determinism
 from rho.common.wandb_logging import WandBLogger
 from rho.environment import make_environment
 from rho.environment.env import evaluate_policy
@@ -27,7 +27,7 @@ from rho.training.train import (
 )
 from rho.training.train_utils import make_policy_interface, save_checkpoint, serialize_train_config
 from rho.training.validation_probe import ValidationProbe
-from rho.utils import init_logging
+from rho.utils import cycle, init_logging
 
 # Initialize logging early (before draccus parsing) - will be reconfigured later with accelerator
 # Uses RHO_LOG_LEVEL if set, otherwise defaults to INFO.
@@ -120,7 +120,8 @@ def train_policy_step_accumulate(
                     continue
                 stacked = torch.stack([g.detach().float().norm(2) for g in grads])
                 grad_norms_per_group[name] = float(torch.norm(stacked).item())
-            accelerator.clip_grad_norm_(policy.parameters(), max_grad_norm)
+            if max_grad_norm is not None:
+                accelerator.clip_grad_norm_(policy.parameters(), max_grad_norm)
             optimizer.step()
             optimizer.zero_grad()
             if lr_scheduler is not None:
@@ -148,6 +149,7 @@ def train_policy_step_accumulate(
 @draccus.wrap()
 def train(cfg: TrainConfig) -> None:
     """Main training function"""
+    configure_training_determinism(cfg.seed, deterministic=cfg.deterministic_training)
 
     # Patch lerobot's unbounded VideoDecoderCache with an LRU-bounded version
     # to prevent memory growth with large multi-shard video datasets.
@@ -160,9 +162,10 @@ def train(cfg: TrainConfig) -> None:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Enable TF32 for safer high-throughput matmuls on Ampere+/Hopper GPUs
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.set_float32_matmul_precision("high")
+    if not cfg.deterministic_training:
+        # Enable TF32 for safer high-throughput matmuls on Ampere+/Hopper GPUs.
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
 
     from accelerate import DistributedDataParallelKwargs
 
@@ -175,6 +178,8 @@ def train(cfg: TrainConfig) -> None:
         project_dir=cfg.output_dir,
         kwargs_handlers=[ddp_kwargs],
     )
+    if cfg.deterministic_training and accelerator.num_processes != 1:
+        raise ValueError("deterministic_training currently supports exactly one process/GPU")
 
     cfg.resolved_checkpoint = resolve_training_checkpoint(cfg)
     timestamp = None
@@ -353,9 +358,7 @@ def train(cfg: TrainConfig) -> None:
             )
             training_metrics_recorder.log(training_metrics)
             batch_size = (
-                batch["action"].shape[0]
-                * accelerator.num_processes
-                * cfg.gradient_accumulation_steps
+                batch["action"].shape[0] * accelerator.num_processes * cfg.gradient_accumulation_steps
             )
             training_metrics_recorder.log_batch(step, batch_size)
 

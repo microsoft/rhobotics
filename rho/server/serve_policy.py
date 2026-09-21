@@ -6,7 +6,6 @@ This script loads a checkpoint created by the accelerate-based training script
 and evaluates the policy in the cfg.environment using the EnvironmentWrapper
 """
 
-import contextlib
 import logging
 import socket
 
@@ -37,8 +36,9 @@ class Server:
 
     def __init__(self, config: EnvironmentConfig) -> None:
         self.config = config
+        self.policy_action_type = config.policy_action_type
 
-    def process_input(self, input) -> tuple:
+    def process_input(self, input) -> dict:
         """Process raw input from client into policy-ready observation format.
 
         Takes the raw observation data from the robot client and converts it into
@@ -51,13 +51,8 @@ class Server:
                 - "obs_queue": Queue of past observations for temporal models (optional)
 
         Returns:
-            tuple: (observation_dict, obs_queue, prev_actions) where:
-                - observation_dict: Dict with:
-                    - Image keys: torch.Tensor of shape (batch_size, C, H, W),
-                      scaled to [0, 1], in RGB format
-                    - State keys: torch.Tensor of shape (batch_size, 1, feature_dim)
-                - obs_queue: Optional queue of past observations
-                - prev_actions: Optional tensor of previous actions
+            Observation dictionary passed to PolicyInterface.get_action_chunk(),
+            including image/state tensors and any reset or RTC metadata.
         """
         raise NotImplementedError
 
@@ -95,53 +90,6 @@ class Server:
         return new_obs
 
 
-def create_trainer(cfg: EvalConfig, *, policy=None, policy_interface=None, env=None):
-    """Build and start the HIL trainer named by ``cfg.trainer_type``.
-
-    Returns the trainer object (with ``.stop()`` for shutdown). The trainer
-    runs its receive loop on a background thread so the websocket server can
-    keep handling inference requests in the foreground.
-
-    The "dsrl" trainer needs the loaded base policy plus the constructed
-    policy_interface/env to share preprocessing with the inference server.
-    "debug" needs nothing beyond the experience port.
-    """
-    if cfg.trainer_type == "debug":
-        from rho.hil.trainers.debug_trainer import start_debug_trainer
-
-        return start_debug_trainer(
-            experience_port=cfg.experience_port,
-            blocking=False,
-        )
-    if cfg.trainer_type == "dsrl":
-        from rho.hil.trainers.dsrl_trainer import start_dsrl_trainer
-        from rho.policies.dsrl.dsrl_config import DSRLConfig
-
-        dsrl_cfg = cfg.dsrl if cfg.dsrl is not None else DSRLConfig()
-        return start_dsrl_trainer(
-            config=dsrl_cfg,
-            base_policy=policy,
-            experience_port=cfg.experience_port,
-            blocking=False,
-            policy_interface=policy_interface,
-            env=env,
-        )
-    if cfg.trainer_type == "flowdagger":
-        from rho.hil.trainers.flowdagger_trainer import start_flowdagger_trainer
-        from rho.policies.dsrl.flowdagger_config import FlowDAggerConfig
-
-        fd_cfg = cfg.flowdagger if cfg.flowdagger is not None else FlowDAggerConfig()
-        return start_flowdagger_trainer(
-            config=fd_cfg,
-            base_policy=policy,
-            experience_port=cfg.experience_port,
-            blocking=False,
-            policy_interface=policy_interface,
-            env=env,
-        )
-    raise ValueError(f"Unknown trainer_type='{cfg.trainer_type}'. Supported: 'debug', 'dsrl', 'flowdagger'.")
-
-
 @draccus.wrap()
 def eval(cfg: EvalConfig) -> None:
     # setup policy interface and load pretrained policy
@@ -157,39 +105,11 @@ def eval(cfg: EvalConfig) -> None:
     logger.info(f"Base policy loaded: {type(base_policy).__name__}")
     logger.info(f"   Device: {base_policy.device}")
 
-    # If a wrapper trainer config is set (dsrl / flowdagger), wrap the loaded
-    # base policy in the matching inference-side wrapper. The wrapper is what
-    # the websocket server serves; the trainer keeps a reference to the base
-    # for inverse_noise_map / inversion calls.
-    served_policy = base_policy
-    if cfg.flowdagger is not None:
-        from rho.policies.dsrl.flowdagger_policy import FlowDAggerPolicy
-
-        policy_cfg = cfg.flowdagger.to_policy_config()
-        served_policy = FlowDAggerPolicy(policy_cfg, base_policy=base_policy)
-        served_policy.eval()
-        logger.info("Wrapped base policy in FlowDAggerPolicy (in-process)")
-    elif cfg.dsrl is not None:
-        from rho.policies.dsrl.dsrl_policy import DSRLPolicy
-
-        policy_cfg = cfg.dsrl.to_policy_config()
-        served_policy = DSRLPolicy(policy_cfg, base_policy=base_policy)
-        served_policy.eval()
-        logger.info("Wrapped base policy in DSRLPolicy (in-process)")
-
-    # PolicyInterface reads base-policy config (chunk_size, n_action_steps,
-    # delta_indices_dict) at __init__ time only. Construct it against the
-    # base, then swap in the wrapper so sample_actions calls route through
-    # it. (Wrapper has matching chunk geometry but its config is a different
-    # dataclass.)
     logger.info("Creating policy interface...")
     cfg.policy_interface_cfg.policy = base_policy
     cfg.policy_interface_cfg.data_config = cfg.dataset
 
     policy_interface = PolicyInterface(cfg.policy_interface_cfg)
-
-    if served_policy is not base_policy:
-        policy_interface.policy = served_policy
 
     # find key in policy_interface.data_config.observation_mapping that maps to "action"
     cfg.environment.policy_action_type = policy_interface.data_config.action_type
@@ -197,14 +117,6 @@ def eval(cfg: EvalConfig) -> None:
 
     env = make_environment(cfg.environment)
     logger.info(f"Environment initialized: {type(env).__name__}")
-
-    # Start HIL trainer (if requested) after the policy + env are ready so the
-    # wrapper trainers can share the base policy reference; the bind happens
-    # before serve_forever so a port conflict surfaces immediately.
-    trainer = None
-    if cfg.train:
-        logger.info(f"Starting HIL trainer '{cfg.trainer_type}' in background...")
-        trainer = create_trainer(cfg, policy=base_policy, policy_interface=policy_interface, env=env)
 
     # 2. Start serving model
     hostname = socket.gethostname()
@@ -218,12 +130,7 @@ def eval(cfg: EvalConfig) -> None:
         port=cfg.environment.port,
     )
 
-    try:
-        server.serve_forever()
-    finally:
-        if trainer is not None:
-            with contextlib.suppress(Exception):
-                trainer.stop()
+    server.serve_forever()
 
 
 if __name__ == "__main__":

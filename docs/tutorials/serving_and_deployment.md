@@ -4,7 +4,6 @@ Rho provides a WebSocket policy server and a lightweight Python client. The
 server loads a portable Rho checkpoint, receives observations encoded with
 MessagePack, and returns an action chunk.
 
-The public repository does not include a production hardware integration.
 Before serving on a robot, implement and test an environment adapter for that
 robot's observations, action space, timing, and safety constraints.
 
@@ -131,6 +130,14 @@ policy_interface_cfg:
 The mapping keys are produced by `process_input`; the values must match the
 feature names stored in the checkpoint.
 
+Use the top-level `--execution_horizon=8` launch option to override the number
+of actions executed between inference requests. If omitted, it defaults to
+the checkpoint's `policy.n_action_steps`. Do not rely on
+`--policy.n_action_steps` for this override: checkpoint loading replaces the
+policy configuration. Standard simulation evaluation executes only this
+prefix; the websocket server continues to return full chunks and advertises
+the effective horizon in metadata for the client to obey.
+
 For real-time chunking, add:
 
 ```yaml
@@ -181,32 +188,12 @@ for action in actions[: metadata["execution_horizon"]]:
 ```
 
 Call `client.reset()` between episodes when the policy or server maintains
-episode state. The response uses the singular `"action"` key.
-
-## DSRL and FlowDAgger
-
-The same server can wrap the loaded Rho policy for online adaptation. Add one
-of the following sections to the server configuration:
-
-```yaml
-train: true
-trainer_type: "dsrl"
-dsrl:
-  base_policy_name: "rho"
-```
-
-or:
-
-```yaml
-train: true
-trainer_type: "flowdagger"
-flowdagger:
-  base_policy_name: "rho"
-```
-
-These modes require an environment integration that publishes the appropriate
-experience and intervention signals. Validate the complete control loop in
-simulation before using online adaptation on hardware.
+episode state. This marks the next `infer()` request with `_reset_: true`, so
+the server clears observation history and cached RTC actions before processing
+the new observation. No standalone request is sent by `reset()`; a failed
+inference leaves the reset pending for retry. Also discard queued actions on
+the client and reset `num_actions_executed` to zero for the first request of
+the new episode. The response uses the singular `"action"` key.
 
 ## Deployment safety
 

@@ -356,5 +356,6 @@ class TestCombinedDataset:
         assert len(multi_dataset) == 0
         assert multi_dataset.cumulative_lengths == []
 
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

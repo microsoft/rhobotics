@@ -14,7 +14,7 @@ policy:
   resize_imgs_with_padding: null
   chunk_size: 16
   n_action_steps: 8
-  # Published-recipe setting; ordinary finetuning can use the policy default of 1.
+  # Published-recipe setting, also the Rho default; use 1 for lower-memory training.
   num_flow_samples: 8
   freeze_vlm_backbone: false
   freeze_vision_encoder: false

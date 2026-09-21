@@ -37,8 +37,7 @@ def extract_transform_config(
 ) -> dict | None:
     """Extract configuration from a transform (either instantiated object or dictionary).
 
-    Automatically extracts all public attributes from the transform class or dict keys
-    (excluding 'type' for dicts).
+    Resolve dictionary defaults before extracting public transform attributes.
 
     Args:
         transform: Either an instantiated transform object or a dictionary configuration.
@@ -55,6 +54,8 @@ def extract_transform_config(
             type_name="combine_keys",
         )
     """
+    if isinstance(transform, dict) and transform.get("type") == type_name:
+        transform = draccus.decode(transform_class, {k: v for k, v in transform.items() if k != "type"})
     if isinstance(transform, transform_class):
         # Extract all public attributes (non-callable, non-dunder)
         return {
@@ -62,9 +63,6 @@ def extract_transform_config(
             for key in dir(transform)
             if not key.startswith("_") and not callable(getattr(transform, key))
         }
-    elif isinstance(transform, dict) and transform.get("type") == type_name:
-        # Extract all keys except 'type'
-        return {key: value for key, value in transform.items() if key != "type"}
     return None
 
 
@@ -185,6 +183,7 @@ def decode_data_config(config_dict: dict, path=()) -> DataConfig:
 class RobotDataConfig(DataConfig):
     """Feature processing and normalization shared by robot datasets."""
 
+    seed: int = 0
     batch_size: int = 64
     num_workers: int = 4
     shuffle_buffer_size: int = 1000  # Buffer size for shuffling in streaming mode
@@ -321,9 +320,9 @@ class RobotDataConfig(DataConfig):
                 # Stats already loaded as dict - remap now
                 self.stats = {self.observation_mapping.get(k, k): v for k, v in self.stats.items()}
 
+        self.process_transform_mapping()
         self.validate_actionchunk_transforms()
         self.create_reverse_transforms()
-        self.process_transform_mapping()
         self.create_transformed_stats_and_features()
 
     def create_transformed_stats_and_features(self):
@@ -456,7 +455,8 @@ class RobotDataConfig(DataConfig):
                         state_key=delta_config["state_key"],
                         action_key=delta_config["action_key"],
                         relative_to_state=delta_config["relative_to_state"],
-                        use_absolute_grippers=delta_config.get("use_absolute_grippers", False),
+                        use_absolute_grippers=delta_config["use_absolute_grippers"],
+                        absolute_idx=delta_config["absolute_idx"],
                         action_type=delta_config["action_type"],
                         post_norm=delta_config["post_norm"],
                     )
@@ -502,6 +502,11 @@ class RobotDataConfig(DataConfig):
                 # Check if it's a single transform with input_type == "Dict"
                 # Handle both single transforms and lists of transforms
                 transform_list_to_process = transform if isinstance(transform, (list, tuple)) else [transform]
+                transform_list_to_process = [
+                    draccus.decode(Transform, t) if isinstance(t, dict) else t
+                    for t in transform_list_to_process
+                ]
+                self.transform_mapping[key] = transform_list_to_process
 
                 for t in transform_list_to_process:
                     convert_to_6d_config = (

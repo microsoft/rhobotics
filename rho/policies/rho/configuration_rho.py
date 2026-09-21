@@ -34,7 +34,7 @@ class RhoConfig(PolicyConfig):
     max_action_dim: int = 32
 
     num_steps: int = 10
-    num_flow_samples: int = 1
+    num_flow_samples: int = 8
     attention_implementation: str = "flash_attention_2"
     attention_type: str = "cross"
     adaln_mode: str = "shared"
@@ -60,7 +60,7 @@ class RhoConfig(PolicyConfig):
     scheduler_decay_steps: int = 240_000
     scheduler_decay_lr: float = 2.5e-6
     time_sampling_strategy: str = "beta"
-    dropout_p: float = 0.1
+    dropout_p: float = 0.02
     pos_emb_method: str = "sinusoidal"
     log_hidden_state_stats: bool = True
 
@@ -94,6 +94,8 @@ class RhoConfig(PolicyConfig):
             raise ValueError("n_action_steps cannot exceed chunk_size")
         if self.num_flow_samples < 1:
             raise ValueError("num_flow_samples must be at least 1")
+        if not 0.0 <= self.dropout_p <= 1.0:
+            raise ValueError("dropout_p must be between 0.0 and 1.0")
 
         if self.optimizer is None:
             self.optimizer = AdamWConfig(

@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
+FROM nvidia/cuda:12.6.3-devel-ubuntu24.04 AS builder
 
 ENV PYTHONUNBUFFERED=1 \
         PYTHONDONTWRITEBYTECODE=1 \
@@ -22,8 +22,10 @@ RUN wget -qO /tmp/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-${
         conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
         conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && \
         conda update --all -c conda-forge -y --solver=classic && \
+        conda install -n base -c conda-forge "cryptography>=50.0.0" -y --solver=classic && \
         conda clean -ay && \
         rm -rf /opt/miniconda/pkgs && \
+        rm -f /opt/miniconda/lib/python3.12/site-packages/pip/_vendor/bom.cdx.json && \
         rm /tmp/miniconda.sh && \
         find / -type d -name __pycache__ | xargs rm -rf
 
@@ -43,7 +45,9 @@ ENV CONDA_PREFIX=$RHO_CONDA_ENVIRONMENT_PATH
 # Bootstrap pip inside the Rho conda environment so that `pip` and `python`
 # resolve to the same environment (miniconda's pip would install into
 # /opt/miniconda instead of /opt/rho-env).
-RUN python -m ensurepip && python -m pip install --upgrade pip
+RUN python -m ensurepip && \
+        python -m pip install --upgrade pip && \
+        rm -f /opt/rho-env/lib/python3.12/site-packages/pip/_vendor/bom.cdx.json
 
 COPY pyproject.toml /workspace/
 COPY rho/ /workspace/rho/
@@ -95,10 +99,19 @@ RUN dpkg-query -W -f='${binary:Package} ${db:Status-Abbrev}\n' \
         python3-wheel python3-setuptools python3-jwt python3-cryptography \
         2>/dev/null | awk '$2 ~ /^ii/ {print $1}' | \
         xargs -r apt-get remove -y --allow-change-held-packages && \
-    rm -rf /usr/lib/python3/dist-packages/*
+    rm -rf /usr/lib/python3/dist-packages/* && \
+    ! dpkg-query -W -f='${db:Status-Abbrev}\n' python3-cryptography \
+        2>/dev/null | grep -q '^ii' && \
+    /opt/miniconda/bin/python -c \
+        "from cryptography import __version__; from packaging.version import Version; assert Version(__version__) >= Version('50.0.0'), __version__"
 
-# clean conda and pip caches
-RUN rm -rf ~/.cache/pip
+# Verify the real setuptools packages remain above the fixed version.
+RUN python -c \
+        "from importlib.metadata import version; from packaging.version import Version; assert Version(version('setuptools')) >= Version('78.1.1')" && \
+    /opt/miniconda/bin/python -c \
+        "from importlib.metadata import version; from packaging.version import Version; assert Version(version('setuptools')) >= Version('78.1.1')" && \
+    rm -rf /opt/miniconda/pkgs && \
+    rm -rf ~/.cache/pip
 
 # Configure bash for better interactive experience
 RUN echo 'export PS1="\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ "' >> /root/.bashrc && \
@@ -113,4 +126,22 @@ RUN echo 'export PS1="\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[0
 WORKDIR /workspace
 
 # Default command - keep container running for interactive use
+CMD ["/bin/bash"]
+
+FROM ubuntu:24.04
+
+COPY --from=builder / /
+
+ENV PYTHONUNBUFFERED=1 \
+        PYTHONDONTWRITEBYTECODE=1 \
+        HF_HOME=/hf_home \
+        TZ=Etc/UTC \
+        DEBIAN_FRONTEND=noninteractive \
+        RHO_CONDA_ENVIRONMENT_PATH=/opt/rho-env \
+        PATH=/opt/rho-env/bin:/opt/miniconda/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        CONDA_DEFAULT_ENV=/opt/rho-env \
+        CONDA_PREFIX=/opt/rho-env \
+        LD_LIBRARY_PATH=/opt/hpcx/ucx/lib:/opt/hpcx/sharp/lib:/opt/hpcx/nccl_rdma_sharp_plugin/lib
+
+WORKDIR /workspace
 CMD ["/bin/bash"]

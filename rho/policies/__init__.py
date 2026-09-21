@@ -4,8 +4,6 @@ Policy module initialization with automatic registration and factory function.
 
 from rho.models.schedule import migrate_legacy_scheduler_config
 from rho.policies.base import PolicyConfig, PreTrainedPolicy
-from rho.policies.dsrl.dsrl_policy import DSRLPolicy, DSRLPolicyConfig
-from rho.policies.dsrl.flowdagger_policy import FlowDAggerPolicy, FlowDAggerPolicyConfig
 from rho.policies.rho import RhoPolicy
 
 # Registry to store policy classes
@@ -182,18 +180,12 @@ def list_available_policies() -> list[str]:
 
 # Register all available policies
 register_policy("rho")(RhoPolicy)
-register_policy("dsrl")(DSRLPolicy)
-register_policy("flowdagger")(FlowDAggerPolicy)
 
 
 # Export public API
 __all__ = [
     "PreTrainedPolicy",
     "PolicyConfig",
-    "DSRLPolicy",
-    "DSRLPolicyConfig",
-    "FlowDAggerPolicy",
-    "FlowDAggerPolicyConfig",
     "RhoPolicy",
     "make_policy",
     "make_policy_from_checkpoint",

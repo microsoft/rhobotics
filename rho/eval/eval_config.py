@@ -30,8 +30,6 @@ from rho.environment.env import EnvironmentConfig
 from rho.eval.policy_interface import PolicyInterfaceConfig
 from rho.models.schedule import migrate_legacy_scheduler_config
 from rho.policies import PolicyConfig
-from rho.policies.dsrl.dsrl_config import DSRLConfig
-from rho.policies.dsrl.flowdagger_config import FlowDAggerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -486,11 +484,12 @@ class EvalConfig:
     dataset: DataConfig = field(default_factory=DataConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     policy_interface_cfg: PolicyInterfaceConfig = field(default_factory=PolicyInterfaceConfig)
-    seed: int = 12345  # Random seed for reproducibility
+    seed: int = 12345  # Base seed for environment and scenario resets
+    policy_seed: int | None = None  # Independent policy RNG seed; defaults to seed
 
     eval_mode: str = "standard"
     inference_delay: int = 6  # number of action steps it takes to inference
-    execution_horizon: int | None = None  # actions executed between RTC inferences
+    execution_horizon: int | None = None  # actions executed between inferences; overrides checkpoint default
     beta: int = 10  # weighting of rtc update vs flow matching update
     guidance_schedule: str = "paper"  # guidance coefficient schedule: 'paper' or 'constant'
 
@@ -500,23 +499,6 @@ class EvalConfig:
 
     # Logging configuration
     log_level: str = "INFO"  # Logging level: DEBUG, INFO, WARNING, ERROR
-
-    # ── HIL trainer launch ──────────────────────────────────────────────────
-    # When ``train`` is True, serve_policy.eval() also spawns the trainer
-    # named by ``trainer_type`` on a background thread before starting the
-    # websocket server. The trainer listens for experience transitions
-    # streamed from the robot's hil.data_publisher.ExperiencePublisher on
-    # ``experience_port``. Defaults are no-trainer behavior so existing
-    # serve configs work unchanged.
-    train: bool = False
-    trainer_type: str = "debug"  # "debug", "dsrl", or "flowdagger"
-    experience_port: int = 5555
-    # Trainer-specific configs. Real dataclass types so draccus can decode
-    # yaml blocks like ``flowdagger: {bc_lr: 1e-4, ...}``. Both modules are
-    # pure-dataclass (no torch imports) so importing them at module load
-    # time is cheap.
-    dsrl: DSRLConfig | None = None
-    flowdagger: FlowDAggerConfig | None = None
 
     # Evaluation parameters (used by sim eval, safe defaults for other usage)
     eval_num_episodes: int = 5

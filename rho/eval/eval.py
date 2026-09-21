@@ -1,12 +1,12 @@
 import gc
 import json
 import logging
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 
 import draccus
 import torch
-import wandb
 
 from rho.checkpoints import checkpoint_read_lease
 from rho.common.wandb_logging import WandBLogger
@@ -146,15 +146,24 @@ def write_multieval_summary(
     date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     summary_path = eval_output_dir / f"multieval_summary_{date_str}.json"
 
-    success_rates = [v["mean_success_rt"] for v in summary_results.values() if "mean_success_rt" in v]
+    completed = {k: v for k, v in summary_results.items() if v.get("status", "success") == "success"}
+    failed = [k for k in summary_results if k not in completed]
+    success_rates = [v["mean_success_rt"] for v in completed.values() if "mean_success_rt" in v]
+    completed_mean = float(sum(success_rates) / len(success_rates)) if success_rates else None
+    status = "success" if not failed else ("partial" if completed else "failed")
     summary = {
         "pretrain_step": step,
         "finetuned_checkpoint": str(checkpoint_path),
         "date": date_str,
+        "status": status,
         "aggregate": {
             "num_tasks": len(summary_results),
-            "mean_success_rt": float(sum(success_rates) / len(success_rates)) if success_rates else 0.0,
-            "per_task_success_rates": {k: v.get("mean_success_rt", 0.0) for k, v in summary_results.items()},
+            "num_completed": len(completed),
+            "num_failed": len(failed),
+            "complete": not failed,
+            "mean_success_rt": completed_mean if not failed else None,
+            "mean_success_rt_completed": completed_mean,
+            "per_task_success_rates": {k: v.get("mean_success_rt") for k, v in summary_results.items()},
         },
         "per_task": summary_results,
     }
@@ -165,32 +174,41 @@ def write_multieval_summary(
     logger.info(f"Multieval summary saved to: {summary_path}")
 
     print(f"\n{'=' * 60}")
-    print(f"Multieval Summary (step {step})")
+    print(f"Multieval Summary (step {step}, {status})")
     print(f"{'=' * 60}")
     for task_name, task_results in summary_results.items():
-        sr = task_results.get("mean_success_rt", 0.0)
-        print(f"  {task_name:40s} {sr:.1%}")
+        if task_name in failed:
+            print(f"  {task_name:40s} FAILED: {task_results['error']}")
+        else:
+            sr = task_results.get("mean_success_rt")
+            print(f"  {task_name:40s} {sr:.1%}" if sr is not None else f"  {task_name:40s} N/A")
     if success_rates:
-        print(f"  {'AVERAGE':40s} {sum(success_rates) / len(success_rates):.1%}")
+        label = "AVERAGE (completed tasks only)" if failed else "AVERAGE"
+        print(f"  {label:40s} {completed_mean:.1%}")
     print(f"{'=' * 60}\n")
 
     return summary_path
 
 
-def _run_single_eval(cfg: SimEvalConfig) -> dict | None:
+def _run_single_eval(cfg: SimEvalConfig) -> dict:
     """Run a single evaluation. Called by both eval() and multi_eval().
 
     When called from multi_eval(), the policy is already loaded in cfg and
     this function only creates the environment, evaluates, and cleans up.
 
     Returns:
-        Evaluation metrics dict, or None on failure.
+        Evaluation metrics dict. Failures propagate after resources are closed.
     """
-    # Initialize wandb from training run config if available
-    wandb_logger = init_wandb_from_training_run(cfg)
+    with ExitStack() as cleanup:
+        wandb_logger = init_wandb_from_training_run(cfg)
+        if wandb_logger is not None:
+            cleanup.callback(wandb_logger.finish)
+        env = make_environment(cfg.environment)
+        cleanup.callback(env.close)
+        return _evaluate_in_environment(cfg, env, wandb_logger)
 
-    # 1. Create environment from EvalConfig
-    env = make_environment(cfg.environment)
+
+def _evaluate_in_environment(cfg, env, wandb_logger) -> dict:
     logger.info(f"Environment initialized: {type(env).__name__}")
     logger.info(f"  num_envs: {env.num_envs}")
     logger.info(f"  is_vectorized: {env.is_vectorized}")
@@ -239,6 +257,7 @@ def _run_single_eval(cfg: SimEvalConfig) -> dict | None:
         num_episodes=cfg.eval_num_episodes,
         max_steps=cfg.environment.max_episode_steps,
         seed=cfg.seed,
+        policy_seed=cfg.policy_seed,
         record_video=cfg.record_videos,
         output_dir=str(video_dir),
         eval_mode=cfg.eval_mode,
@@ -255,19 +274,6 @@ def _run_single_eval(cfg: SimEvalConfig) -> dict | None:
         logger.warning("Could not extract step number from checkpoint name")
 
     log_eval_results(video_dir, eval_metrics, cfg, wandb_logger=wandb_logger, step=step)
-
-    # Finish wandb run if we initialized it
-    if wandb_logger is not None and wandb.run is not None:
-        logger.info("Syncing wandb data before closing...")
-        import time
-
-        time.sleep(2)
-        wandb_logger.finish()
-        logger.info("Closed wandb run")
-
-    # Close environment
-    env.close()
-    logger.info("Environment closed.")
 
     return eval_metrics
 
@@ -296,6 +302,9 @@ def _make_multi_eval_config(
     task_name: str,
 ) -> SimEvalConfig:
     """Build one multi-eval entry while preserving public dataset preprocessing."""
+    execution_horizon = getattr(eval_cfg, "execution_horizon", None)
+    if execution_horizon is None:
+        execution_horizon = cfg.execution_horizon
     return SimEvalConfig(
         pretrained_checkpoint=str(checkpoint),
         eval_num_episodes=getattr(eval_cfg, "eval_num_episodes", cfg.eval_num_episodes),
@@ -305,12 +314,13 @@ def _make_multi_eval_config(
         name=task_name,
         environment=eval_cfg.environment,
         seed=getattr(eval_cfg, "seed", cfg.seed),
+        policy_seed=getattr(eval_cfg, "policy_seed", cfg.policy_seed),
         dataset=getattr(eval_cfg, "dataset", cfg.dataset),
         policy=getattr(eval_cfg, "policy", cfg.policy),
         dataset_root_dir=getattr(eval_cfg, "dataset_root_dir", cfg.dataset_root_dir),
         eval_mode=getattr(eval_cfg, "eval_mode", cfg.eval_mode),
         inference_delay=getattr(eval_cfg, "inference_delay", cfg.inference_delay),
-        execution_horizon=getattr(eval_cfg, "execution_horizon", cfg.execution_horizon),
+        execution_horizon=execution_horizon,
         beta=getattr(eval_cfg, "beta", cfg.beta),
         guidance_schedule=getattr(eval_cfg, "guidance_schedule", cfg.guidance_schedule),
     )
@@ -365,6 +375,9 @@ def _run_multi_eval(cfg: SimEvalConfig) -> None:
     checkpoint = cfg.pretrained_checkpoint
     if checkpoint is None:
         raise ValueError("pretrained_checkpoint must be set for multi-eval")
+    task_names = [getattr(entry, "name", f"eval_{i}") for i, entry in enumerate(cfg.eval_configs)]
+    if not task_names or len(set(task_names)) != len(task_names):
+        raise ValueError("Multi-eval requires at least one evaluation and unique task names.")
 
     logger.info("=" * 80)
     logger.info("Starting MULTI-EVAL")
@@ -411,48 +424,40 @@ def _run_multi_eval(cfg: SimEvalConfig) -> None:
         task_name = getattr(eval_cfg, "name", f"eval_{i}")
         logger.info(f"\n--- Evaluation {i + 1}/{len(cfg.eval_configs)}: {task_name} ---")
 
-        # Build a SimEvalConfig for this specific evaluation, injecting the
-        # shared checkpoint so that EvalConfig.__post_init__ loads
-        # train_config.json and populates policy/dataset configs.
-        eval_cfg_copy = _make_multi_eval_config(
-            cfg,
-            eval_cfg,
-            checkpoint,
-            eval_output_dir,
-            task_name,
-        )
-
-        # Attach the pre-loaded policy so _run_single_eval reuses it
-        eval_cfg_copy._loaded_policy = policy
-
         try:
-            _run_single_eval(eval_cfg_copy)
-
-            # Collect results for the summary
-            results_json = Path(eval_output_dir / task_name) / "evaluation_results.json"
-            if results_json.exists():
-                with open(results_json) as f:
-                    results = json.load(f)
-                summary_results[task_name] = {
-                    k: v for k, v in results.items() if k in EVAL_SCALAR_KEYS and isinstance(v, (int, float))
-                }
-                for meta_key in EVAL_META_KEYS:
-                    if meta_key in results:
-                        summary_results[task_name][meta_key] = results[meta_key]
+            eval_cfg_copy = _make_multi_eval_config(cfg, eval_cfg, checkpoint, eval_output_dir, task_name)
+            eval_cfg_copy._loaded_policy = policy
+            results = _run_single_eval(eval_cfg_copy)
+            summary_results[task_name] = {
+                k: v for k, v in results.items() if k in EVAL_SCALAR_KEYS and isinstance(v, (int, float))
+            }
+            summary_results[task_name]["status"] = "success"
+            summary_results[task_name]["environment"] = eval_cfg_copy.environment.name
+            for meta_key in EVAL_META_KEYS[1:]:
+                if hasattr(eval_cfg_copy.environment, meta_key):
+                    summary_results[task_name][meta_key] = getattr(eval_cfg_copy.environment, meta_key)
 
             logger.info(f"Completed: {task_name}")
 
         except Exception as e:
-            logger.error(f"Failed: {task_name}: {e}")
-            import traceback
-
-            traceback.print_exc()
-
-        _cleanup_gpu()
+            logger.exception("Failed: %s", task_name)
+            failure = {"status": "failed", "error": f"{type(e).__name__}: {e}"}
+            summary_results[task_name] = failure
+            results_json = eval_output_dir / task_name / "evaluation_results.json"
+            results_json.parent.mkdir(parents=True, exist_ok=True)
+            with results_json.open("w") as f:
+                json.dump(failure, f, indent=2)
+        finally:
+            _cleanup_gpu()
 
     # Write multieval summary
-    if summary_results:
-        write_multieval_summary(summary_results, eval_output_dir, Path(checkpoint), step)
+    summary_path = write_multieval_summary(summary_results, eval_output_dir, Path(checkpoint), step)
+    failed_tasks = [name for name, result in summary_results.items() if result["status"] == "failed"]
+    if failed_tasks:
+        raise RuntimeError(
+            f"Multi-eval failed for {len(failed_tasks)}/{len(task_names)} tasks: "
+            f"{', '.join(failed_tasks)}. Results: {summary_path}"
+        )
 
     logger.info("Multi-eval completed!")
 

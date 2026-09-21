@@ -1,0 +1,277 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+
+const authors = [
+  { name: "First Author", sup: "1" },
+  { name: "Second Author", sup: "1,2" },
+  { name: "Third Author", sup: "2" },
+  { name: "Senior Author", sup: "1" },
+];
+const affiliations = [
+  { sup: "1", name: "Your Lab / Institution" },
+  { sup: "2", name: "Collaborating Institution" },
+];
+const resourceLinks = [
+  { label: "Paper", href: "#paper", icon: "📄" },
+  { label: "arXiv", href: "#paper", icon: "📑" },
+  { label: "Code", href: "https://github.com/microsoft/rhobotics", icon: "💻" },
+  { label: "Video", href: "#results", icon: "▶" },
+];
+---
+
+<BaseLayout title="rhobotics — A Vision-Language-Action Model for Robotics">
+  <!-- ============================== HERO ============================== -->
+  <section class="hero">
+    <div class="container">
+      <p class="hero__eyebrow">Robotics · Vision-Language-Action Models</p>
+      <h1>rhobotics: A Generalist Vision-Language-Action Model for Robotic Manipulation</h1>
+
+      <ul class="authors">
+        {authors.map((a) => (
+          <li>
+            <span class="authors__name">{a.name}</span><sup>{a.sup}</sup>
+          </li>
+        ))}
+      </ul>
+
+      <ul class="affiliations">
+        {affiliations.map((a) => (
+          <li><sup>{a.sup}</sup>{a.name}</li>
+        ))}
+      </ul>
+
+      <div class="hero__links">
+        {resourceLinks.map((l) => (
+          <a class="btn" href={l.href}>
+            <span class="btn__icon" aria-hidden="true">{l.icon}</span>{l.label}
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ TEASER ============================ -->
+  <section class="container container--wide">
+    <figure class="figure">
+      <div class="placeholder placeholder--teaser">Teaser figure / hero diagram</div>
+      <figcaption>
+        Figure 1. Placeholder teaser. Replace with a hero image or animation
+        showing the robot executing a language-conditioned task.
+      </figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================ BODY ============================ -->
+  <article class="container">
+    <section id="overview">
+      <h2>Abstract</h2>
+      <p>
+        This is placeholder text. Describe your vision-language-action (VLA)
+        model here: what it takes as input (images, language instructions,
+        proprioception), what it outputs (robot actions), the scale of training
+        data, and the headline result. Lorem ipsum dolor sit amet, consectetur
+        adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore
+        magna aliqua.
+      </p>
+      <p>
+        A second placeholder paragraph for additional context. Ut enim ad minim
+        veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea
+        commodo consequat.
+      </p>
+    </section>
+
+    <section id="method">
+      <h2>Method</h2>
+      <p>
+        Placeholder description of the architecture and training procedure.
+        Summarize the encoder, the action decoder, and how language grounds the
+        policy. The diagram below is a placeholder for your method figure.
+      </p>
+      <figure class="figure">
+        <div class="placeholder placeholder--diagram">Architecture diagram</div>
+        <figcaption>
+          Figure 2. Placeholder architecture diagram. Replace with your model
+          schematic (e.g. SVG/PNG dropped into <code>public/</code>).
+        </figcaption>
+      </figure>
+    </section>
+
+    <section id="results">
+      <h2>Results</h2>
+      <p>
+        Placeholder results section. Summarize benchmark performance, ablations,
+        and real-robot success rates here.
+      </p>
+      <div class="figure-grid">
+        <figure class="figure">
+          <div class="placeholder">Result clip / plot 1</div>
+          <figcaption>Figure 3a. Placeholder.</figcaption>
+        </figure>
+        <figure class="figure">
+          <div class="placeholder">Result clip / plot 2</div>
+          <figcaption>Figure 3b. Placeholder.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="paper">
+      <h2>Paper</h2>
+      <p>
+        Placeholder for the paper link, PDF thumbnail, and citation. Add the
+        arXiv link and a thumbnail of the first page here.
+      </p>
+    </section>
+
+    <section id="code">
+      <h2>Code</h2>
+      <p>
+        Placeholder for the code release. Link the GitHub repository and a quick
+        getting-started snippet once available.
+      </p>
+    </section>
+
+    <section id="bibtex">
+      <h2>BibTeX</h2>
+      <pre class="bibtex"><code>@article&#123;rhobotics2026,
+  title   = &#123;rhobotics: A Generalist Vision-Language-Action Model&#125;,
+  author  = &#123;Author, First and Author, Second and Author, Senior&#125;,
+  journal = &#123;Placeholder&#125;,
+  year    = &#123;2026&#125;
+&#125;</code></pre>
+    </section>
+  </article>
+</BaseLayout>
+
+<style>
+  .hero {
+    padding-top: 56px;
+    padding-bottom: 8px;
+    text-align: center;
+  }
+
+  .hero__eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--link);
+    margin-bottom: 12px;
+  }
+
+  .hero h1 {
+    max-width: 18ch;
+    margin-inline: auto;
+  }
+
+  .authors,
+  .affiliations {
+    list-style: none;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 4px 18px;
+  }
+
+  .authors {
+    margin: 24px 0 6px;
+    font-size: 1.1rem;
+  }
+  .authors__name {
+    color: var(--link);
+  }
+
+  .affiliations {
+    margin: 0 0 8px;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    gap: 4px 20px;
+  }
+
+  .hero__links {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 22px;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: #171717;
+    color: #fff;
+    padding: 9px 18px;
+    border-radius: 999px;
+    font-size: 0.95rem;
+    text-decoration: none;
+    transition: background 0.15s ease;
+  }
+  .btn:hover,
+  .btn:focus {
+    background: var(--link);
+    color: #fff;
+    text-decoration: none;
+  }
+  .btn__icon {
+    font-size: 0.95em;
+  }
+
+  /* Figures & placeholders */
+  .figure {
+    margin: 28px 0;
+  }
+  .figure figcaption {
+    margin-top: 10px;
+    font-size: 0.88rem;
+    color: var(--text-muted);
+    text-align: center;
+  }
+
+  .placeholder {
+    display: grid;
+    place-items: center;
+    background: repeating-linear-gradient(
+        45deg,
+        #f3f3f3,
+        #f3f3f3 12px,
+        #ececec 12px,
+        #ececec 24px
+      );
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    min-height: 200px;
+    text-align: center;
+    padding: 24px;
+  }
+  .placeholder--teaser {
+    min-height: 340px;
+  }
+  .placeholder--diagram {
+    min-height: 280px;
+  }
+
+  .figure-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  @media (max-width: 640px) {
+    .figure-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .bibtex {
+    background: #f6f6f6;
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+</style>

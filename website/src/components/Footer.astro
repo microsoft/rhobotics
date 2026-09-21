@@ -1,0 +1,78 @@
+---
+// Microsoft open-source style footer.
+// Links laid out side-by-side (horizontal) per request, with the copyright.
+const links = [
+  { label: "Privacy", href: "https://go.microsoft.com/fwlink/?LinkId=521839" },
+  {
+    label: "Consumer health privacy",
+    href: "https://go.microsoft.com/fwlink/?linkid=2259814",
+  },
+  {
+    label: "Trademarks",
+    href: "https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/",
+  },
+  {
+    label: "Terms of Use",
+    href: "https://go.microsoft.com/fwlink/?LinkID=206977",
+  },
+];
+---
+
+<footer class="site-footer">
+  <div class="site-footer__inner">
+    <ul class="site-footer__links">
+      {links.map((l) => (
+        <li>
+          <a href={l.href} target="_blank" rel="noopener noreferrer">{l.label}</a>
+        </li>
+      ))}
+    </ul>
+    <span class="site-footer__copy">&copy; 2026 Microsoft</span>
+  </div>
+</footer>
+
+<style>
+  .site-footer {
+    background: var(--footer-bg);
+    color: var(--footer-fg);
+    border-top: 1px solid var(--rule);
+    margin-top: 64px;
+  }
+
+  .site-footer__inner {
+    max-width: var(--wide-width);
+    margin-inline: auto;
+    padding: 22px 24px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 12px 28px;
+    font-size: 1rem;
+  }
+
+  /* Side-by-side links, centered as a group with the copyright */
+  .site-footer__links {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 12px 28px;
+  }
+
+  .site-footer__links a {
+    color: var(--footer-fg);
+    text-decoration: none;
+  }
+  .site-footer__links a:hover,
+  .site-footer__links a:focus {
+    text-decoration: underline;
+    color: var(--footer-fg);
+  }
+
+  .site-footer__copy {
+    color: var(--footer-fg);
+  }
+</style>

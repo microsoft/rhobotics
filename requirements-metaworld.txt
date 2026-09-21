@@ -1,0 +1,9 @@
+# MetaWorld simulator dependencies, on top of the base install (`pip install -e .`).
+#
+# MetaWorld ships the scripted expert policies used by
+# environments/metaworld/generate_demos.py, so the example needs no downloaded dataset.
+metaworld==3.0.0
+
+# metaworld pulls mujoco itself; pinned here so the version is explicit and matches
+# what the env wrapper was validated against.
+mujoco==3.13.0

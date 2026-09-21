@@ -1,0 +1,29 @@
+# Evaluate a MetaWorld checkpoint. Works for both the finetuned policy and the
+# same policy with a folded noise policy -- folding changes the checkpoint, not
+# how it is evaluated.
+pretrained_checkpoint: null
+
+# Re-plan every n_action_steps. The policy is trained to produce a 16-step chunk
+# but to hand over after 8, and executing all 16 open-loop measurably costs
+# success on MetaWorld.
+execution_horizon: 8
+
+eval_num_episodes: 30
+record_videos: false
+output_dir: null
+device: "cuda"
+
+environment:
+  type: "metaworld"
+  task_id: 0  # assembly-v3; see mt50_tasks.json
+  episodes_per_task: 30
+  resolution: 256
+  camera_name: "corner3"
+  max_episode_steps: 200
+  n_envs: 1
+
+policy:
+  type: "rho"
+
+seed: 42
+policy_seed: 42

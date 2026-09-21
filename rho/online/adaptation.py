@@ -251,14 +251,22 @@ class OnlineAdapter:
         return float(loss.item())
 
     def save_head(self, path) -> None:
-        """Write ``{state_dict, cfg}`` for ``scripts/fold_noise_policy.py --head``."""
+        """Write ``{state_dict, cfg}`` for ``scripts/fold_noise_policy.py --head``.
+
+        The state_dict is the student's own, unprefixed: fold_noise_policy.py adds the
+        ``head.`` submodule prefix itself. Prefixing here too yields ``head.head.*`` and the
+        folded checkpoint will not load.
+        """
         head = self.noise_policy.head
+        mlp = head.head.net
         torch.save(
             {
-                "state_dict": {f"head.{k}": v for k, v in head.state_dict().items()},
+                "state_dict": dict(head.state_dict()),
                 "cfg": {
-                    "emb_dim": head.head.net[0].in_features - head.state_dim,
+                    "emb_dim": mlp[0].in_features - head.state_dim,
                     "state_dim": head.state_dim,
+                    # every Linear width except the output layer
+                    "hidden_dims": [m.out_features for m in mlp if isinstance(m, torch.nn.Linear)][:-1],
                     "magnitude": head.head.magnitude,
                     "noise_steps": head.noise_steps,
                     "noise_dim": head.noise_dim,

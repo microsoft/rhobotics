@@ -33,8 +33,8 @@
   --footer-fg: #616161;
 
   /* Layout */
-  --content-width: 820px;
-  --wide-width: 1080px;
+  --content-width: 900px;
+  --wide-width: 1240px;
 }
 
 /* ----------------------------- Reset-ish ------------------------------- */
@@ -54,7 +54,7 @@ body {
   background: var(--page-bg);
   color: var(--text);
   font-family: var(--font-sans);
-  font-size: 18px;
+  font-size: 17px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -107,6 +107,10 @@ a:focus {
 img {
   max-width: 100%;
   height: auto;
+}
+
+::selection {
+  background: #cce8f8;
 }
 
 code {

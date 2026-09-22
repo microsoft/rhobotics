@@ -125,22 +125,18 @@ config change rather than a second checkpoint.
 
 ## Results
 
-Measured end to end on `assembly-v3`, 30 evaluation episodes per number:
+Measured end to end on `assembly-v3`. Each number is 30 evaluation episodes, pooled across
+three adaptation runs:
 
 | stage | success rate |
 |---|---|
 | base policy, 1,000 finetune steps | 0.53 |
-| after online adaptation | **0.80** |
+| after online adaptation, 30 rollouts | **0.70** |
 
 The adaptation used **30 environment rollouts** — 10 expert seed episodes and 20 adaptation
 episodes, roughly five minutes of interaction. No policy weight changed; the entire difference
 is which noise the sampler starts from.
 
-Two things to expect when reading your own run:
-
-Success is measured over 30 episodes, so a single number carries roughly +/-0.09 of sampling
-noise. The result lands in a band rather than on 0.80 exactly.
-
-Training longer does not help on this task. Success peaks around 20 adaptation episodes and
-declines with further training even as the BC loss keeps falling, which is why the default
-stops there.
+Individual evaluations are noisy. Across 15 evaluations spanning three runs the success rate
+ranged from 0.57 to 0.80, averaging 0.66. A single 30-episode number carries roughly +/-0.09 of
+sampling noise, so treat one run as an estimate of a band, not a point.

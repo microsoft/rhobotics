@@ -1,0 +1,252 @@
+{
+ "0": {
+  "env_name": "assembly-v3",
+  "prompt": "Pick up a nut and place it onto a peg",
+  "policy": "SawyerAssemblyV3Policy"
+ },
+ "1": {
+  "env_name": "basketball-v3",
+  "prompt": "Dunk the basketball into the basket",
+  "policy": "SawyerBasketballV3Policy"
+ },
+ "2": {
+  "env_name": "bin-picking-v3",
+  "prompt": "Grasp the puck from one bin and place it into another bin",
+  "policy": "SawyerBinPickingV3Policy"
+ },
+ "3": {
+  "env_name": "box-close-v3",
+  "prompt": "Grasp the cover and close the box with it",
+  "policy": "SawyerBoxCloseV3Policy"
+ },
+ "4": {
+  "env_name": "button-press-topdown-v3",
+  "prompt": "Press a button from the top",
+  "policy": "SawyerButtonPressTopdownV3Policy"
+ },
+ "5": {
+  "env_name": "button-press-topdown-wall-v3",
+  "prompt": "Bypass a wall and press a button from the top",
+  "policy": "SawyerButtonPressTopdownWallV3Policy"
+ },
+ "6": {
+  "env_name": "button-press-v3",
+  "prompt": "Press a button",
+  "policy": "SawyerButtonPressV3Policy"
+ },
+ "7": {
+  "env_name": "button-press-wall-v3",
+  "prompt": "Bypass a wall and press a button",
+  "policy": "SawyerButtonPressWallV3Policy"
+ },
+ "8": {
+  "env_name": "coffee-button-v3",
+  "prompt": "Push a button on the coffee machine",
+  "policy": "SawyerCoffeeButtonV3Policy"
+ },
+ "9": {
+  "env_name": "coffee-pull-v3",
+  "prompt": "Pull a mug from a coffee machine",
+  "policy": "SawyerCoffeePullV3Policy"
+ },
+ "10": {
+  "env_name": "coffee-push-v3",
+  "prompt": "Push a mug under a coffee machine",
+  "policy": "SawyerCoffeePushV3Policy"
+ },
+ "11": {
+  "env_name": "dial-turn-v3",
+  "prompt": "Rotate a dial 180 degrees",
+  "policy": "SawyerDialTurnV3Policy"
+ },
+ "12": {
+  "env_name": "disassemble-v3",
+  "prompt": "Pick a nut out of a peg",
+  "policy": "SawyerDisassembleV3Policy"
+ },
+ "13": {
+  "env_name": "door-close-v3",
+  "prompt": "Close a door with a revolving joint",
+  "policy": "SawyerDoorCloseV3Policy"
+ },
+ "14": {
+  "env_name": "door-lock-v3",
+  "prompt": "Lock the door by rotating the lock clockwise",
+  "policy": "SawyerDoorLockV3Policy"
+ },
+ "15": {
+  "env_name": "door-open-v3",
+  "prompt": "Open a door with a revolving joint",
+  "policy": "SawyerDoorOpenV3Policy"
+ },
+ "16": {
+  "env_name": "door-unlock-v3",
+  "prompt": "Unlock the door by rotating the lock counter-clockwise",
+  "policy": "SawyerDoorUnlockV3Policy"
+ },
+ "17": {
+  "env_name": "hand-insert-v3",
+  "prompt": "Insert the gripper into a hole",
+  "policy": "SawyerHandInsertV3Policy"
+ },
+ "18": {
+  "env_name": "drawer-close-v3",
+  "prompt": "Push and close a drawer",
+  "policy": "SawyerDrawerCloseV3Policy"
+ },
+ "19": {
+  "env_name": "drawer-open-v3",
+  "prompt": "Open a drawer",
+  "policy": "SawyerDrawerOpenV3Policy"
+ },
+ "20": {
+  "env_name": "faucet-open-v3",
+  "prompt": "Rotate the faucet counter-clockwise",
+  "policy": "SawyerFaucetOpenV3Policy"
+ },
+ "21": {
+  "env_name": "faucet-close-v3",
+  "prompt": "Rotate the faucet clockwise",
+  "policy": "SawyerFaucetCloseV3Policy"
+ },
+ "22": {
+  "env_name": "hammer-v3",
+  "prompt": "Hammer a screw on the wall",
+  "policy": "SawyerHammerV3Policy"
+ },
+ "23": {
+  "env_name": "handle-press-side-v3",
+  "prompt": "Press a handle down sideways",
+  "policy": "SawyerHandlePressSideV3Policy"
+ },
+ "24": {
+  "env_name": "handle-press-v3",
+  "prompt": "Press a handle down",
+  "policy": "SawyerHandlePressV3Policy"
+ },
+ "25": {
+  "env_name": "handle-pull-side-v3",
+  "prompt": "Pull a handle up sideways",
+  "policy": "SawyerHandlePullSideV3Policy"
+ },
+ "26": {
+  "env_name": "handle-pull-v3",
+  "prompt": "Pull a handle up",
+  "policy": "SawyerHandlePullV3Policy"
+ },
+ "27": {
+  "env_name": "lever-pull-v3",
+  "prompt": "Pull a lever down 90 degrees",
+  "policy": "SawyerLeverPullV3Policy"
+ },
+ "28": {
+  "env_name": "pick-place-wall-v3",
+  "prompt": "Pick a puck, bypass a wall and place the puck",
+  "policy": "SawyerPickPlaceWallV3Policy"
+ },
+ "29": {
+  "env_name": "pick-out-of-hole-v3",
+  "prompt": "Pick up a puck from a hole",
+  "policy": "SawyerPickOutOfHoleV3Policy"
+ },
+ "30": {
+  "env_name": "pick-place-v3",
+  "prompt": "Pick and place a puck to a goal",
+  "policy": "SawyerPickPlaceV3Policy"
+ },
+ "31": {
+  "env_name": "plate-slide-v3",
+  "prompt": "Slide a plate into a cabinet",
+  "policy": "SawyerPlateSlideV3Policy"
+ },
+ "32": {
+  "env_name": "plate-slide-side-v3",
+  "prompt": "Slide a plate into a cabinet sideways",
+  "policy": "SawyerPlateSlideSideV3Policy"
+ },
+ "33": {
+  "env_name": "plate-slide-back-v3",
+  "prompt": "Get a plate from the cabinet",
+  "policy": "SawyerPlateSlideBackV3Policy"
+ },
+ "34": {
+  "env_name": "plate-slide-back-side-v3",
+  "prompt": "Get a plate from the cabinet sideways",
+  "policy": "SawyerPlateSlideBackSideV3Policy"
+ },
+ "35": {
+  "env_name": "peg-insert-side-v3",
+  "prompt": "Insert a peg sideways",
+  "policy": "SawyerPegInsertionSideV3Policy"
+ },
+ "36": {
+  "env_name": "peg-unplug-side-v3",
+  "prompt": "Unplug a peg sideways",
+  "policy": "SawyerPegUnplugSideV3Policy"
+ },
+ "37": {
+  "env_name": "soccer-v3",
+  "prompt": "Kick a soccer into the goal",
+  "policy": "SawyerSoccerV3Policy"
+ },
+ "38": {
+  "env_name": "stick-push-v3",
+  "prompt": "Grasp a stick and push a box using the stick",
+  "policy": "SawyerStickPushV3Policy"
+ },
+ "39": {
+  "env_name": "stick-pull-v3",
+  "prompt": "Grasp a stick and pull a box with the stick",
+  "policy": "SawyerStickPullV3Policy"
+ },
+ "40": {
+  "env_name": "push-v3",
+  "prompt": "Push the puck to a goal",
+  "policy": "SawyerPushV3Policy"
+ },
+ "41": {
+  "env_name": "push-wall-v3",
+  "prompt": "Bypass a wall and push a puck to a goal",
+  "policy": "SawyerPushWallV3Policy"
+ },
+ "42": {
+  "env_name": "reach-v3",
+  "prompt": "Reach a goal position",
+  "policy": "SawyerReachV3Policy"
+ },
+ "43": {
+  "env_name": "reach-wall-v3",
+  "prompt": "Bypass a wall and reach a goal",
+  "policy": "SawyerReachWallV3Policy"
+ },
+ "44": {
+  "env_name": "shelf-place-v3",
+  "prompt": "Pick and place a puck onto a shelf",
+  "policy": "SawyerShelfPlaceV3Policy"
+ },
+ "45": {
+  "env_name": "sweep-into-v3",
+  "prompt": "Sweep a puck into a hole",
+  "policy": "SawyerSweepIntoV3Policy"
+ },
+ "46": {
+  "env_name": "sweep-v3",
+  "prompt": "Sweep a puck off the table",
+  "policy": "SawyerSweepV3Policy"
+ },
+ "47": {
+  "env_name": "window-open-v3",
+  "prompt": "Push and open a window",
+  "policy": "SawyerWindowOpenV3Policy"
+ },
+ "48": {
+  "env_name": "window-close-v3",
+  "prompt": "Push and close a window",
+  "policy": "SawyerWindowCloseV3Policy"
+ },
+ "49": {
+  "env_name": "push-back-v3",
+  "prompt": "Push a puck back to a target behind it",
+  "policy": "SawyerPushBackV3Policy"
+ }
+}

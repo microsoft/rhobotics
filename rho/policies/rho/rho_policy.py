@@ -261,6 +261,23 @@ class RhoPolicy(PreTrainedPolicy):
                     "checkpoint runs with Gaussian noise (standard evaluation).",
                     len(dropped),
                 )
+        # The mirror case: `noise_policy` is configured but the checkpoint predates it, which is
+        # how online adaptation starts -- a freshly initialised noise policy on an existing
+        # policy. Seed those entries from the live module so the strict load still holds
+        # everything else to account.
+        flow_model = getattr(getattr(self, "model", None), "flow_model", None)
+        if getattr(flow_model, "noise_policy", None) is not None and not any(
+            ".noise_policy." in k for k in state_dict
+        ):
+            own = {k: v for k, v in self.state_dict().items() if ".noise_policy." in k}
+            state_dict = {**state_dict, **own}
+            logger.info(
+                "Checkpoint carries no noise policy; initialising %d tensors for the configured "
+                "%r sampler.",
+                len(own),
+                getattr(flow_model.config, "noise_policy", None),
+            )
+
         result = torch.nn.Module.load_state_dict(self, state_dict, strict=strict, assign=assign)
         self._has_uninitialized_backbone = False
         return result

@@ -126,3 +126,34 @@ class VLMResidualNoisePolicy(nn.Module):
         with torch.no_grad():
             z = self.base(emb, s8)
         return (z + self.head(emb, s8)) * self.scale
+
+
+@register_noise_policy("vlm_direct")
+class VLMNoisePolicy(nn.Module):
+    """noise = head(obs). A single network, no frozen anchor.
+
+    This is what online adaptation trains from scratch on a new task: there is no
+    prior noise policy to anchor on, so the residual form has nothing to put in its
+    base. Where a base does exist -- a checkpoint already finetuned with a noise
+    policy -- prefer ``vlm_residual``, whose frozen base keeps the output sane on
+    observations the correction data never covered.
+    """
+
+    def __init__(
+        self,
+        emb_dim=2048,
+        state_dim=8,
+        hidden_dims=(1024, 1024, 1024),
+        magnitude=3.0,
+        noise_steps=16,
+        noise_dim=32,
+        scale=1.0,
+    ):
+        super().__init__()
+        self.head = _VLMNoiseStudent(emb_dim, state_dim, hidden_dims, magnitude, noise_steps, noise_dim)
+        self.scale = scale
+
+    def forward(self, embed, mask, state, shape):
+        emb = masked_mean(embed, mask).float()
+        s = state[:, -1] if state.ndim == 3 else state
+        return self.head(emb, s.float()[:, : self.head.state_dim]) * self.scale

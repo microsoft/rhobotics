@@ -160,22 +160,30 @@ const embodiments = [
       <p class="hero__stats-note">
         FR3 Duo task success vs π0.5 46.7% · GR00T&nbsp;N1.7 50.0% — 30 rollouts per task, per model.
       </p>
-      <div class="hero__media" aria-label="Rho manipulation examples">
+      <div class="hero__media hero__media--sizzle" aria-label="Rho manipulation examples">
         <figure>
-          <video
-            src={withBase("assets/fr3-charger-move.mp4")}
-            aria-label="Rho controlling the FR3 Duo to move a charger"
-            controls autoplay muted loop playsinline preload="metadata"
-          ></video>
-          <figcaption>Language-conditioned charger manipulation.</figcaption>
+          <img
+            src={withBase("assets/fr3-duo-sizzle.webp")}
+            alt="FR3 Duo highlight reel"
+            loading="lazy"
+          />
+          <figcaption>FR3 Duo · precision bimanual manipulation</figcaption>
         </figure>
         <figure>
-          <video
-            src={withBase("assets/yambox-repositioning.mp4")}
-            aria-label="Rho rotating and repositioning a panel"
-            controls autoplay muted loop playsinline preload="metadata"
-          ></video>
-          <figcaption>Bimanual panel rotation and repositioning.</figcaption>
+          <img
+            src={withBase("assets/ur5e-sizzle.webp")}
+            alt="UR5e AI Trainer highlight reel"
+            loading="lazy"
+          />
+          <figcaption>UR5e AI Trainer · pick-and-place workflows</figcaption>
+        </figure>
+        <figure>
+          <img
+            src={withBase("assets/yambox-sizzle.webp")}
+            alt="YAMBox highlight reel"
+            loading="lazy"
+          />
+          <figcaption>YAMBox · bimanual panel and control-board tasks</figcaption>
         </figure>
       </div>
     </div>
@@ -1013,6 +1021,10 @@ const embodiments = [
     max-width: 1080px;
     margin: 42px auto 0;
   }
+  .hero__media--sizzle {
+    grid-template-columns: repeat(3, 1fr);
+    max-width: 1240px;
+  }
   .hero__media figure { margin: 0; }
   .hero__media img,
   .hero__media video {
@@ -1022,6 +1034,10 @@ const embodiments = [
     object-fit: cover;
     border-radius: 12px;
     box-shadow: 0 18px 50px rgba(16, 34, 52, 0.16);
+  }
+  .hero__media--sizzle img,
+  .hero__media--sizzle video {
+    aspect-ratio: 16 / 9;
   }
   .hero__media figcaption {
     margin-top: 9px;
@@ -1412,6 +1428,9 @@ const embodiments = [
   .diagnostic-card__val { font-size: 1.6rem; font-weight: 700; }
   .diagnostic-card__lbl { font-weight: 600; }
   .diagnostic-card__sub { color: var(--text-muted); font-size: 0.82rem; }
+  @media (max-width: 900px) {
+    .hero__media--sizzle { grid-template-columns: 1fr; max-width: 720px; }
+  }
   @media (max-width: 720px) {
     .diagnostic-grid { grid-template-columns: 1fr; }
   }

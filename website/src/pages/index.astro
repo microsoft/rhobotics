@@ -148,12 +148,18 @@ const embodiments = [
             {resource.label}<span aria-hidden="true">↗</span>
           </a>
         ))}
+        <span class="button button--soon" role="link" aria-disabled="true" title="arXiv paper coming soon">
+          Paper (arXiv) — coming soon
+        </span>
       </div>
       <dl class="hero__stats">
         <div><dt>LIBERO average</dt><dd>97.9%</dd></div>
         <div><dt>RoboEval average</dt><dd>73.4%</dd></div>
-        <div><dt>RoboTwin average</dt><dd>62.6%</dd></div>
+        <div><dt>FR3 Duo physical success</dt><dd>80.0%</dd></div>
       </dl>
+      <p class="hero__stats-note">
+        FR3 Duo task success vs π0.5 46.7% · GR00T&nbsp;N1.7 50.0% — 30 rollouts per task, per model.
+      </p>
       <div class="hero__media" aria-label="Rho manipulation examples">
         <figure>
           <img
@@ -336,6 +342,34 @@ const embodiments = [
             </tbody>
           </table>
         </div>
+
+        <aside class="callout" id="latent-adaptation" aria-label="Latent-space adaptation compatibility">
+          <p class="section-kicker">Deployment adaptation</p>
+          <h3>Natively compatible with latent-space adaptation</h3>
+          <p>
+            Because Rho generates continuous actions with a flow-matching expert, its trajectory
+            distribution can be steered or refined in the initial-noise latent space without
+            modifying the generator weights. Rho's released checkpoints work with two independent
+            recipes:
+          </p>
+          <ul>
+            <li>
+              <strong>FlowDAgger</strong> — interactive imitation learning from corrective
+              demonstrations; the FlowDAgger project reports results on Rho.
+              <a href="https://microsoft.github.io/FlowDAgger/" target="_blank" rel="noopener noreferrer">Project page ↗</a>
+            </li>
+            <li>
+              <strong>DSRL</strong> — diffusion steering for reinforcement-learning-style latent
+              adaptation from reward signals.
+              <a href="https://diffusion-steering.github.io/" target="_blank" rel="noopener noreferrer">Project page ↗</a>
+            </li>
+          </ul>
+          <p class="note">
+            Usage and example configurations are in the
+            <a href="https://github.com/microsoft/rhobotics" target="_blank" rel="noopener noreferrer">rhobotics codebase</a>.
+            Empirical adaptation results will follow in a dedicated post.
+          </p>
+        </aside>
       </div>
     </section>
 
@@ -354,6 +388,7 @@ const embodiments = [
             <article class="embodiment-card">
               <img src={withBase(embodiment.image)} alt={embodiment.name} loading="lazy" />
               <div>
+                <span class="badge" title="Two arms × (x, y, z end-effector position + 6D rotation + gripper) = 20 continuous action dimensions">Dual-arm · 20 action dims</span>
                 <h3>{embodiment.name}</h3>
                 <a href={embodiment.checkpoint}>Checkpoint ↗</a>
               </div>
@@ -387,6 +422,10 @@ const embodiments = [
           <p>
             Across plug insertion, tumbler manipulation, and test-tube racking,
             Rho achieves 80.0% success and 88.7% mean task progress.
+          </p>
+          <p class="note">
+            Success rate credits only fully completed task sequences; mean task
+            progress credits the fraction of each task's steps that were completed.
           </p>
           <a class="text-link" href="https://huggingface.co/microsoft/rho-fr3-duo">
             Download rho-fr3-duo ↗
@@ -519,7 +558,7 @@ const embodiments = [
             <p>
               Fine-tuned for 40,000 steps with a global batch size of 128, then
               improved with a modified noise policy using
-              <a href="https://github.com/microsoft/FlowDAgger">FlowDAgger</a>.
+              <a href="#latent-adaptation">FlowDAgger</a>.
             </p>
           </div>
           <a class="text-link" href="https://huggingface.co/microsoft/rho-libero">
@@ -557,6 +596,28 @@ const embodiments = [
         <figure class="figure figure--wide">
           <img src={withBase("assets/fig-roboeval.png")} alt="RoboEval success rate by task and model" loading="lazy" />
         </figure>
+        <div class="diagnostic-grid" aria-label="RoboEval behavioral and safety diagnostics">
+          <div class="diagnostic-card">
+            <span class="diagnostic-card__val">13× fewer</span>
+            <span class="diagnostic-card__lbl">Self-collisions</span>
+            <span class="diagnostic-card__sub">0.06 vs 0.79 per episode (MolmoAct2)</span>
+          </div>
+          <div class="diagnostic-card">
+            <span class="diagnostic-card__val">1.77 m</span>
+            <span class="diagnostic-card__lbl">Cartesian path length</span>
+            <span class="diagnostic-card__sub">vs 1.96 m — more direct motions</span>
+          </div>
+          <div class="diagnostic-card">
+            <span class="diagnostic-card__val">0.07 m</span>
+            <span class="diagnostic-card__lbl">Bimanual gripper height Δ</span>
+            <span class="diagnostic-card__sub">vs 0.09 m — tighter arm coordination</span>
+          </div>
+        </div>
+        <p class="note">
+          Behavioral and safety metrics on the combined RoboEval task variations
+          (report Table 12). Baseline figures are published RoboEval-protocol point
+          estimates.
+        </p>
       </article>
 
       <article class="result-block">
@@ -638,6 +699,39 @@ const embodiments = [
           its expert-only runs set
           <code>--policy.train_action_expert_only=true</code>.
         </p>
+
+        <div class="efficiency-study">
+          <h3>Inference latency and deployment footprint</h3>
+          <p>
+            Rho predicts a 50-step action chunk per forward solve — the longest horizon
+            among the compared models — so each inference emits far more future control
+            than peers (π0.5 18, GR00T 40, MolmoAct2 16). The VLM visual context is encoded
+            once and reused across all 10 flow-integration steps, sustaining a >10 Hz
+            replanning loop that is real-time-chunking compatible.
+          </p>
+          <div class="table-wrap">
+            <table class="results-table">
+              <thead>
+                <tr><th>Framework</th><th>Flow steps</th><th>Horizon</th><th>Latency (bs=1)</th><th>bs=4</th><th>bs=8</th><th>VRAM (bs=1)</th><th>VRAM (bs=8)</th></tr>
+              </thead>
+              <tbody>
+                <tr><th scope="row">OpenPI π0.5</th><td>10</td><td>18</td><td>44.8 ms (22 Hz)</td><td>112 ms</td><td>201 ms</td><td>7.4 GB</td><td>8.0 GB</td></tr>
+                <tr><th scope="row">GR00T N1.7</th><td>4</td><td>40</td><td>48.2 ms (21 Hz)</td><td>66 ms</td><td>112 ms</td><td>7.1 GB</td><td>8.4 GB</td></tr>
+                <tr class="highlight"><th scope="row">Rho</th><td>10</td><td>50</td><td>83.9 ms (12 Hz)</td><td>126 ms</td><td>186 ms</td><td>11.0 GB</td><td>12.5 GB</td></tr>
+                <tr><th scope="row">MolmoAct2</th><td>10</td><td>16</td><td>110.4 ms (9 Hz)</td><td>205 ms</td><td>357 ms</td><td>13.0 GB</td><td>15.5 GB</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="note">
+            Median GPU model-forward time and peak VRAM for one action-chunk prediction,
+            measured in our harness on an NVIDIA RTX PRO 6000 (Blackwell) in bfloat16, each
+            model at its native default flow/denoising steps. These are model-forward times;
+            end-to-end robot-loop latency adds framework-specific CPU preprocessing. Latency
+            and memory are architecture-driven and are not a model-quality benchmark. At batch
+            size 8, Rho (186 ms) is faster than OpenPI π0.5 (201 ms) and roughly 2× faster than
+            MolmoAct2 (357 ms); its 11–12.5 GB footprint fits a single 24 GB GPU.
+          </p>
+        </div>
 
         <div class="efficiency-study">
           <h3>Multiple flow samples improve training efficiency</h3>
@@ -1117,6 +1211,56 @@ const embodiments = [
     padding: 18px 20px;
     border-left: 4px solid var(--link);
     background: #eef6fc;
+  }
+  .callout h3 { margin-top: 6px; }
+  .callout ul { margin: 12px 0 0; padding-left: 20px; }
+  .callout li { margin-bottom: 8px; }
+  .button--soon {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px dashed var(--rule);
+    cursor: default;
+  }
+  .button--soon:hover,
+  .button--soon:focus { background: transparent; color: var(--text-muted); }
+  .hero__stats-note {
+    max-width: 900px;
+    margin: 12px auto 0;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    text-align: center;
+  }
+  .badge {
+    display: inline-block;
+    margin-bottom: 8px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: rgba(120, 199, 255, 0.16);
+    color: #78c7ff;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+  }
+  .diagnostic-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-top: 24px;
+  }
+  .diagnostic-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 18px;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: #fafafa;
+  }
+  .diagnostic-card__val { font-size: 1.6rem; font-weight: 700; }
+  .diagnostic-card__lbl { font-weight: 600; }
+  .diagnostic-card__sub { color: var(--text-muted); font-size: 0.82rem; }
+  @media (max-width: 720px) {
+    .diagnostic-grid { grid-template-columns: 1fr; }
   }
   .embodiment-grid {
     display: grid;

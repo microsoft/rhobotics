@@ -9,10 +9,9 @@ scripted expert stands in for the human operator, so the whole loop runs unatten
         --checkpoint outputs/training_metaworld/checkpoints/checkpoint_step_0005000 \
         --task assembly-v3 --out outputs/online_metaworld
 
-Writes ``noise_head.pt``, which ``scripts/fold_noise_policy.py`` folds into the checkpoint:
-
-    python scripts/fold_noise_policy.py \
-        --checkpoint <policy.pt> --head <out>/noise_head.pt --out policy_with_sampler.pt
+The noise policy is a submodule of the flow model, so it trains in place and is written by
+the normal checkpoint path. The result is an ordinary checkpoint that evaluates like any
+other -- there is nothing to fold in afterwards.
 """
 
 from __future__ import annotations
@@ -44,7 +43,7 @@ from rho.online import (  # noqa: E402
     summarize_inversions,
 )
 from rho.policies import make_policy  # noqa: E402
-from rho.policies.rho.noise_policy import build_noise_policy  # noqa: E402
+from rho.checkpoints import save_checkpoint_bundle  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
                     datefmt="%H:%M:%S", force=True)
@@ -128,7 +127,9 @@ def main() -> None:
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--task", default="assembly-v3")
     p.add_argument("--out", required=True)
-    p.add_argument("--max_steps", type=int, default=20_000, help="BC gradient steps")
+    # 2000 BC steps = 20 adaptation episodes; with 10 seed episodes that is 30 rollouts.
+    # Success peaks there on assembly-v3 and declines with further training.
+    p.add_argument("--max_steps", type=int, default=2000, help="BC gradient steps")
     p.add_argument("--bc_steps_per_episode", type=int, default=100)
     p.add_argument("--bc_batch_size", type=int, default=256)
     p.add_argument("--bc_lr", type=float, default=1e-4)
@@ -141,7 +142,7 @@ def main() -> None:
     p.add_argument("--beta_decay_episodes", type=int, default=2000)
     p.add_argument("--takeover_max", type=int, default=75)
     p.add_argument("--eval_episodes", type=int, default=30)
-    p.add_argument("--eval_interval", type=int, default=2000)
+    p.add_argument("--eval_interval", type=int, default=1000)
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
 
@@ -160,28 +161,29 @@ def main() -> None:
     )
 
     pcfg, dcfg = load_configs_from_checkpoint(args.checkpoint)
+    # Ask for a noise policy the finetuned checkpoint does not have yet: the flow model builds
+    # it as a submodule, load_state_dict initialises it, and it trains in place.
+    pcfg.noise_policy = "vlm_direct"
+    pcfg.noise_policy_kwargs = dict(
+        emb_dim=pcfg.embed_dim,
+        state_dim=4,  # MetaWorld: hand xyz + gripper
+        magnitude=args.magnitude,
+        noise_steps=pcfg.chunk_size,
+        noise_dim=pcfg.max_action_dim,
+    )
     policy = make_policy(pcfg)
     policy.load_from_pretrained(args.checkpoint)
     policy.eval()
     pi = PolicyInterface(PolicyInterfaceConfig(data_config=dcfg, policy=policy, device="cuda"))
-
-    flow_model = policy.model.flow_model
-    noise_policy = build_noise_policy(
-        "vlm_direct",
-        emb_dim=flow_model.config.embed_dim,
-        state_dim=4,  # MetaWorld: hand xyz + gripper
-        magnitude=args.magnitude,
-        noise_steps=flow_model.config.chunk_size,
-        noise_dim=flow_model.config.max_action_dim,
-    )
-    adapter = OnlineAdapter(pi, policy, noise_policy, cfg)
+    adapter = OnlineAdapter(pi, policy, cfg)
     logger.info(f"task {args.task} (id {task_id}) | chunk {adapter.chunk} "
                 f"noise_dim {adapter.noise_dim} | magnitude {args.magnitude}")
 
-    env = MetaworldEnvWrapper(MetaworldEnvConfig(task_id=task_id,
-                                                 max_episode_steps=args.max_timesteps))
     eval_env = MetaworldEnvWrapper(MetaworldEnvConfig(task_id=task_id,
                                                       max_episode_steps=args.max_timesteps))
+
+    env = MetaworldEnvWrapper(MetaworldEnvConfig(task_id=task_id,
+                                                 max_episode_steps=args.max_timesteps))
     expert = env.make_expert()
     schedule = InterventionSchedule(
         beta_start=args.beta_start, beta_end=args.beta_end,
@@ -205,6 +207,10 @@ def main() -> None:
         logger.info(f"  seed ep {e + 1}/{args.seed_expert_episodes}: success={ok} "
                     f"chunks {len(s)}/{len(d)} kept  buffer={len(buf)}")
     schedule.force_immediate = False
+
+    stats = adapter.calibrate_embedding_stats(buf)
+    logger.info(f"[calibration] embedding stats from {stats['n']} chunks: "
+                f"mean|mu|={stats['emb_mean_abs']:.2f} mean(sigma)={stats['emb_std_mean']:.2f}")
 
     if seed_diags:
         d = summarize_inversions(seed_diags)
@@ -248,11 +254,14 @@ def main() -> None:
                         "loss": float(np.mean(losses)), "buffer": len(buf),
                         "inversion": summarize_inversions(list(window))})
             (out / "eval_log.json").write_text(json.dumps(log, indent=1))
-            adapter.save_head(out / "noise_head.pt")
 
+    ckpt_dir = out / f"checkpoint_step_{step:07d}"
+    save_checkpoint_bundle(policy, ckpt_dir, step=step, data_config=dcfg)
     logger.info(f"done: {episode} episodes, {step} BC steps, {(time.time() - t0) / 60:.1f} min")
-    logger.info(f"fold with:  python scripts/fold_noise_policy.py --checkpoint <policy.pt> "
-                f"--head {out / 'noise_head.pt'} --out policy_with_sampler.pt")
+    logger.info(f"wrote {ckpt_dir}")
+    logger.info(f"evaluate with:  python environments/metaworld/eval.py "
+                f"--config_path=environments/metaworld/configs/eval_metaworld_rho.yaml "
+                f"--pretrained_checkpoint={ckpt_dir}")
 
 
 if __name__ == "__main__":

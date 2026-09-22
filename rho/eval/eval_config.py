@@ -484,7 +484,8 @@ class EvalConfig:
     dataset: DataConfig = field(default_factory=DataConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     policy_interface_cfg: PolicyInterfaceConfig = field(default_factory=PolicyInterfaceConfig)
-    seed: int = 12345  # Random seed for reproducibility
+    seed: int = 12345  # Base seed for environment and scenario resets
+    policy_seed: int | None = None  # Independent policy RNG seed; defaults to seed
 
     eval_mode: str = "standard"
     inference_delay: int = 6  # number of action steps it takes to inference

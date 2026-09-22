@@ -3,11 +3,6 @@
 # how it is evaluated.
 pretrained_checkpoint: null
 
-# Re-plan every n_action_steps. The policy is trained to produce a 16-step chunk
-# but to hand over after 8, and executing all 16 open-loop measurably costs
-# success on MetaWorld.
-execution_horizon: 8
-
 eval_num_episodes: 30
 record_videos: false
 output_dir: null

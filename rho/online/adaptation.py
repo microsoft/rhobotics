@@ -2,8 +2,9 @@
 
 The policy is frozen. A small noise policy learns to predict the initial noise the flow
 sampler integrates, which is enough to change what the policy does without touching a single
-policy weight -- so the prior is preserved exactly, and the result folds back into one
-checkpoint (``scripts/fold_noise_policy.py``).
+policy weight -- so the prior is preserved exactly. The noise policy is a submodule of the
+flow model, so it trains in place and is saved by the normal checkpoint path: the result is an
+ordinary checkpoint that evaluates like any other.
 
 The loop, per episode:
 
@@ -149,17 +150,28 @@ def summarize_inversions(diags: list[dict]) -> dict:
 class OnlineAdapter:
     """Frozen policy + the noise policy being trained over it."""
 
-    def __init__(self, policy_interface, policy, noise_policy, cfg: AdaptationConfig, device="cuda"):
+    def __init__(self, policy_interface, policy, cfg: AdaptationConfig, device="cuda"):
         self.pi = policy_interface
         self.policy = policy
         self.flow_model = getattr(getattr(policy, "model", policy), "flow_model", policy)
-        self.noise_policy = noise_policy.to(device)
         self.cfg = cfg
         self.device = device
         self.chunk = self.flow_model.config.chunk_size
         self.noise_dim = self.flow_model.config.max_action_dim
+
+        # The noise policy is the flow model's own submodule, so it trains in place and is
+        # saved by the normal checkpoint path -- nothing to fold in afterwards.
+        self.noise_policy = getattr(self.flow_model, "noise_policy", None)
+        if self.noise_policy is None:
+            raise ValueError(
+                "the policy has no noise_policy submodule; set config.noise_policy "
+                "(e.g. 'vlm_direct') before building the policy"
+            )
         for p in self.policy.parameters():
             p.requires_grad_(False)
+        for p in self.noise_policy.parameters():
+            p.requires_grad_(True)
+        self.noise_policy.train()
         self.opt = torch.optim.Adam(self.noise_policy.parameters(), lr=cfg.bc_lr)
 
     # -- observation plumbing -------------------------------------------------
@@ -224,7 +236,11 @@ class OnlineAdapter:
         )
         w_np = w.float().cpu().numpy()[0]
         a = np.abs(w_np)
-        bound = getattr(getattr(self.noise_policy, "head", None), "magnitude", None) or float("inf")
+        # magnitude lives on the student's MLP (noise_policy.head.head), not the student.
+        # Reaching only one level deep silently yields None -> inf -> "nothing is over bound".
+        bound = getattr(getattr(getattr(self.noise_policy, "head", None), "head", None),
+                        "magnitude", None)
+        bound = float("inf") if bound is None else float(bound)
         return w_np, {
             "rt": float(err.float().cpu().numpy().reshape(-1)[0]),
             "w_mean": float(a.mean()),
@@ -234,6 +250,27 @@ class OnlineAdapter:
         }
 
     # -- training -------------------------------------------------------------
+
+    def calibrate_embedding_stats(self, buf: NoiseTargetBuffer) -> dict:
+        """Set the noise policy's ``emb_mean`` / ``emb_std`` from collected embeddings.
+
+        ``_VLMNoiseStudent`` normalizes its input as ``(emb - emb_mean) / emb_std``, and those
+        buffers initialise to 0 and 1. Rho's prefix hidden states have a per-dimension scale far
+        from unit (std of order 10), so leaving them uncalibrated feeds the trunk inputs an order
+        of magnitude too large and the BC loss plateaus regardless of learning rate. Call this
+        once, after the seed episodes, before training.
+        """
+        head = self.noise_policy.head
+        emb_dim = head.head.net[0].in_features - head.state_dim
+        obs = np.stack(list(buf.obs))[:, :emb_dim]
+        mean = torch.from_numpy(obs.mean(0)).to(self.device)
+        std = torch.from_numpy(obs.std(0)).clamp(min=1e-3).to(self.device)
+        with torch.no_grad():
+            head.emb_mean.copy_(mean)
+            head.emb_std.copy_(std)
+        return {"n": int(obs.shape[0]),
+                "emb_mean_abs": float(mean.abs().mean()),
+                "emb_std_mean": float(std.mean())}
 
     def bc_step(self, buf: NoiseTargetBuffer) -> float:
         o, w = buf.sample(self.cfg.bc_batch_size, self.device)
@@ -249,28 +286,3 @@ class OnlineAdapter:
         loss.backward()
         self.opt.step()
         return float(loss.item())
-
-    def save_head(self, path) -> None:
-        """Write ``{state_dict, cfg}`` for ``scripts/fold_noise_policy.py --head``.
-
-        The state_dict is the student's own, unprefixed: fold_noise_policy.py adds the
-        ``head.`` submodule prefix itself. Prefixing here too yields ``head.head.*`` and the
-        folded checkpoint will not load.
-        """
-        head = self.noise_policy.head
-        mlp = head.head.net
-        torch.save(
-            {
-                "state_dict": dict(head.state_dict()),
-                "cfg": {
-                    "emb_dim": mlp[0].in_features - head.state_dim,
-                    "state_dim": head.state_dim,
-                    # every Linear width except the output layer
-                    "hidden_dims": [m.out_features for m in mlp if isinstance(m, torch.nn.Linear)][:-1],
-                    "magnitude": head.head.magnitude,
-                    "noise_steps": head.noise_steps,
-                    "noise_dim": head.noise_dim,
-                },
-            },
-            path,
-        )

@@ -1,8 +1,8 @@
 # Weakly finetune the Rho base policy on one MetaWorld task.
 #
 # Deliberately short: the point of the example is to leave headroom for online
-# adaptation to close, not to saturate the task with demonstrations. 5k steps on
-# ~100 demos lands assembly around 0.4-0.5 success.
+# adaptation to close, not to saturate the task. 1k steps on 100 demos lands
+# assembly-v3 around 0.6 success; 2k reaches 0.93 and 5k saturates at 1.00.
 wandb:
   project: "rho"
   tags: ["metaworld", "rho", "training"]
@@ -28,16 +28,16 @@ policy:
     type: "cosine_decay_with_warmup"
     peak_lr: 1e-4
     decay_lr: 5e-6
-    num_decay_steps: 5000
-    num_warmup_steps: 500
+    num_decay_steps: 1000
+    num_warmup_steps: 100
 
 batch_size: 32
 num_workers: 8
-steps: 5000
+steps: 1000
 
 output_dir: "outputs/training_metaworld"
-save_checkpoint_every: 1000
-keep_checkpoint_interval: 1000
+save_checkpoint_every: 500
+keep_checkpoint_interval: 500
 logging_interval: 100
 mixed_precision: "bf16"
 gradient_accumulation_steps: 1

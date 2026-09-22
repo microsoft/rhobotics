@@ -1,0 +1,72 @@
+---
+// Top banner / masthead — modeled on the tall dark "Microsoft Research Blog"
+// band on the MSR blog. The wordmark text is a placeholder; the four-square
+// Microsoft logo and the dark band are preserved. (Nav links removed.)
+import { withBase } from "../lib/url";
+---
+
+<header class="ribbon">
+  <div class="ribbon__inner">
+    <a class="ribbon__brand" href={withBase()} aria-label="Home">
+      <!-- Microsoft four-square logo -->
+      <svg
+        class="ribbon__logo"
+        width="30"
+        height="30"
+        viewBox="0 0 23 23"
+        aria-hidden="true"
+        focusable="false"
+      >
+        <rect x="1" y="1" width="10" height="10" fill="#F25022" />
+        <rect x="12" y="1" width="10" height="10" fill="#7FBA00" />
+        <rect x="1" y="12" width="10" height="10" fill="#00A4EF" />
+        <rect x="12" y="12" width="10" height="10" fill="#FFB900" />
+      </svg>
+      <span class="ribbon__wordmark">Microsoft Research</span>
+    </a>
+  </div>
+</header>
+
+<style>
+  .ribbon {
+    background: var(--ribbon-bg);
+    color: var(--ribbon-fg);
+  }
+
+  .ribbon__inner {
+    max-width: var(--wide-width);
+    margin-inline: auto;
+    min-height: var(--ribbon-height);
+    padding: 24px;
+    display: flex;
+    align-items: center;
+  }
+
+  .ribbon__brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 14px;
+    color: var(--ribbon-fg);
+    text-decoration: none;
+  }
+  .ribbon__brand:hover {
+    text-decoration: none;
+    color: var(--ribbon-fg);
+  }
+
+  .ribbon__logo {
+    display: block;
+  }
+
+  .ribbon__wordmark {
+    font-weight: 600;
+    font-size: 2rem;
+    letter-spacing: 0.01em;
+  }
+
+  @media (max-width: 720px) {
+    .ribbon__wordmark {
+      font-size: 1.6rem;
+    }
+  }
+</style>

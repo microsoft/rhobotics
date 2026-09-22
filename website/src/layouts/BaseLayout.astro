@@ -1,0 +1,31 @@
+---
+import "../styles/global.css";
+import Ribbon from "../components/Ribbon.astro";
+import Footer from "../components/Footer.astro";
+import { withBase } from "../lib/url";
+
+interface Props {
+  title: string;
+  description?: string;
+}
+
+const { title, description = "A vision-language-action (VLA) model for robotics." } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <link rel="icon" type="image/svg+xml" href={withBase("favicon.svg")} />
+    <title>{title}</title>
+  </head>
+  <body>
+    <Ribbon />
+    <main>
+      <slot />
+    </main>
+    <Footer />
+  </body>
+</html>

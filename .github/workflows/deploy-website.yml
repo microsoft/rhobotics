@@ -1,0 +1,46 @@
+name: Deploy website to GitHub Pages
+
+# Manual-only for now: the site is not published yet. To publish on every
+# change, first set Settings -> Pages -> Source = GitHub Actions, then
+# uncomment the `push` trigger below.
+on:
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - 'website/**'
+  #     - '.github/workflows/deploy-website.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install, build, and upload Astro site
+        uses: withastro/action@v3
+        with:
+          # The Astro project lives in a subdirectory of this repo.
+          path: ./website
+          node-version: 22
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -38,7 +38,7 @@ const adaptationStages = [
     title: "Pretrained Rho",
     subtitle: "Multi-embodiment VLA",
     description:
-      "Adds the flow-matching action expert and learns transferable control across heterogeneous physical and simulated robots.",
+      "Adds the flow-matching action expert and learns transferable control across heterogeneous physical and simulated robots. Trained on 48 B200 GPUs (6×8) at global batch 3,072 for 212,000 steps — one epoch over the full robot corpus — with a constant 1e-6 VLM learning rate and a warmup-cosine schedule on the action expert peaking at 1e-4.",
     data: "3,219+ robot hours",
     mix: "90% robot data · 10% vision-language",
     output: "General-purpose VLA",
@@ -49,7 +49,7 @@ const adaptationStages = [
     title: "Midtrained Rho",
     subtitle: "Embodiment-specialized VLA",
     description:
-      "Adapts horizontally across many tasks on one robot to learn its sensing, kinematics, workspace, and control conventions.",
+      "Adapts horizontally across many tasks on one robot to learn its sensing, kinematics, workspace, and control conventions. Trained on 8 B200 GPUs (1×8) at global batch 1,024 for two epochs per embodiment, with the same 1e-6 / 1e-4 schedule.",
     data: "≈300 hours per embodiment",
     mix: "90% target robot · 10% vision-language",
     output: "Reusable embodiment checkpoint",
@@ -60,7 +60,7 @@ const adaptationStages = [
     title: "Finetuned Rho",
     subtitle: "Task-specialized policy",
     description:
-      "Adapts vertically to a deployment task or small task set using focused demonstrations from the target environment.",
+      "Adapts vertically to a deployment task or small task set using focused demonstrations from the target environment. Fully unfrozen at global batch 128 with a cosine schedule peaking at 1e-4; conditioning on Phi-Phy makes Rho surprisingly robust to that aggressive fine-tuning rate even with the backbone open.",
     data: "Target-task demonstrations",
     mix: "100% robot flow matching",
     output: "Deployable task policy",
@@ -162,17 +162,19 @@ const embodiments = [
       </p>
       <div class="hero__media" aria-label="Rho manipulation examples">
         <figure>
-          <img
-            src={withBase("assets/fr3-charger-move.webp")}
-            alt="Rho controlling the FR3 Duo to move a charger"
-          />
+          <video
+            src={withBase("assets/fr3-charger-move.mp4")}
+            aria-label="Rho controlling the FR3 Duo to move a charger"
+            controls autoplay muted loop playsinline preload="metadata"
+          ></video>
           <figcaption>Language-conditioned charger manipulation.</figcaption>
         </figure>
         <figure>
-          <img
-            src={withBase("assets/yambox-repositioning.webp")}
-            alt="Rho rotating and repositioning a panel"
-          />
+          <video
+            src={withBase("assets/yambox-repositioning.mp4")}
+            aria-label="Rho rotating and repositioning a panel"
+            controls autoplay muted loop playsinline preload="metadata"
+          ></video>
           <figcaption>Bimanual panel rotation and repositioning.</figcaption>
         </figure>
       </div>
@@ -197,16 +199,29 @@ const embodiments = [
       <h2>Broad perception, precise control, efficient adaptation</h2>
       <div class="lede-grid">
         <p class="lede">
-          General-purpose physical AI models must combine visual and linguistic
-          understanding with precise control across robot embodiments. Rho couples a
-          physically grounded vision-language backbone to a continuous action expert,
-          then adapts to new hardware through targeted mid-training.
+          Rho is an open-weight vision-language-action (VLA) model designed for
+          data-efficient adaptation to new robots and new tasks. It couples a
+          physically grounded backbone from Microsoft's Phi model family to a
+          flow-matching action expert that emits continuous action chunks, trained
+          with a recipe we call <strong>regularized progressive adaptation</strong>:
+          each stage narrows broad visual-language understanding toward deployable
+          control, while vision-language co-training runs alongside the first three
+          stages so the backbone's perception is preserved.
         </p>
         <p>
-          Rho uses a fraction of the pretraining data of similarly sized VLAs while
-          achieving strong results in LIBERO, RoboEval, RoboTwin, and physical
-          manipulation experiments. The base checkpoint is available as
-          <a href="https://huggingface.co/microsoft/rho-base">microsoft/rho-base</a>.
+          Crucially, Rho separates adapting to a <em>robot</em> from adapting to a
+          <em>task</em>. One pretrained base is specialized to a platform through
+          horizontal mid-training, yielding reusable embodiment checkpoints that
+          make each downstream task cheaper to learn. Pretrained for a
+          <strong>single epoch</strong> over a 3,219.5-hour, 337.6-million-frame
+          robot corpus, Rho matches or outperforms larger open VLAs across LIBERO
+          (97.9%), RoboEval (73.37%), RoboTwin, and physical manipulation. The base
+          model is available as
+          <a href="https://huggingface.co/microsoft/rho-base">microsoft/rho-base</a>,
+          along with mid-trained checkpoints for
+          <a href="https://huggingface.co/microsoft/rho-fr3-duo">FR3 Duo</a>,
+          <a href="https://huggingface.co/microsoft/rho-ur-ai-trainer">UR AI Trainer</a>,
+          and <a href="https://huggingface.co/microsoft/rho-yam-box">YAMBox</a>.
         </p>
       </div>
       <div class="feature-grid">
@@ -236,7 +251,13 @@ const embodiments = [
           Rho is trained through four stages that progressively narrow broad
           visual-language understanding into embodiment knowledge and, finally, a
           deployable task policy. Vision-language co-training regularizes the first
-          three stages; task fine-tuning is robot-only.
+          three stages so the backbone's perception is preserved; only the final
+          task fine-tuning is robot-only. Each stage trains on increasingly
+          specific data — general physical grounding, then multi-embodiment robot
+          data, then a single embodiment, and finally a single deployment task —
+          while the compute recipe stays consistent across embodiments so the same
+          batch size and learning-rate schedule ports from FR3 Duo to UR AI
+          Trainer to YAMBox.
         </p>
 
         <div class="adaptation-flow" aria-label="Four-stage Rho training pipeline">
@@ -312,6 +333,67 @@ const embodiments = [
             </p>
           </article>
         </div>
+
+        <details class="checkpoint-details">
+          <summary>Released checkpoints and training step counts</summary>
+          <div class="table-wrap">
+            <table class="results-table">
+              <thead>
+                <tr><th>Checkpoint</th><th>Stage</th><th>Global batch</th><th>Steps</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row"><code>rho-base</code> (Hero2 · epoch 1)</th>
+                  <td>Pretrain</td>
+                  <td>3,072</td>
+                  <td>212,000 (1 epoch)</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>rho-ur-ai-trainer</code></th>
+                  <td>Embodiment midtrain</td>
+                  <td>1,024</td>
+                  <td>130,000 (2 epochs)</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>rho-yam-box</code></th>
+                  <td>Embodiment midtrain</td>
+                  <td>1,024</td>
+                  <td>90,000 (2 epochs)</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>rho-fr3-duo</code></th>
+                  <td>Embodiment midtrain</td>
+                  <td>1,024</td>
+                  <td>68,000 (2 epochs)</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>rho-robotwin-midtrain</code></th>
+                  <td>Controlled midtrain</td>
+                  <td>1,024</td>
+                  <td>2 epochs</td>
+                </tr>
+                <tr>
+                  <th scope="row">RoboEval evaluation policy</th>
+                  <td>Task fine-tune</td>
+                  <td>128</td>
+                  <td>40,000</td>
+                </tr>
+                <tr>
+                  <th scope="row">LIBERO evaluation policy</th>
+                  <td>Task fine-tune</td>
+                  <td>128</td>
+                  <td>40,000</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>rho-libero</code> noise-head</th>
+                  <td>FlowDAgger refinement</td>
+                  <td>—</td>
+                  <td>3,000</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
       </div>
     </section>
 
@@ -321,7 +403,21 @@ const embodiments = [
         <h2>Rho flow-matching action expert</h2>
         <p class="section-intro">
           Visual observations, language instructions, and robot state condition a
-          continuous action expert that generates chunks of future actions.
+          continuous action expert that turns Gaussian noise into a chunk of future
+          actions by flow matching: at inference the learned velocity field is
+          integrated from noise to actions in just <strong>10 explicit Euler
+          steps</strong>. The expert is a 12-block transformer (width 2,048,
+          grouped-query attention with 16 query heads and 4 key/value heads, head
+          dimension 128) cross-attending to the Phi-Phy backbone. Rather than
+          learning a separate modulation network per block, Rho shares one set of
+          adaLN modulation maps across all blocks and gives each block a small
+          zero-initialized offset — the <strong>adaLN-single</strong> design. We
+          swept action-expert shapes and sizes on RoboEval and deliberately chose a
+          compact one: sharing the modulation weights compresses the expert from
+          1.65B to <strong>542M parameters with no measured loss in success
+          rate</strong> (0.673 vs 0.671 on RoboEval), keeping Rho fast to train and
+          cheap to deploy while preserving the width that matters most for
+          contact-rich, precise manipulation.
         </p>
         <figure class="figure figure--paper">
           <a href={withBase("assets/action_expert.pdf")} target="_blank">
@@ -378,10 +474,18 @@ const embodiments = [
         <p class="section-kicker">Physical systems</p>
         <h2>Embodiment-targeted mid-training</h2>
         <p class="section-intro">
-          Rho is mid-trained on a balanced mixture of robot data and
+          Mid-training turns the general base model into a reusable, platform-specific
+          policy — learning a robot's cameras, kinematics, and control conventions
+          once so that downstream tasks start from a strong, embodiment-aware
+          checkpoint. Rho is mid-trained on a balanced mixture of robot data and
           robotics-relevant visual reasoning data before downstream fine-tuning.
-          Each checkpoint was trained for two epochs—approximately 45,000 steps—with
-          a global batch size of 1,024 on eight B200 GPUs.
+          Each checkpoint was trained for roughly two epochs at a global batch size
+          of 1,024 on eight B200 GPUs. Because our physical tasks span multiple
+          steps, we report both
+          <strong>success rate</strong> (only fully completed sequences count) and
+          <strong>mean task progress</strong> (the fraction of each task's steps
+          completed) so partial competence on hard multi-stage tasks is visible
+          rather than hidden.
         </p>
         <div class="embodiment-grid">
           {embodiments.map((embodiment) => (
@@ -420,8 +524,12 @@ const embodiments = [
           <p class="section-kicker">FR3 Duo</p>
           <h2>Reliable multi-stage manipulation</h2>
           <p>
-            Across plug insertion, tumbler manipulation, and test-tube racking,
-            Rho achieves 80.0% success and 88.7% mean task progress.
+            Rho-FR3-Duo is specialized to a dual-arm Franka platform on ~300 hours
+            of demonstrations spanning 19 task families of bimanual, contact-rich
+            behavior. Across plug insertion, tumbler manipulation, and test-tube
+            racking — long, multi-step manipulation sequences — Rho achieves
+            <strong>80.0% success and 88.7% mean task progress</strong>, ahead of
+            π0.5 (46.7% / 64.5%) and GR00T N1.7 (50.0% / 71.3%).
           </p>
           <p class="note">
             Success rate credits only fully completed task sequences; mean task
@@ -437,19 +545,19 @@ const embodiments = [
         </figure>
         <div class="task-clips task-clips--fr3 hardware-result__media" aria-label="FR3 Duo task examples">
           <figure>
-            <img src={withBase("assets/fr3-beaker-open.webp")} alt="FR3 Duo opening a beaker" loading="lazy" />
+            <video src={withBase("assets/fr3-beaker-open.mp4")} aria-label="FR3 Duo opening a beaker" controls autoplay muted loop playsinline preload="metadata"></video>
             <figcaption>Opening a beaker</figcaption>
           </figure>
           <figure>
-            <img src={withBase("assets/fr3-beaker-close.webp")} alt="FR3 Duo closing a beaker" loading="lazy" />
+            <video src={withBase("assets/fr3-beaker-close.mp4")} aria-label="FR3 Duo closing a beaker" controls autoplay muted loop playsinline preload="metadata"></video>
             <figcaption>Closing a beaker</figcaption>
           </figure>
           <figure>
-            <img src={withBase("assets/fr3-glasses-stack-a.webp")} alt="FR3 Duo stacking glasses" loading="lazy" />
+            <video src={withBase("assets/fr3-glasses-stack-a.mp4")} aria-label="FR3 Duo stacking glasses" controls autoplay muted loop playsinline preload="metadata"></video>
             <figcaption>Glass stacking</figcaption>
           </figure>
           <figure>
-            <img src={withBase("assets/fr3-glasses-stack-b.webp")} alt="FR3 Duo unstacking glasses" loading="lazy" />
+            <video src={withBase("assets/fr3-glasses-stack-b.mp4")} aria-label="FR3 Duo unstacking glasses" controls autoplay muted loop playsinline preload="metadata"></video>
             <figcaption>Glass unstacking</figcaption>
           </figure>
         </div>
@@ -460,8 +568,13 @@ const embodiments = [
           <p class="section-kicker">UR5e AI Trainer</p>
           <h2>Generalizing across cleanup tasks</h2>
           <p>
-            Rho reaches 53.4% success and 70.0% mean task progress across toolbox
-            and micro-electronics cleanup tasks.
+            Rho-UR-AI-Trainer is mid-trained on ~300 hours of real dual-arm
+            demonstrations across 28 task families, augmented with ~50 hours of
+            matched NVIDIA Isaac Sim rollouts on the same embodiment and camera
+            setup for extra repetition on precise placement and insertion. As with
+            FR3 Duo, tasks are long and multi-step: Rho reaches
+            <strong>53.4% success and 70.0% mean task progress</strong> across
+            toolbox and micro-electronics cleanup tasks.
           </p>
           <a class="text-link" href="https://huggingface.co/microsoft/rho-ur-ai-trainer">
             Download rho-ur-ai-trainer ↗
@@ -477,19 +590,19 @@ const embodiments = [
         </figure>
         <div class="task-clips task-clips--ur5e hardware-result__media" aria-label="UR5e AI Trainer task examples">
           <figure>
-            <img
-              src={withBase("assets/ur5e-moving-two-items.webp")}
-              alt="UR5e AI Trainer moving two items"
-              loading="lazy"
-            />
+            <video
+              src={withBase("assets/ur5e-moving-two-items.mp4")}
+              aria-label="UR5e AI Trainer moving two items"
+              controls autoplay muted loop playsinline preload="metadata"
+            ></video>
             <figcaption>Moving multiple items</figcaption>
           </figure>
           <figure>
-            <img
-              src={withBase("assets/ur5e-tool-chest.webp")}
-              alt="UR5e AI Trainer performing a tool chest task"
-              loading="lazy"
-            />
+            <video
+              src={withBase("assets/ur5e-tool-chest.mp4")}
+              aria-label="UR5e AI Trainer performing a tool chest task"
+              controls autoplay muted loop playsinline preload="metadata"
+            ></video>
             <figcaption>Tool chest cleanup</figcaption>
           </figure>
         </div>
@@ -500,11 +613,20 @@ const embodiments = [
           <p class="section-kicker">YAMBox</p>
           <h2>90% across BusyBox task families</h2>
           <p>
-            Ten rollouts per task family evaluate buttons, switches, sliders,
-            knobs, wires, and object repositioning on the
+            The YAM platform is an increasingly common testbed for open bimanual
+            VLAs, which makes it useful common ground for comparison. Rho-YAM-Box
+            is specialized on a ~300-hour subset spanning 60 task families, then
+            evaluated on six BusyBox task families — buttons, switches, sliders,
+            knobs, wires, and object repositioning — with ten rollouts per family
+            on the
             <a href="https://github.com/microsoft/BusyBox">BusyBox benchmark</a>.
             The training dataset is available from
             <a href="https://huggingface.co/datasets/microsoft/BusyBox">Microsoft on Hugging Face</a>.
+          </p>
+          <p class="note">
+            <em>For YAMBox comparisons, the MolmoAct2 baseline uses the authors'
+            own mid-trained YAMBox checkpoint rather than one we mid-trained, so
+            each model runs in its intended configuration.</em>
           </p>
           <a class="text-link" href="https://huggingface.co/microsoft/rho-yam-box">
             Download rho-yam-box ↗
@@ -517,31 +639,31 @@ const embodiments = [
 
       <div class="clip-grid" aria-label="YAMBox task examples">
         <figure>
-          <img src={withBase("assets/yambox-buttons.webp")} alt="YAMBox operating a push button" loading="lazy" />
+          <video src={withBase("assets/yambox-buttons.mp4")} aria-label="YAMBox operating a push button" controls autoplay muted loop playsinline preload="metadata"></video>
           <figcaption>Buttons</figcaption>
         </figure>
         <figure>
-          <img src={withBase("assets/yambox-switches.webp")} alt="YAMBox operating a switch" loading="lazy" />
+          <video src={withBase("assets/yambox-switches.mp4")} aria-label="YAMBox operating a switch" controls autoplay muted loop playsinline preload="metadata"></video>
           <figcaption>Switches</figcaption>
         </figure>
         <figure>
-          <img src={withBase("assets/yambox-slider.webp")} alt="YAMBox moving a slider" loading="lazy" />
+          <video src={withBase("assets/yambox-slider.mp4")} aria-label="YAMBox moving a slider" controls autoplay muted loop playsinline preload="metadata"></video>
           <figcaption>Sliders</figcaption>
         </figure>
         <figure>
-          <img src={withBase("assets/yambox-knob.webp")} alt="YAMBox turning a knob" loading="lazy" />
+          <video src={withBase("assets/yambox-knob.mp4")} aria-label="YAMBox turning a knob" controls autoplay muted loop playsinline preload="metadata"></video>
           <figcaption>Knobs</figcaption>
         </figure>
         <figure>
-          <img src={withBase("assets/yambox-wires.webp")} alt="YAMBox manipulating a wire" loading="lazy" />
+          <video src={withBase("assets/yambox-wires.mp4")} aria-label="YAMBox manipulating a wire" controls autoplay muted loop playsinline preload="metadata"></video>
           <figcaption>Wires</figcaption>
         </figure>
         <figure>
-          <img
-            src={withBase("assets/yambox-repositioning.webp")}
-            alt="YAMBox repositioning an object"
-            loading="lazy"
-          />
+          <video
+            src={withBase("assets/yambox-repositioning.mp4")}
+            aria-label="YAMBox repositioning an object"
+            controls autoplay muted loop playsinline preload="metadata"
+          ></video>
           <figcaption>Repositioning</figcaption>
         </figure>
       </div>
@@ -588,8 +710,23 @@ const embodiments = [
       <article class="result-block">
         <div class="result-block__header">
           <div>
-            <h3>RoboEval</h3>
-            <p>Mean success over three evaluation passes. Error bars show sample standard deviation.</p>
+            <h3>
+              <a href="https://arxiv.org/abs/2507.00435" target="_blank" rel="noopener noreferrer">
+                RoboEval
+              </a>
+            </h3>
+            <p>
+              RoboEval is a bimanual-manipulation benchmark that scores not just
+              task success but <em>how</em> a policy moves — task progression,
+              motion efficiency, coordination, and safety. We adapt each model
+              under matched benchmark data budgets and evaluate all eight tasks
+              across three seeds and 100 rollouts per seed (n = 300 rollouts per
+              task). Mean success over three evaluation passes; error bars show
+              sample standard deviation. Baseline overall-success numbers in the
+              figure below are <strong>our re-runs</strong> under the
+              matched-adaptation protocol; the behavioral diagnostics further down
+              are the published RoboEval-protocol point estimates.
+            </p>
           </div>
           <strong class="metric">73.37% overall</strong>
         </div>
@@ -625,8 +762,22 @@ const embodiments = [
           <div>
             <h3>RoboTwin</h3>
             <p>
-              Controlled transfer from the pretrained and embodiment-mid-trained
-              checkpoints across downstream-data budgets.
+              RoboTwin was built to demonstrate the value of mid-training, which
+              makes it the natural simulated benchmark for isolating that effect in
+              Rho. We depart from the standard RoboTwin protocol on purpose:
+              we choose the dual-arm <strong>UR5e</strong> embodiment (heavily
+              represented in our pretraining data), mid-train on 45 of its tasks
+              (two epochs at global batch 1,024, with the same VL co-training as
+              elsewhere), and hold out five distinct tasks — <em>Hanging Mug, Move
+              Stapler Pad, Place Burger Fries, Handover Mic, and Stack Bowls
+              Three</em> — for downstream fine-tuning and evaluation. We then
+              fine-tune from either the pretrained base or the mid-trained
+              checkpoint on progressively smaller slices of downstream data
+              (100% → 50% → 25% → 12.5%). At the 12.5% budget, mid-training lifts
+              Easy-protocol success from
+              <strong>28.1% to 40.6% (+12.5 pts)</strong> and Hard-protocol success
+              from <strong>30.9% to 38.9% (+8.0 pts)</strong> — a controlled read
+              on how much the embodiment prior helps when task data is scarce.
             </p>
           </div>
           <a class="text-link" href="https://robotwin-platform.github.io/leaderboard">
@@ -863,7 +1014,8 @@ const embodiments = [
     margin: 42px auto 0;
   }
   .hero__media figure { margin: 0; }
-  .hero__media img {
+  .hero__media img,
+  .hero__media video {
     display: block;
     width: 100%;
     aspect-ratio: 4 / 3;
@@ -908,6 +1060,7 @@ const embodiments = [
   }
   .section-intro {
     max-width: 780px;
+    margin-inline: auto;
     color: var(--text-muted);
     font-size: 1.12rem;
   }
@@ -1331,7 +1484,9 @@ const embodiments = [
   .clip-grid figure,
   .task-clips figure { margin: 0; }
   .clip-grid img,
-  .task-clips img {
+  .task-clips img,
+  .clip-grid video,
+  .task-clips video {
     width: 100%;
     aspect-ratio: 4 / 3;
     object-fit: cover;

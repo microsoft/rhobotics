@@ -1,0 +1,1571 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import { withBase } from "../lib/url";
+
+const resources = [
+  { label: "Code", href: "https://github.com/microsoft/rhobotics" },
+  { label: "Base checkpoint", href: "https://huggingface.co/microsoft/rho-base" },
+  { label: "LIBERO checkpoint", href: "https://huggingface.co/microsoft/rho-libero" },
+  { label: "BusyBox dataset", href: "https://huggingface.co/datasets/microsoft/BusyBox" },
+];
+
+const modelSpecs = [
+  ["Action expert", "542M parameters"],
+  ["Transformer", "12 blocks; width 2,048; MLP width 4,096"],
+  ["Attention", "Action self-attention and cross-attention to VLM context"],
+  ["Block structure", "16 query heads; 4 key/value heads; head dimension 128"],
+  ["Flow conditioning", "Shared adaLN-single with block-specific offsets"],
+  ["Flow target", "Linear noise-action interpolation; velocity-prediction MSE"],
+  ["State/action interface", "Continuous vectors up to 32 dimensions with padding and loss masks"],
+  ["Inference solver", "10 explicit Euler steps"],
+];
+
+const adaptationStages = [
+  {
+    number: "01",
+    label: "Ground",
+    title: "Phi-Phy",
+    subtitle: "Physically grounded VLM",
+    description:
+      "Strengthens spatial reasoning, grounding, pointing, OCR, counting, and multi-image understanding before learning robot actions.",
+    data: "≈100M supervised records",
+    mix: "General VLM SFT + physical-grounding data",
+    output: "Grounded VLM backbone",
+  },
+  {
+    number: "02",
+    label: "Pretrain",
+    title: "Pretrained Rho",
+    subtitle: "Multi-embodiment VLA",
+    description:
+      "Adds the flow-matching action expert and learns transferable control across heterogeneous physical and simulated robots. Trained on 48 B200 GPUs (6×8) at global batch 3,072 for 212,000 steps — one epoch over the full robot corpus — with a constant 1e-6 VLM learning rate and a warmup-cosine schedule on the action expert peaking at 1e-4.",
+    data: "3,219+ robot hours",
+    mix: "90% robot data · 10% vision-language",
+    output: "General-purpose VLA",
+  },
+  {
+    number: "03",
+    label: "Midtrain",
+    title: "Midtrained Rho",
+    subtitle: "Embodiment-specialized VLA",
+    description:
+      "Adapts horizontally across many tasks on one robot to learn its sensing, kinematics, workspace, and control conventions. Trained on 8 B200 GPUs (1×8) at global batch 1,024 for two epochs per embodiment, with the same 1e-6 / 1e-4 schedule.",
+    data: "≈300 hours per embodiment",
+    mix: "90% target robot · 10% vision-language",
+    output: "Reusable embodiment checkpoint",
+  },
+  {
+    number: "04",
+    label: "Finetune",
+    title: "Finetuned Rho",
+    subtitle: "Task-specialized policy",
+    description:
+      "Adapts vertically to a deployment task or small task set using focused demonstrations from the target environment. Fully unfrozen at global batch 128 with a cosine schedule peaking at 1e-4; conditioning on Phi-Phy makes Rho surprisingly robust to that aggressive fine-tuning rate even with the backbone open.",
+    data: "Target-task demonstrations",
+    mix: "100% robot flow matching",
+    output: "Deployable task policy",
+  },
+];
+
+const liberoRows = [
+  ["OpenVLA", "84.7", "88.4", "79.2", "53.7", "76.5"],
+  ["π0", "96.8", "98.8", "95.8", "85.2", "94.2"],
+  ["MolmoAct-7B-D", "87.0", "95.4", "87.6", "77.2", "86.6"],
+  ["GR00T N1.7", "95.0", "100.0", "98.0", "93.0", "96.5"],
+  ["π0.5", "98.8", "98.2", "98.0", "92.4", "96.9"],
+  ["MolmoAct2", "97.8", "100.0", "97.8", "93.2", "97.2"],
+  ["Rho", "98.3", "99.6", "97.6", "95.9", "97.9"],
+];
+
+const midtrainingRows = [
+  ["RoboTwin midtraining_set_B", "23,100", "3,238,752", "50", "18.0", "18.0"],
+  ["UR_AI_Trainer", "141,007", "47,357,161", "50", "263.1", "263.1"],
+  ["FR3_Duo", "23,793", "29,986,315", "30", "277.7", "277.7"],
+  ["YAM_Box_lab", "36,177", "48,527,355", "30", "449.3", "147.6"],
+  ["YAM_Box_wild", "76,486", "108,383,230", "30", "1,003.5", "152.4"],
+];
+
+const efficiencyRows = [
+  ["OpenPI π0.5", "Full fine-tuning", "3.0B", "On", "71.7 GB", "1.70 s"],
+  ["GR00T", "Full fine-tuning", "3.14B (100%)", "Off", "85.2 GB", "0.81 s"],
+  ["Rho", "Full, NFS=1", "4.92B (94%)", "On", "30.4 GB", "1.16 s"],
+  ["Rho", "Full, NFS=8", "4.92B (94%)", "On", "35.0 GB", "1.63 s"],
+  ["MolmoAct2", "Full, NFS=1", "5.05B (93%)", "On", "59.2 GB", "3.70 s"],
+  ["MolmoAct2", "Full, NFS=8", "5.05B (93%)", "On", "59.5 GB", "3.80 s"],
+  ["MolmoAct2", "Expert-only, NFS=1", "578M (10.6%)", "—", "19.3 GB", "2.20 s"],
+  ["MolmoAct2", "Expert-only, NFS=8", "578M (10.6%)", "—", "19.8 GB", "2.30 s"],
+  ["GR00T", "Expert-only", "1.62B (51%)", "Off", "41.6 GB", "0.42 s"],
+  ["Rho", "Expert-only, NFS=1", "544M (10%)", "On", "17.2 GB", "0.38 s"],
+  ["Rho", "Expert-only, NFS=8", "544M (10%)", "On", "20.2 GB", "0.88 s"],
+];
+
+const robotwinSummary = [
+  ["OLA-Sem", "50-task co-training", "69.0", "60.8", "64.9"],
+  ["GigaBrain-0.7", "50-task co-training", "60.8", "65.2", "63.0"],
+  ["Rho 100% Midtrain", "Five-task fine-tuning", "65.6", "59.6", "62.6"],
+  ["Rho 100% Pretrain", "Five-task fine-tuning", "65.2", "56.9", "61.1"],
+  ["Rho All-UR5", "50-task fine-tuning", "59.3", "55.7", "57.5"],
+  ["4D-WAM", "50-task co-training", "73.2", "26.8", "50.0"],
+  ["π0.5", "50-task co-training", "59.6", "35.2", "47.4"],
+  ["π0", "Per-task fine-tuning", "51.0", "9.2", "30.1"],
+];
+
+const embodiments = [
+  {
+    name: "FR3 Duo",
+    image: "assets/fr3_duo.jpg",
+    checkpoint: "https://huggingface.co/microsoft/rho-fr3-duo",
+  },
+  {
+    name: "UR5e AI Trainer",
+    image: "assets/ur_ai_trainer.jpg",
+    checkpoint: "https://huggingface.co/microsoft/rho-ur-ai-trainer",
+  },
+  {
+    name: "YAMBox",
+    image: "assets/yam_box.jpg",
+    checkpoint: "https://huggingface.co/microsoft/rho-yam-box",
+  },
+];
+---
+
+<BaseLayout
+  title="Rho — Open Vision-Language-Action Models for Robotics"
+  description="Rho is a family of open-weight vision-language-action models for bimanual robotic manipulation and efficient embodiment adaptation."
+>
+  <section class="hero">
+    <div class="container container--wide">
+      <p class="eyebrow">Open-weight vision-language-action models</p>
+      <h1>Rho</h1>
+      <p class="hero__dek">
+        A family of general-purpose physical AI models for bimanual manipulation,
+        combining a physically grounded Phi-family backbone with a flow-matching
+        action expert and a progressive embodiment-adaptation recipe.
+      </p>
+      <div class="hero__links">
+        {resources.map((resource) => (
+          <a class="button" href={resource.href} target="_blank" rel="noopener noreferrer">
+            {resource.label}<span aria-hidden="true">↗</span>
+          </a>
+        ))}
+        <span class="button button--soon" role="link" aria-disabled="true" title="arXiv paper coming soon">
+          Paper (arXiv) — coming soon
+        </span>
+      </div>
+      <dl class="hero__stats">
+        <div><dt>LIBERO average</dt><dd>97.9%</dd></div>
+        <div><dt>RoboEval average</dt><dd>73.4%</dd></div>
+        <div><dt>FR3 Duo physical success</dt><dd>80.0%</dd></div>
+      </dl>
+      <p class="hero__stats-note">
+        FR3 Duo task success vs π0.5 46.7% · GR00T&nbsp;N1.7 50.0% — 30 rollouts per task, per model.
+      </p>
+      <div class="hero__media hero__media--sizzle" aria-label="Rho manipulation examples">
+        <figure>
+          <img
+            src={withBase("assets/fr3-duo-sizzle.webp")}
+            alt="FR3 Duo highlight reel"
+            loading="lazy"
+          />
+          <figcaption>FR3 Duo · precision bimanual manipulation</figcaption>
+        </figure>
+        <figure>
+          <img
+            src={withBase("assets/ur5e-sizzle.webp")}
+            alt="UR5e AI Trainer highlight reel"
+            loading="lazy"
+          />
+          <figcaption>UR5e AI Trainer · pick-and-place workflows</figcaption>
+        </figure>
+        <figure>
+          <img
+            src={withBase("assets/yambox-sizzle.webp")}
+            alt="YAMBox highlight reel"
+            loading="lazy"
+          />
+          <figcaption>YAMBox · bimanual panel and control-board tasks</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <nav class="section-nav" aria-label="Page sections">
+    <div class="container container--wide">
+      <a href="#overview">Overview</a>
+      <a href="#adaptation">Training recipe</a>
+      <a href="#method">Method</a>
+      <a href="#embodiments">Embodiments</a>
+      <a href="#benchmarks">Benchmarks</a>
+      <a href="#efficiency">Efficiency</a>
+      <a href="#models">Models</a>
+    </div>
+  </nav>
+
+  <div class="page-content">
+    <section id="overview" class="section container">
+      <p class="section-kicker">Overview</p>
+      <h2>Broad perception, precise control, efficient adaptation</h2>
+      <div class="lede-grid">
+        <p class="lede">
+          Rho is an open-weight vision-language-action (VLA) model designed for
+          data-efficient adaptation to new robots and new tasks. It couples a
+          physically grounded backbone from Microsoft's Phi model family to a
+          flow-matching action expert that emits continuous action chunks, trained
+          with a recipe we call <strong>regularized progressive adaptation</strong>:
+          each stage narrows broad visual-language understanding toward deployable
+          control, while vision-language co-training runs alongside the first three
+          stages so the backbone's perception is preserved.
+        </p>
+        <p>
+          Crucially, Rho separates adapting to a <em>robot</em> from adapting to a
+          <em>task</em>. One pretrained base is specialized to a platform through
+          horizontal mid-training, yielding reusable embodiment checkpoints that
+          make each downstream task cheaper to learn. Pretrained for a
+          <strong>single epoch</strong> over a 3,219.5-hour, 337.6-million-frame
+          robot corpus, Rho matches or outperforms larger open VLAs across LIBERO
+          (97.9%), RoboEval (73.37%), RoboTwin, and physical manipulation. The base
+          model is available as
+          <a href="https://huggingface.co/microsoft/rho-base">microsoft/rho-base</a>,
+          along with mid-trained checkpoints for
+          <a href="https://huggingface.co/microsoft/rho-fr3-duo">FR3 Duo</a>,
+          <a href="https://huggingface.co/microsoft/rho-ur-ai-trainer">UR AI Trainer</a>,
+          and <a href="https://huggingface.co/microsoft/rho-yam-box">YAMBox</a>.
+        </p>
+      </div>
+      <div class="feature-grid">
+        <article>
+          <span class="feature-number">01</span>
+          <h3>Physically grounded VLM</h3>
+          <p>Additional robotics-relevant grounding, multi-image reasoning, OCR, counting, and synthetic visual reasoning data.</p>
+        </article>
+        <article>
+          <span class="feature-number">02</span>
+          <h3>Flow-matching action expert</h3>
+          <p>A compact continuous-action decoder with cross-attention to VLM context and configurable action chunks.</p>
+        </article>
+        <article>
+          <span class="feature-number">03</span>
+          <h3>Flexible LeRobot training</h3>
+          <p>YAML-configured datasets, transforms, key mappings, action representations, and multi-dataset training.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="adaptation" class="section adaptation-section">
+      <div class="container container--wide">
+        <p class="section-kicker">Training recipe</p>
+        <h2>Regularized progressive adaptation</h2>
+        <p class="section-intro">
+          Rho is trained through four stages that progressively narrow broad
+          visual-language understanding into embodiment knowledge and, finally, a
+          deployable task policy. Vision-language co-training regularizes the first
+          three stages so the backbone's perception is preserved; only the final
+          task fine-tuning is robot-only. Each stage trains on increasingly
+          specific data — general physical grounding, then multi-embodiment robot
+          data, then a single embodiment, and finally a single deployment task —
+          while the compute recipe stays consistent across embodiments so the same
+          batch size and learning-rate schedule ports from FR3 Duo to UR AI
+          Trainer to YAMBox.
+        </p>
+
+        <div class="adaptation-flow" aria-label="Four-stage Rho training pipeline">
+          {adaptationStages.map((stage, index) => (
+            <article class="adaptation-stage">
+              <div class="adaptation-stage__topline">
+                <span class="adaptation-stage__number">{stage.number}</span>
+                <span class="adaptation-stage__label">{stage.label}</span>
+              </div>
+              <h3>{stage.title}</h3>
+              <p class="adaptation-stage__subtitle">{stage.subtitle}</p>
+              <p class="adaptation-stage__description">{stage.description}</p>
+              <dl>
+                <div><dt>Data</dt><dd>{stage.data}</dd></div>
+                <div><dt>Mixture</dt><dd>{stage.mix}</dd></div>
+                <div><dt>Output</dt><dd>{stage.output}</dd></div>
+              </dl>
+              {index < adaptationStages.length - 1 && (
+                <span class="adaptation-stage__arrow" aria-hidden="true">→</span>
+              )}
+            </article>
+          ))}
+        </div>
+
+        <div class="adaptation-extension">
+          <div class="adaptation-extension__icon" aria-hidden="true">↻</div>
+          <div>
+            <strong>Optional online extension</strong>
+            <p>
+              After offline fine-tuning, a lightweight policy can adapt the action
+              generator's initial latent noise from corrective demonstrations or
+              task rewards while keeping the flow-matching generator fixed.
+            </p>
+          </div>
+        </div>
+
+        <div class="adaptation-details">
+          <article>
+            <span>Phi-Phy</span>
+            <h3>Ground physical understanding first</h3>
+            <p>
+              The 4.68B-parameter Phi-family backbone uses SigLIP 2 NaFlex vision
+              features and is trained on robotics-relevant grounding, pointing,
+              spatial reasoning, OCR, counting, and synthetic multi-image tasks.
+              It does not yet predict actions.
+            </p>
+          </article>
+          <article>
+            <span>Pretraining</span>
+            <h3>Learn a shared action representation</h3>
+            <p>
+              Robot data from OXE, XDOF, Scale, and OmniReset trains the complete
+              VLA, while RoboPoint and RefSpatial batches continue to regularize the
+              backbone's visual-language capabilities.
+            </p>
+          </article>
+          <article>
+            <span>Midtraining</span>
+            <h3>Learn the robot, not one task</h3>
+            <p>
+              Broad multitask data from a single embodiment teaches camera layout,
+              arm geometry, gripper conventions, temporal dynamics, and workspace
+              characteristics that transfer across downstream tasks.
+            </p>
+          </article>
+          <article>
+            <span>Fine-tuning</span>
+            <h3>Specialize for deployment</h3>
+            <p>
+              Target-task demonstrations refine the pretrained or midtrained model
+              into a policy for a specific task set. Starting from an embodiment
+              checkpoint is especially valuable in low-data settings.
+            </p>
+          </article>
+        </div>
+
+        <details class="checkpoint-details">
+          <summary>Released checkpoints and training step counts</summary>
+          <div class="table-wrap">
+            <table class="results-table">
+              <thead>
+                <tr><th>Checkpoint</th><th>Stage</th><th>Global batch</th><th>Steps</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row"><code>rho-base</code> (Hero2 · epoch 1)</th>
+                  <td>Pretrain</td>
+                  <td>3,072</td>
+                  <td>212,000 (1 epoch)</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>rho-ur-ai-trainer</code></th>
+                  <td>Embodiment midtrain</td>
+                  <td>1,024</td>
+                  <td>130,000 (2 epochs)</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>rho-yam-box</code></th>
+                  <td>Embodiment midtrain</td>
+                  <td>1,024</td>
+                  <td>90,000 (2 epochs)</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>rho-fr3-duo</code></th>
+                  <td>Embodiment midtrain</td>
+                  <td>1,024</td>
+                  <td>68,000 (2 epochs)</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>rho-robotwin-midtrain</code></th>
+                  <td>Controlled midtrain</td>
+                  <td>1,024</td>
+                  <td>2 epochs</td>
+                </tr>
+                <tr>
+                  <th scope="row">RoboEval evaluation policy</th>
+                  <td>Task fine-tune</td>
+                  <td>128</td>
+                  <td>40,000</td>
+                </tr>
+                <tr>
+                  <th scope="row">LIBERO evaluation policy</th>
+                  <td>Task fine-tune</td>
+                  <td>128</td>
+                  <td>40,000</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>rho-libero</code> noise-head</th>
+                  <td>FlowDAgger refinement</td>
+                  <td>—</td>
+                  <td>3,000</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section id="method" class="section section--tint">
+      <div class="container container--wide">
+        <p class="section-kicker">Architecture</p>
+        <h2>Rho flow-matching action expert</h2>
+        <p class="section-intro">
+          Visual observations, language instructions, and robot state condition a
+          continuous action expert that turns Gaussian noise into a chunk of future
+          actions by flow matching: at inference the learned velocity field is
+          integrated from noise to actions in just <strong>10 explicit Euler
+          steps</strong>. The expert is a 12-block transformer (width 2,048,
+          grouped-query attention with 16 query heads and 4 key/value heads, head
+          dimension 128) cross-attending to the Phi-Phy backbone. Rather than
+          learning a separate modulation network per block, Rho shares one set of
+          adaLN modulation maps across all blocks and gives each block a small
+          zero-initialized offset — the <strong>adaLN-single</strong> design. We
+          swept action-expert shapes and sizes on RoboEval and deliberately chose a
+          compact one: sharing the modulation weights compresses the expert from
+          1.65B to <strong>542M parameters with no measured loss in success
+          rate</strong> (0.673 vs 0.671 on RoboEval), keeping Rho fast to train and
+          cheap to deploy while preserving the width that matters most for
+          contact-rich, precise manipulation.
+        </p>
+        <figure class="figure figure--paper">
+          <a href={withBase("assets/action_expert.pdf")} target="_blank">
+            <img src={withBase("assets/action-expert.png")} alt="Rho flow-matching action expert architecture" />
+          </a>
+          <figcaption>
+            State and noisy-action tokens pass through 12 transformer blocks with
+            grouped-query self-attention, cross-attention to VLM context, and
+            flow-timestep conditioning. Select the figure to open the PDF.
+          </figcaption>
+        </figure>
+        <div class="table-wrap">
+          <table>
+            <tbody>
+              {modelSpecs.map(([component, specification]) => (
+                <tr><th scope="row">{component}</th><td>{specification}</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <aside class="callout" id="latent-adaptation" aria-label="Latent-space adaptation compatibility">
+          <p class="section-kicker">Deployment adaptation</p>
+          <h3>Natively compatible with latent-space adaptation</h3>
+          <p>
+            Because Rho generates continuous actions with a flow-matching expert, its trajectory
+            distribution can be steered or refined in the initial-noise latent space without
+            modifying the generator weights. Rho's released checkpoints work with two independent
+            recipes:
+          </p>
+          <ul>
+            <li>
+              <strong>FlowDAgger</strong> — interactive imitation learning from corrective
+              demonstrations; the FlowDAgger project reports results on Rho.
+              <a href="https://microsoft.github.io/FlowDAgger/" target="_blank" rel="noopener noreferrer">Project page ↗</a>
+            </li>
+            <li>
+              <strong>DSRL</strong> — diffusion steering for reinforcement-learning-style latent
+              adaptation from reward signals.
+              <a href="https://diffusion-steering.github.io/" target="_blank" rel="noopener noreferrer">Project page ↗</a>
+            </li>
+          </ul>
+          <p class="note">
+            Usage and example configurations are in the
+            <a href="https://github.com/microsoft/rhobotics" target="_blank" rel="noopener noreferrer">rhobotics codebase</a>.
+            Empirical adaptation results will follow in a dedicated post.
+          </p>
+        </aside>
+      </div>
+    </section>
+
+    <section id="embodiments" class="section section--dark">
+      <div class="container container--wide">
+        <p class="section-kicker">Physical systems</p>
+        <h2>Embodiment-targeted mid-training</h2>
+        <p class="section-intro">
+          Mid-training turns the general base model into a reusable, platform-specific
+          policy — learning a robot's cameras, kinematics, and control conventions
+          once so that downstream tasks start from a strong, embodiment-aware
+          checkpoint. Rho is mid-trained on a balanced mixture of robot data and
+          robotics-relevant visual reasoning data before downstream fine-tuning.
+          Each checkpoint was trained for roughly two epochs at a global batch size
+          of 1,024 on eight B200 GPUs. Because our physical tasks span multiple
+          steps, we report both
+          <strong>success rate</strong> (only fully completed sequences count) and
+          <strong>mean task progress</strong> (the fraction of each task's steps
+          completed) so partial competence on hard multi-stage tasks is visible
+          rather than hidden.
+        </p>
+        <div class="embodiment-grid">
+          {embodiments.map((embodiment) => (
+            <article class="embodiment-card">
+              <img src={withBase(embodiment.image)} alt={embodiment.name} loading="lazy" />
+              <div>
+                <span class="badge" title="Two arms × (x, y, z end-effector position + 6D rotation + gripper) = 20 continuous action dimensions">Dual-arm · 20 action dims</span>
+                <h3>{embodiment.name}</h3>
+                <a href={embodiment.checkpoint}>Checkpoint ↗</a>
+              </div>
+            </article>
+          ))}
+        </div>
+        <div class="table-wrap table-wrap--dark">
+          <table>
+            <thead>
+              <tr><th>Dataset</th><th>Episodes</th><th>Frames</th><th>FPS</th><th>Original hours</th><th>Sampled hours</th></tr>
+            </thead>
+            <tbody>
+              {midtrainingRows.map((row) => (
+                <tr>{row.map((value, index) => index === 0 ? <th scope="row">{value}</th> : <td>{value}</td>)}</tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p class="note note--dark">
+          YAMBox was subsampled to roughly 300 hours, distributed evenly across task
+          types, to align its mid-training volume with the other physical datasets.
+        </p>
+      </div>
+    </section>
+
+    <section class="section container container--wide">
+      <div class="hardware-result">
+        <div>
+          <p class="section-kicker">FR3 Duo</p>
+          <h2>Reliable multi-stage manipulation</h2>
+          <p>
+            Rho-FR3-Duo is specialized to a dual-arm Franka platform on ~300 hours
+            of demonstrations spanning 19 task families of bimanual, contact-rich
+            behavior. Across plug insertion, tumbler manipulation, and test-tube
+            racking — long, multi-step manipulation sequences — Rho achieves
+            <strong>80.0% success and 88.7% mean task progress</strong>, ahead of
+            π0.5 (46.7% / 64.5%) and GR00T N1.7 (50.0% / 71.3%).
+          </p>
+          <p class="note">
+            Success rate credits only fully completed task sequences; mean task
+            progress credits the fraction of each task's steps that were completed.
+          </p>
+          <a class="text-link" href="https://huggingface.co/microsoft/rho-fr3-duo">
+            Download rho-fr3-duo ↗
+          </a>
+        </div>
+        <figure class="figure hardware-result__chart">
+          <img src={withBase("assets/fig-fr3-duo.png")} alt="FR3 Duo success rate and mean task progress" loading="lazy" />
+          <figcaption>Success rate and mean task progress across the five FR3 Duo evaluation tasks.</figcaption>
+        </figure>
+        <div class="task-clips task-clips--fr3 hardware-result__media" aria-label="FR3 Duo task examples">
+          <figure>
+            <video src={withBase("assets/fr3-beaker-open.mp4")} aria-label="FR3 Duo opening a beaker" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Opening a beaker</figcaption>
+          </figure>
+          <figure>
+            <video src={withBase("assets/fr3-beaker-close.mp4")} aria-label="FR3 Duo closing a beaker" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Closing a beaker</figcaption>
+          </figure>
+          <figure>
+            <video src={withBase("assets/fr3-glasses-stack-a.mp4")} aria-label="FR3 Duo stacking glasses" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Glass stacking</figcaption>
+          </figure>
+          <figure>
+            <video src={withBase("assets/fr3-glasses-stack-b.mp4")} aria-label="FR3 Duo unstacking glasses" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Glass unstacking</figcaption>
+          </figure>
+        </div>
+      </div>
+
+      <div class="hardware-result hardware-result--reverse">
+        <div>
+          <p class="section-kicker">UR5e AI Trainer</p>
+          <h2>Generalizing across cleanup tasks</h2>
+          <p>
+            Rho-UR-AI-Trainer is mid-trained on ~300 hours of real dual-arm
+            demonstrations across 28 task families, augmented with ~50 hours of
+            matched NVIDIA Isaac Sim rollouts on the same embodiment and camera
+            setup for extra repetition on precise placement and insertion. As with
+            FR3 Duo, tasks are long and multi-step: Rho reaches
+            <strong>53.4% success and 70.0% mean task progress</strong> across
+            toolbox and micro-electronics cleanup tasks.
+          </p>
+          <a class="text-link" href="https://huggingface.co/microsoft/rho-ur-ai-trainer">
+            Download rho-ur-ai-trainer ↗
+          </a>
+        </div>
+        <figure class="figure hardware-result__chart">
+          <img
+            src={withBase("assets/fig-ur-ai-trainer.png")}
+            alt="UR5e AI Trainer success rate and mean task progress"
+            loading="lazy"
+          />
+          <figcaption>Success rate and mean task progress across tasks with available UR5e evaluation data.</figcaption>
+        </figure>
+        <div class="task-clips task-clips--ur5e hardware-result__media" aria-label="UR5e AI Trainer task examples">
+          <figure>
+            <video
+              src={withBase("assets/ur5e-moving-two-items.mp4")}
+              aria-label="UR5e AI Trainer moving two items"
+              controls autoplay muted loop playsinline preload="metadata"
+            ></video>
+            <figcaption>Moving multiple items</figcaption>
+          </figure>
+          <figure>
+            <video
+              src={withBase("assets/ur5e-tool-chest.mp4")}
+              aria-label="UR5e AI Trainer performing a tool chest task"
+              controls autoplay muted loop playsinline preload="metadata"
+            ></video>
+            <figcaption>Tool chest cleanup</figcaption>
+          </figure>
+        </div>
+      </div>
+
+      <div class="hardware-result">
+        <div>
+          <p class="section-kicker">YAMBox</p>
+          <h2>90% across BusyBox task families</h2>
+          <p>
+            The YAM platform is an increasingly common testbed for open bimanual
+            VLAs, which makes it useful common ground for comparison. Rho-YAM-Box
+            is specialized on a ~300-hour subset spanning 60 task families, then
+            evaluated on six BusyBox task families — buttons, switches, sliders,
+            knobs, wires, and object repositioning — with ten rollouts per family
+            on the
+            <a href="https://github.com/microsoft/BusyBox">BusyBox benchmark</a>.
+            The training dataset is available from
+            <a href="https://huggingface.co/datasets/microsoft/BusyBox">Microsoft on Hugging Face</a>.
+          </p>
+          <p class="note">
+            <em>For YAMBox comparisons, the MolmoAct2 baseline uses the authors'
+            own mid-trained YAMBox checkpoint rather than one we mid-trained, so
+            each model runs in its intended configuration.</em>
+          </p>
+          <a class="text-link" href="https://huggingface.co/microsoft/rho-yam-box">
+            Download rho-yam-box ↗
+          </a>
+        </div>
+        <figure class="figure">
+          <img src={withBase("assets/fig-yam-box.png")} alt="YAMBox BusyBox benchmark results" loading="lazy" />
+        </figure>
+      </div>
+
+      <div class="clip-grid" aria-label="YAMBox task examples">
+        <figure>
+          <video src={withBase("assets/yambox-buttons.mp4")} aria-label="YAMBox operating a push button" controls autoplay muted loop playsinline preload="metadata"></video>
+          <figcaption>Buttons</figcaption>
+        </figure>
+        <figure>
+          <video src={withBase("assets/yambox-switches.mp4")} aria-label="YAMBox operating a switch" controls autoplay muted loop playsinline preload="metadata"></video>
+          <figcaption>Switches</figcaption>
+        </figure>
+        <figure>
+          <video src={withBase("assets/yambox-slider.mp4")} aria-label="YAMBox moving a slider" controls autoplay muted loop playsinline preload="metadata"></video>
+          <figcaption>Sliders</figcaption>
+        </figure>
+        <figure>
+          <video src={withBase("assets/yambox-knob.mp4")} aria-label="YAMBox turning a knob" controls autoplay muted loop playsinline preload="metadata"></video>
+          <figcaption>Knobs</figcaption>
+        </figure>
+        <figure>
+          <video src={withBase("assets/yambox-wires.mp4")} aria-label="YAMBox manipulating a wire" controls autoplay muted loop playsinline preload="metadata"></video>
+          <figcaption>Wires</figcaption>
+        </figure>
+        <figure>
+          <video
+            src={withBase("assets/yambox-repositioning.mp4")}
+            aria-label="YAMBox repositioning an object"
+            controls autoplay muted loop playsinline preload="metadata"
+          ></video>
+          <figcaption>Repositioning</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="benchmarks" class="section container container--wide">
+      <p class="section-kicker">Simulation</p>
+      <h2>Simulated benchmarks</h2>
+
+      <article class="result-block">
+        <div class="result-block__header">
+          <div>
+            <h3>LIBERO</h3>
+            <p>
+              Fine-tuned for 40,000 steps with a global batch size of 128, then
+              improved with a modified noise policy using
+              <a href="#latent-adaptation">FlowDAgger</a>.
+            </p>
+          </div>
+          <a class="text-link" href="https://huggingface.co/microsoft/rho-libero">
+            Download rho-libero ↗
+          </a>
+        </div>
+        <div class="table-wrap">
+          <table class="results-table">
+            <thead>
+              <tr><th>Model</th><th>Spatial</th><th>Object</th><th>Goal</th><th>Long</th><th>Average</th></tr>
+            </thead>
+            <tbody>
+              {liberoRows.map((row) => (
+                <tr class:list={{ highlight: row[0] === "Rho" }}>
+                  {row.map((value, index) => index === 0 ? <th scope="row">{value}</th> : <td>{value}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p class="note">
+          Evaluate the released checkpoint by following the instructions in the
+          <a href="https://github.com/microsoft/rhobotics#readme">repository README</a>.
+        </p>
+      </article>
+
+      <article class="result-block">
+        <div class="result-block__header">
+          <div>
+            <h3>
+              <a href="https://arxiv.org/abs/2507.00435" target="_blank" rel="noopener noreferrer">
+                RoboEval
+              </a>
+            </h3>
+            <p>
+              RoboEval is a bimanual-manipulation benchmark that scores not just
+              task success but <em>how</em> a policy moves — task progression,
+              motion efficiency, coordination, and safety. We adapt each model
+              under matched benchmark data budgets and evaluate all eight tasks
+              across three seeds and 100 rollouts per seed (n = 300 rollouts per
+              task). Mean success over three evaluation passes; error bars show
+              sample standard deviation. Baseline overall-success numbers in the
+              figure below are <strong>our re-runs</strong> under the
+              matched-adaptation protocol; the behavioral diagnostics further down
+              are the published RoboEval-protocol point estimates.
+            </p>
+          </div>
+          <strong class="metric">73.37% overall</strong>
+        </div>
+        <figure class="figure figure--wide">
+          <img src={withBase("assets/fig-roboeval.png")} alt="RoboEval success rate by task and model" loading="lazy" />
+        </figure>
+        <div class="diagnostic-grid" aria-label="RoboEval behavioral and safety diagnostics">
+          <div class="diagnostic-card">
+            <span class="diagnostic-card__val">13× fewer</span>
+            <span class="diagnostic-card__lbl">Self-collisions</span>
+            <span class="diagnostic-card__sub">0.06 vs 0.79 per episode (MolmoAct2)</span>
+          </div>
+          <div class="diagnostic-card">
+            <span class="diagnostic-card__val">1.77 m</span>
+            <span class="diagnostic-card__lbl">Cartesian path length</span>
+            <span class="diagnostic-card__sub">vs 1.96 m — more direct motions</span>
+          </div>
+          <div class="diagnostic-card">
+            <span class="diagnostic-card__val">0.07 m</span>
+            <span class="diagnostic-card__lbl">Bimanual gripper height Δ</span>
+            <span class="diagnostic-card__sub">vs 0.09 m — tighter arm coordination</span>
+          </div>
+        </div>
+        <p class="note">
+          Behavioral and safety metrics on the combined RoboEval task variations
+          (report Table 12). Baseline figures are published RoboEval-protocol point
+          estimates.
+        </p>
+      </article>
+
+      <article class="result-block">
+        <div class="result-block__header">
+          <div>
+            <h3>RoboTwin</h3>
+            <p>
+              RoboTwin was built to demonstrate the value of mid-training, which
+              makes it the natural simulated benchmark for isolating that effect in
+              Rho. We depart from the standard RoboTwin protocol on purpose:
+              we choose the dual-arm <strong>UR5e</strong> embodiment (heavily
+              represented in our pretraining data), mid-train on 45 of its tasks
+              (two epochs at global batch 1,024, with the same VL co-training as
+              elsewhere), and hold out five distinct tasks — <em>Hanging Mug, Move
+              Stapler Pad, Place Burger Fries, Handover Mic, and Stack Bowls
+              Three</em> — for downstream fine-tuning and evaluation. We then
+              fine-tune from either the pretrained base or the mid-trained
+              checkpoint on progressively smaller slices of downstream data
+              (100% → 50% → 25% → 12.5%). At the 12.5% budget, mid-training lifts
+              Easy-protocol success from
+              <strong>28.1% to 40.6% (+12.5 pts)</strong> and Hard-protocol success
+              from <strong>30.9% to 38.9% (+8.0 pts)</strong> — a controlled read
+              on how much the embodiment prior helps when task data is scarce.
+            </p>
+          </div>
+          <a class="text-link" href="https://robotwin-platform.github.io/leaderboard">
+            RoboTwin leaderboard ↗
+          </a>
+        </div>
+        <figure class="figure figure--wide">
+          <img
+            src={withBase("assets/fig-robotwin-midtraining.png")}
+            alt="RoboTwin easy and hard results across fine-tuning data budgets"
+            loading="lazy"
+          />
+          <figcaption>
+            Mid-training provides the largest gains in low-data adaptation and
+            improves the 100% data result on the Hard protocol.
+          </figcaption>
+        </figure>
+        <details>
+          <summary>Five-task leaderboard comparison</summary>
+          <p class="note">
+            The comparison uses Hanging Mug, Move Stapler Pad, Place Burger Fries,
+            Handover Mic, and Stack Bowls Three. Leaderboard policies use different
+            training settings, so this compares evaluation performance rather than
+            controlled training recipes.
+          </p>
+          <div class="table-wrap">
+            <table class="results-table">
+              <thead>
+                <tr><th>Policy</th><th>Training setting</th><th>Easy</th><th>Hard</th><th>Average</th></tr>
+              </thead>
+              <tbody>
+                {robotwinSummary.map((row) => (
+                  <tr class:list={{ highlight: row[0] === "Rho 100% Midtrain" }}>
+                    {row.map((value, index) => index < 2 ? <th scope={index === 0 ? "row" : undefined}>{value}</th> : <td>{value}</td>)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      </article>
+    </section>
+
+    <section id="efficiency" class="section section--tint">
+      <div class="container container--wide">
+        <p class="section-kicker">Systems</p>
+        <h2>Training efficiency</h2>
+        <p class="section-intro">
+          Rho offers low-memory full and expert-only training profiles. Lower values
+          are better for peak VRAM and seconds per step.
+        </p>
+        <div class="table-wrap">
+          <table class="results-table">
+            <thead>
+              <tr><th>Framework</th><th>Recipe</th><th>Trainable</th><th>GC</th><th>Peak VRAM ↓</th><th>Time/step ↓</th></tr>
+            </thead>
+            <tbody>
+              {efficiencyRows.map((row) => (
+                <tr class:list={{ highlight: row[0] === "Rho" }}>
+                  {row.map((value, index) => index < 2 ? <th scope={index === 0 ? "row" : undefined}>{value}</th> : <td>{value}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p class="note">
+          These are observed training profiles rather than a model-quality
+          benchmark. Precision, gradient checkpointing, trainable scope, and NFS
+          differ across recipes. MolmoAct2 measurements use a batch size of 16;
+          its expert-only runs set
+          <code>--policy.train_action_expert_only=true</code>.
+        </p>
+
+        <div class="efficiency-study">
+          <h3>Inference latency and deployment footprint</h3>
+          <p>
+            Rho predicts a 50-step action chunk per forward solve — the longest horizon
+            among the compared models — so each inference emits far more future control
+            than peers (π0.5 18, GR00T 40, MolmoAct2 16). The VLM visual context is encoded
+            once and reused across all 10 flow-integration steps, sustaining a >10 Hz
+            replanning loop that is real-time-chunking compatible.
+          </p>
+          <div class="table-wrap">
+            <table class="results-table">
+              <thead>
+                <tr><th>Framework</th><th>Flow steps</th><th>Horizon</th><th>Latency (bs=1)</th><th>bs=4</th><th>bs=8</th><th>VRAM (bs=1)</th><th>VRAM (bs=8)</th></tr>
+              </thead>
+              <tbody>
+                <tr><th scope="row">OpenPI π0.5</th><td>10</td><td>18</td><td>44.8 ms (22 Hz)</td><td>112 ms</td><td>201 ms</td><td>7.4 GB</td><td>8.0 GB</td></tr>
+                <tr><th scope="row">GR00T N1.7</th><td>4</td><td>40</td><td>48.2 ms (21 Hz)</td><td>66 ms</td><td>112 ms</td><td>7.1 GB</td><td>8.4 GB</td></tr>
+                <tr class="highlight"><th scope="row">Rho</th><td>10</td><td>50</td><td>83.9 ms (12 Hz)</td><td>126 ms</td><td>186 ms</td><td>11.0 GB</td><td>12.5 GB</td></tr>
+                <tr><th scope="row">MolmoAct2</th><td>10</td><td>16</td><td>110.4 ms (9 Hz)</td><td>205 ms</td><td>357 ms</td><td>13.0 GB</td><td>15.5 GB</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="note">
+            Median GPU model-forward time and peak VRAM for one action-chunk prediction,
+            measured in our harness on an NVIDIA RTX PRO 6000 (Blackwell) in bfloat16, each
+            model at its native default flow/denoising steps. These are model-forward times;
+            end-to-end robot-loop latency adds framework-specific CPU preprocessing. Latency
+            and memory are architecture-driven and are not a model-quality benchmark. At batch
+            size 8, Rho (186 ms) is faster than OpenPI π0.5 (201 ms) and roughly 2× faster than
+            MolmoAct2 (357 ms); its 11–12.5 GB footprint fits a single 24 GB GPU.
+          </p>
+        </div>
+
+        <div class="efficiency-study">
+          <h3>Multiple flow samples improve training efficiency</h3>
+          <p>
+            We note that using multiple flow samples per observation during
+            training can drastically decrease the number of training steps required
+            and produce more robust results for a modest increase in VRAM usage and
+            training time.
+          </p>
+          <div class="table-wrap">
+            <table class="results-table">
+              <thead>
+                <tr><th>Condition</th><th>10k</th><th>20k</th><th>30k</th><th>40k</th></tr>
+              </thead>
+              <tbody>
+                <tr><th scope="row">GR00T N1.7</th><td>33.50%</td><td>38.63%</td><td>56.38%</td><td>57.63%</td></tr>
+                <tr><th scope="row">MolmoAct2, k=1</th><td>49.12%</td><td>57.25%</td><td>62.38%</td><td>59.88%</td></tr>
+                <tr><th scope="row">MolmoAct2, k=8</th><td>58.75%</td><td>57.25%</td><td>61.12%</td><td>62.00%</td></tr>
+                <tr><th scope="row">Rho, k=1</th><td>55.12%</td><td>69.12%</td><td>72.00%</td><td>70.00%</td></tr>
+                <tr class="highlight"><th scope="row">Rho, k=8</th><td>67.50%</td><td>67.50%</td><td>72.75%</td><td>74.75%</td></tr>
+                <tr><th scope="row">π0.5</th><td>57.75%</td><td>66.38%</td><td>69.88%</td><td>66.50%</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="note">
+            RoboEval success rate by training checkpoint. Here, <code>k</code>
+            denotes the number of flow samples drawn per observation during training.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="models" class="section container">
+      <p class="section-kicker">Open weights</p>
+      <h2>Models and resources</h2>
+      <div class="release-grid">
+        <a href="https://huggingface.co/microsoft/rho-base"><strong>rho-base</strong><span>Base pretrained model</span></a>
+        <a href="https://huggingface.co/microsoft/rho-libero"><strong>rho-libero</strong><span>LIBERO fine-tuned model</span></a>
+        <a href="https://huggingface.co/microsoft/rho-fr3-duo"><strong>rho-fr3-duo</strong><span>FR3 Duo mid-trained model</span></a>
+        <a href="https://huggingface.co/microsoft/rho-ur-ai-trainer"><strong>rho-ur-ai-trainer</strong><span>UR5e mid-trained model</span></a>
+        <a href="https://huggingface.co/microsoft/rho-yam-box"><strong>rho-yam-box</strong><span>YAMBox mid-trained model</span></a>
+        <a href="https://github.com/microsoft/rhobotics"><strong>rhobotics</strong><span>Training and evaluation code</span></a>
+      </div>
+    </section>
+  </div>
+</BaseLayout>
+
+<style>
+  .hero {
+    padding: 72px 0 56px;
+    background:
+      radial-gradient(circle at 15% 20%, rgba(0, 103, 184, 0.12), transparent 32%),
+      radial-gradient(circle at 85% 20%, rgba(209, 73, 91, 0.1), transparent 30%);
+    text-align: center;
+  }
+  .eyebrow,
+  .section-kicker {
+    margin: 0 0 10px;
+    color: var(--link);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .hero h1 {
+    font-size: clamp(4rem, 12vw, 8rem);
+    line-height: 0.9;
+    letter-spacing: -0.06em;
+  }
+  .hero__dek {
+    max-width: 780px;
+    margin: 28px auto 0;
+    color: var(--text-muted);
+    font-size: clamp(1.15rem, 2.4vw, 1.5rem);
+    line-height: 1.5;
+  }
+  .hero__links {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 30px;
+  }
+  .button {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 18px;
+    border-radius: 999px;
+    background: #171717;
+    color: #fff;
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  .button:hover,
+  .button:focus {
+    background: var(--link);
+    color: #fff;
+    text-decoration: none;
+  }
+  .hero__stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    max-width: 900px;
+    margin: 48px auto 0;
+    border-block: 1px solid var(--rule);
+  }
+  .hero__stats div {
+    padding: 20px 14px;
+    border-right: 1px solid var(--rule);
+  }
+  .hero__stats div:last-child { border-right: 0; }
+  .hero__stats dt {
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .hero__stats dd {
+    margin: 4px 0 0;
+    font-size: 1.55rem;
+    font-weight: 700;
+  }
+  .hero__media {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+    max-width: 1080px;
+    margin: 42px auto 0;
+  }
+  .hero__media--sizzle {
+    grid-template-columns: repeat(3, 1fr);
+    max-width: 1240px;
+  }
+  .hero__media figure { margin: 0; }
+  .hero__media img,
+  .hero__media video {
+    display: block;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+    border-radius: 12px;
+    box-shadow: 0 18px 50px rgba(16, 34, 52, 0.16);
+  }
+  .hero__media--sizzle img,
+  .hero__media--sizzle video {
+    aspect-ratio: 16 / 9;
+  }
+  .hero__media figcaption {
+    margin-top: 9px;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+  }
+  .section-nav {
+    position: sticky;
+    z-index: 5;
+    top: 0;
+    background: rgba(255, 255, 255, 0.94);
+    border-block: 1px solid var(--rule);
+    backdrop-filter: blur(10px);
+  }
+  .section-nav .container {
+    display: flex;
+    gap: 24px;
+    overflow-x: auto;
+    padding-block: 12px;
+  }
+  .section-nav a {
+    color: var(--text);
+    font-size: 0.86rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .section {
+    padding-block: 76px;
+  }
+  .section h2 {
+    max-width: 760px;
+    margin-top: 0;
+    border: 0;
+    font-size: clamp(2rem, 4vw, 3.2rem);
+    letter-spacing: -0.03em;
+  }
+  .section-intro {
+    max-width: 780px;
+    margin-inline: auto;
+    color: var(--text-muted);
+    font-size: 1.12rem;
+  }
+  .section--tint { background: #f6f8fa; }
+  .adaptation-section {
+    overflow: hidden;
+    background:
+      linear-gradient(180deg, #f7fbfe 0%, #ffffff 100%);
+    border-block: 1px solid #dceaf3;
+  }
+  .adaptation-flow {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 18px;
+    margin-top: 46px;
+  }
+  .adaptation-stage {
+    position: relative;
+    min-height: 440px;
+    padding: 22px;
+    border: 1px solid #cfdce5;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 12px 34px rgba(6, 33, 56, 0.07);
+  }
+  .adaptation-stage::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 5px;
+    border-radius: 14px 14px 0 0;
+    background: linear-gradient(90deg, #0067b8, #16a0c8);
+  }
+  .adaptation-stage:nth-child(2)::before {
+    background: linear-gradient(90deg, #0e7397, #3b9b6e);
+  }
+  .adaptation-stage:nth-child(3)::before {
+    background: linear-gradient(90deg, #3b9b6e, #d19a2a);
+  }
+  .adaptation-stage:nth-child(4)::before {
+    background: linear-gradient(90deg, #d19a2a, #d1495b);
+  }
+  .adaptation-stage__topline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 22px;
+  }
+  .adaptation-stage__number {
+    display: grid;
+    width: 38px;
+    height: 38px;
+    place-items: center;
+    border-radius: 50%;
+    background: #102234;
+    color: #fff;
+    font-size: 0.74rem;
+    font-weight: 700;
+  }
+  .adaptation-stage__label {
+    color: var(--link);
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .adaptation-stage h3 {
+    margin: 0;
+    font-size: 1.45rem;
+  }
+  .adaptation-stage__subtitle {
+    margin: 4px 0 18px;
+    color: var(--link);
+    font-size: 0.86rem;
+    font-weight: 650;
+  }
+  .adaptation-stage__description {
+    min-height: 126px;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    line-height: 1.55;
+  }
+  .adaptation-stage dl {
+    margin: 22px 0 0;
+    border-top: 1px solid var(--rule);
+  }
+  .adaptation-stage dl div {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .adaptation-stage dt {
+    color: var(--text-muted);
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .adaptation-stage dd {
+    margin: 2px 0 0;
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+  .adaptation-stage__arrow {
+    position: absolute;
+    z-index: 2;
+    top: 50%;
+    right: -28px;
+    display: grid;
+    width: 38px;
+    height: 38px;
+    place-items: center;
+    border: 1px solid #cfdce5;
+    border-radius: 50%;
+    background: #fff;
+    color: var(--link);
+    font-size: 1.2rem;
+    font-weight: 700;
+    transform: translateY(-50%);
+  }
+  .adaptation-extension {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    max-width: 820px;
+    margin: 26px auto 0;
+    padding: 18px 22px;
+    border: 1px dashed #9bbbd0;
+    border-radius: 12px;
+    background: #fff;
+  }
+  .adaptation-extension__icon {
+    display: grid;
+    flex: 0 0 auto;
+    width: 44px;
+    height: 44px;
+    place-items: center;
+    border-radius: 50%;
+    background: #e6f3fb;
+    color: var(--link);
+    font-size: 1.4rem;
+    font-weight: 700;
+  }
+  .adaptation-extension p {
+    margin: 3px 0 0;
+    color: var(--text-muted);
+    font-size: 0.88rem;
+  }
+  .adaptation-details {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 20px;
+    margin-top: 54px;
+  }
+  .adaptation-details article {
+    padding: 24px;
+    border-left: 3px solid var(--link);
+    background: #fff;
+  }
+  .adaptation-details span {
+    color: var(--link);
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .adaptation-details h3 {
+    margin: 8px 0;
+    font-size: 1.2rem;
+  }
+  .adaptation-details p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+  }
+  .section--dark {
+    background: #102234;
+    color: #fff;
+  }
+  .section--dark h2,
+  .section--dark h3 { color: #fff; }
+  .section--dark .section-kicker { color: #78c7ff; }
+  .section--dark .section-intro { color: #d4e0e8; }
+  .lede-grid {
+    display: grid;
+    grid-template-columns: 1.25fr 1fr;
+    gap: 48px;
+  }
+  .lede { font-size: 1.25rem; }
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 22px;
+    margin-top: 44px;
+  }
+  .feature-grid article {
+    padding-top: 18px;
+    border-top: 3px solid var(--text);
+  }
+  .feature-number {
+    color: var(--link);
+    font-size: 0.75rem;
+    font-weight: 700;
+  }
+  .feature-grid h3 { margin-top: 12px; }
+  .feature-grid p { color: var(--text-muted); font-size: 0.94rem; }
+  .figure { margin: 28px 0; }
+  .figure img {
+    display: block;
+    width: 100%;
+    border-radius: 8px;
+    background: #fff;
+  }
+  .figure--paper {
+    max-width: 900px;
+    margin-inline: auto;
+  }
+  .figure--paper img { border: 1px solid var(--rule); }
+  .figure figcaption {
+    max-width: 800px;
+    margin: 10px auto 0;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    text-align: center;
+  }
+  .result-block {
+    margin-top: 64px;
+    padding-top: 34px;
+    border-top: 1px solid var(--rule);
+  }
+  .result-block__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 30px;
+  }
+  .result-block h3 {
+    margin-top: 0;
+    font-size: 1.75rem;
+  }
+  .result-block__header p { max-width: 720px; color: var(--text-muted); }
+  .metric { color: var(--link); white-space: nowrap; }
+  .text-link { font-weight: 600; white-space: nowrap; }
+  .table-wrap {
+    margin: 28px 0;
+    overflow-x: auto;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: #fff;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+    line-height: 1.35;
+  }
+  th,
+  td {
+    padding: 11px 13px;
+    border-bottom: 1px solid var(--rule);
+    text-align: right;
+    white-space: nowrap;
+  }
+  th:first-child,
+  td:first-child { text-align: left; }
+  thead th {
+    background: #f3f5f7;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  tbody th { font-weight: 600; }
+  tbody tr:last-child > * { border-bottom: 0; }
+  .highlight > * {
+    background: rgba(0, 103, 184, 0.07);
+    font-weight: 700;
+  }
+  .note {
+    color: var(--text-muted);
+    font-size: 0.82rem;
+  }
+  .efficiency-study {
+    margin-top: 54px;
+    padding-top: 34px;
+    border-top: 1px solid var(--rule);
+  }
+  .efficiency-study h3 {
+    font-size: 1.55rem;
+  }
+  .efficiency-study > p:not(.note) {
+    max-width: 820px;
+  }
+  details {
+    margin-top: 22px;
+    padding: 16px 18px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+  }
+  summary { cursor: pointer; font-weight: 650; }
+  .callout {
+    padding: 18px 20px;
+    border-left: 4px solid var(--link);
+    background: #eef6fc;
+  }
+  .callout h3 { margin-top: 6px; }
+  .callout ul { margin: 12px 0 0; padding-left: 20px; }
+  .callout li { margin-bottom: 8px; }
+  .button--soon {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px dashed var(--rule);
+    cursor: default;
+  }
+  .button--soon:hover,
+  .button--soon:focus { background: transparent; color: var(--text-muted); }
+  .hero__stats-note {
+    max-width: 900px;
+    margin: 12px auto 0;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    text-align: center;
+  }
+  .badge {
+    display: inline-block;
+    margin-bottom: 8px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: rgba(120, 199, 255, 0.16);
+    color: #78c7ff;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+  }
+  .diagnostic-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-top: 24px;
+  }
+  .diagnostic-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 18px;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: #fafafa;
+  }
+  .diagnostic-card__val { font-size: 1.6rem; font-weight: 700; }
+  .diagnostic-card__lbl { font-weight: 600; }
+  .diagnostic-card__sub { color: var(--text-muted); font-size: 0.82rem; }
+  @media (max-width: 900px) {
+    .hero__media--sizzle { grid-template-columns: 1fr; max-width: 720px; }
+  }
+  @media (max-width: 720px) {
+    .diagnostic-grid { grid-template-columns: 1fr; }
+  }
+  .embodiment-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+    margin: 40px 0;
+  }
+  .embodiment-card {
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.06);
+  }
+  .embodiment-card img {
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+  }
+  .embodiment-card div { padding: 18px; }
+  .embodiment-card h3 { margin-top: 0; }
+  .embodiment-card p { color: #d4e0e8; font-size: 0.9rem; }
+  .embodiment-card a { color: #78c7ff; font-weight: 600; }
+  .table-wrap--dark {
+    border-color: rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.04);
+  }
+  .table-wrap--dark thead th { background: rgba(255, 255, 255, 0.1); color: #fff; }
+  .table-wrap--dark th,
+  .table-wrap--dark td { border-color: rgba(255, 255, 255, 0.14); }
+  .note--dark { color: #bdcbd5; }
+  .hardware-result {
+    display: grid;
+    grid-template-columns: minmax(260px, 0.65fr) 1.35fr;
+    align-items: center;
+    gap: 50px;
+    padding: 42px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .hardware-result--reverse > div { order: 2; }
+  .hardware-result--reverse > figure { order: 1; }
+  .hardware-result--reverse {
+    grid-template-columns: 1.35fr minmax(260px, 0.65fr);
+  }
+  .hardware-result__media {
+    grid-column: 1 / -1;
+    order: 3 !important;
+  }
+  .hardware-result__chart {
+    margin: 0;
+  }
+  .hardware-result h2 { font-size: clamp(1.8rem, 3vw, 2.6rem); }
+  .clip-grid,
+  .task-clips {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-top: 48px;
+  }
+  .task-clips {
+    margin-top: 0;
+  }
+  .task-clips--fr3 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .task-clips--ur5e {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .clip-grid figure,
+  .task-clips figure { margin: 0; }
+  .clip-grid img,
+  .task-clips img,
+  .clip-grid video,
+  .task-clips video {
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+    border-radius: 8px;
+  }
+  .clip-grid figcaption,
+  .task-clips figcaption {
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+  }
+  .release-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 14px;
+    margin-top: 32px;
+  }
+  .release-grid a {
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    color: var(--text);
+  }
+  .release-grid a:hover {
+    border-color: var(--link);
+    text-decoration: none;
+  }
+  .release-grid strong { color: var(--link); }
+  .release-grid span { color: var(--text-muted); font-size: 0.9rem; }
+  @media (max-width: 820px) {
+    .adaptation-flow {
+      grid-template-columns: repeat(2, 1fr);
+    }
+    .adaptation-stage__arrow {
+      display: none;
+    }
+    .feature-grid,
+    .embodiment-grid { grid-template-columns: repeat(2, 1fr); }
+    .lede-grid,
+    .hardware-result { grid-template-columns: 1fr; gap: 20px; }
+    .hardware-result--reverse { grid-template-columns: 1fr; }
+    .hardware-result--reverse > div,
+    .hardware-result--reverse > figure { order: initial; }
+    .result-block__header { flex-direction: column; gap: 4px; }
+  }
+  @media (max-width: 560px) {
+    .section { padding-block: 56px; }
+    .hero__stats,
+    .adaptation-flow,
+    .adaptation-details,
+    .feature-grid,
+    .embodiment-grid,
+    .clip-grid,
+    .hero__media,
+    .task-clips--fr3,
+    .task-clips--ur5e,
+    .release-grid { grid-template-columns: 1fr; }
+    .hero__stats div { border-right: 0; border-bottom: 1px solid var(--rule); }
+    .hero__stats div:last-child { border-bottom: 0; }
+  }
+</style>

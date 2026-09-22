@@ -1,0 +1,6 @@
+# Astro / Node build artifacts for the project website
+node_modules/
+dist/
+.astro/
+.output/
+*.log

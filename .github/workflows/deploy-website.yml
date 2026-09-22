@@ -32,7 +32,7 @@ jobs:
         with:
           # The Astro project lives in a subdirectory of this repo.
           path: ./website
-          node-version: 20
+          node-version: 22
 
   deploy:
     needs: build

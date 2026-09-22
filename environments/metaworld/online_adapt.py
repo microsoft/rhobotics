@@ -135,6 +135,7 @@ def main() -> None:
     p.add_argument("--bc_lr", type=float, default=1e-4)
     p.add_argument("--seed_expert_episodes", type=int, default=10)
     p.add_argument("--magnitude", type=float, default=3.0)
+    p.add_argument("--hidden_dims", type=int, nargs="+", default=[1024, 1024, 1024])
     p.add_argument("--query_freq", type=int, default=8)
     p.add_argument("--max_timesteps", type=int, default=200)
     p.add_argument("--beta_start", type=float, default=1.0)
@@ -168,6 +169,7 @@ def main() -> None:
         emb_dim=pcfg.embed_dim,
         state_dim=4,  # MetaWorld: hand xyz + gripper
         magnitude=args.magnitude,
+        hidden_dims=tuple(args.hidden_dims),
         noise_steps=pcfg.chunk_size,
         noise_dim=pcfg.max_action_dim,
     )

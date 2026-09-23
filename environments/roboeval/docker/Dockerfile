@@ -30,16 +30,23 @@ RUN git config --global url."https://github.com/".insteadOf git@github.com: && \
 # Keep the versions of NumPy, Gymnasium, and safetensors supplied by the Rho
 # image instead of applying RoboEval's older global pins.
 RUN pip install --no-cache-dir \
+        "backoff>=2.1.0" \
+        "diffusers==0.38.0" \
         "dm_control==1.0.31" \
+        "h5py>=3.10.0" \
         "hydra-core==1.3.*" \
         "mojo @ git+https://github.com/helen9975/mojo.git" \
         "mujoco==3.3.3" \
         mujoco_utils \
+        "numba>=0.59.0" \
         opencv-python-headless \
+        "pymunk==6.11.1" \
         "pynput==1.7.7" \
         pyquaternion \
+        "pyzmq>=26.2.1" \
         pyyaml \
-        wget && \
+        wget \
+        "zarr>=2.17.0" && \
     pip install --no-deps -e /opt/roboeval
 
 COPY environments/roboeval/ /workspace/environments/roboeval/

@@ -98,8 +98,32 @@ preserve a target effective batch size.
 
 ## Evaluate
 
-Evaluation must explicitly select the finetuned checkpoint. For the default
-`lift_pot` task with end-effector actions:
+Evaluation must explicitly select the finetuned checkpoint.
+
+### Standard benchmark (preferred)
+
+Use the multieval configuration for the standard end-effector benchmark:
+
+```bash
+python environments/roboeval/eval.py \
+  --config_path=environments/roboeval/configs/multieval_roboeval_ee_6d_pos.yaml \
+  --pretrained_checkpoint=/path/to/checkpoint_step_0010000 \
+  --output_dir=outputs/eval_roboeval/multieval
+```
+
+This evaluates all eight RoboEval tasks with 100 episodes and a 250-step limit
+per task. The policy is loaded once and reused across the task environments,
+making this the preferred method for full benchmark runs. Results are written
+to one subdirectory per task, along with a `multieval_summary_*.json` file in
+the output directory.
+
+The dataset directories must be available under `ROBOEVAL_DATA_ROOT` as
+described in [Prepare the datasets](#prepare-the-datasets).
+
+### Single-task evaluation
+
+Use the single-task configuration for smoke tests, debugging, or targeted
+evaluation. For the default `lift_pot` task with end-effector actions:
 
 ```bash
 python environments/roboeval/eval.py \

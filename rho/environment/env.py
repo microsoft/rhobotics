@@ -600,7 +600,7 @@ def evaluate_policy(
 
         # Initialize action queue using deque (like Phi4MMPolicy.select_action)
         # Queue holds tensors of shape (batch, action_dim)
-        action_queue: deque[torch.Tensor] = deque()
+        action_queue: deque[torch.Tensor] = deque(maxlen=max_steps)
 
         # RTC: number of actions popped from the current chunk since the last
         # inference. Instead of sending the still-in-flight actions back to the
@@ -664,8 +664,6 @@ def evaluate_policy(
                 if eval_mode == "rtc":
                     obs["num_actions_executed"] = num_executed_since_inference
                 action_chunk = policy_interface.get_action_chunk(obs)
-                if eval_mode == "standard":
-                    action_chunk = action_chunk[:, : policy_interface.execution_horizon]
 
                 # Populate queue: transpose to (chunk_size, batch, action_dim)
                 # then extend queue with each timestep

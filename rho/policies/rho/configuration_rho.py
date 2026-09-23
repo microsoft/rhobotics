@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from rho.common.constants import ACTION, OBSERVATION_PREFIX
@@ -11,6 +11,13 @@ from rho.policies.base import PolicyConfig
 @dataclass
 class RhoConfig(PolicyConfig):
     """Configuration for the Rho flow-matching policy."""
+
+    # ── Optional learned noise sampler (OFF by default: None == Gaussian) ──────
+    # Name registered in rho.policies.rho.noise_policy.NOISE_REGISTRY, e.g. "vlm_residual".
+    # When set, the flow model owns it as a submodule, so it is saved and restored with the
+    # model state_dict - one checkpoint carries both the policy and its noise sampler.
+    noise_policy: str | None = None
+    noise_policy_kwargs: dict = field(default_factory=dict)
 
     name: str = "rho"
     pretrained_repo_id: str | None = "microsoft/rho-base"

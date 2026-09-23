@@ -1549,6 +1549,17 @@ class FlowMatchingModel(BaseVLMModel):
         # and merged into the wandb loss_dict. Reset per forward.
         self._last_hidden_state_stats: dict[str, float] = {}
 
+        # Optional learned noise sampler. None (the default) keeps the Gaussian draw, i.e. standard
+        # evaluation. When configured it is an nn.Module MEMBER, so it round-trips through the model's
+        # state_dict and a single checkpoint carries both the policy and its sampler.
+        from rho.policies.rho.noise_policy import build_noise_policy
+
+        self.noise_policy = build_noise_policy(
+            getattr(config, "noise_policy", None), **(getattr(config, "noise_policy_kwargs", None) or {})
+        )
+        if self.noise_policy is not None:
+            self.noise_policy = self.noise_policy.to(device=self.device, dtype=torch.float32).eval()
+
     def _compute_hidden_state_stats(self, image_text_embed) -> dict[str, float]:
         """Compute scalar stats on the extracted VLM hidden state.
 
@@ -1861,8 +1872,27 @@ class FlowMatchingModel(BaseVLMModel):
         bsize = state.shape[0]
         device = state.device
 
-        if noise is None:
-            actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
+        actions_shape = (bsize, self.config.chunk_size, self.config.max_action_dim)
+        if noise is None and self.noise_policy is not None:
+            # Conditioning must come from the policy's OWN prefix forward for this observation, so
+            # resolve it first and reuse it for the denoise loop below (no second VLM pass).
+            if precomputed_hidden_state is None:
+                if self._use_layerwise_cross:
+                    precomputed_hidden_state = self.get_all_hidden_states(
+                        image, prompt, image_mask=image_mask
+                    )
+                else:
+                    precomputed_hidden_state = self.get_image_text_hidden_state(
+                        image, prompt, image_mask=image_mask
+                    )
+            _embed, _mask = precomputed_hidden_state
+            if isinstance(_embed, (list, tuple)):
+                _cond = _embed[min(int(self.hidden_state_idx), len(_embed) - 1)]
+            else:
+                _cond = _embed
+            with torch.no_grad():
+                x_t = self.noise_policy(_cond, _mask, state, actions_shape).to(dtype=self.dtype)
+        elif noise is None:
             x_t = self.sample_noise(actions_shape, device)
         else:
             x_t = noise.to(dtype=self.dtype)
@@ -1938,6 +1968,46 @@ class FlowMatchingModel(BaseVLMModel):
             r2_tau = (1.0 - tau) ** 2 / (tau**2 + (1.0 - tau) ** 2)
             return min(beta, (1.0 - tau) / (tau * r2_tau))
         raise ValueError(f"Unknown guidance_schedule {schedule!r}. Valid choices are 'paper' and 'constant'.")
+
+    def velocity_eval(self, state, x_t, time_scalar, precomputed_hidden_state):
+        """Evaluate the flow velocity v(x_t, t) at a single denoise step.
+
+        Mirrors the inner body of ``sample_actions``'s denoise loop, exposed so an
+        inverter can walk the sampler backwards (see rho.online.noise_inversion).
+        ``precomputed_hidden_state`` is the ``(embed, mask)`` pair from
+        ``get_image_text_hidden_state``, reused across steps without re-running the VLM.
+
+        Returns (B, chunk_size, max_action_dim) in x_t's dtype.
+        """
+        image_text_embed, image_text_mask = precomputed_hidden_state
+        bsize = state.shape[0]
+        time = (
+            torch.tensor(float(time_scalar), dtype=torch.float32, device=state.device)
+            .expand(bsize)
+            .to(self.dtype)
+        )
+        state_embed = self.embed_state(state, x_t.to(self.dtype), time)
+        time_emb = self.embed_time_for_cond(time)
+        output_embed = self.action_expert.forward(
+            image_text_embed, state_embed, time_emb, image_text_attn_mask=image_text_mask
+        )
+        action_token = output_embed[:, -self.config.chunk_size :]
+        return self.action_head(action_token).to(x_t.dtype)
+
+    def sample_actions_from_precomputed(self, state, precomputed_hidden_state, noise, num_steps=None):
+        """``sample_actions`` with the prefix conditioning named explicitly.
+
+        Used to verify an inversion round-trips: decode the recovered noise and
+        compare against the actions it was derived from.
+        """
+        return self.sample_actions(
+            image=None,
+            prompt=None,
+            state=state,
+            noise=noise,
+            precomputed_hidden_state=precomputed_hidden_state,
+            num_steps=num_steps,
+        )
 
     @torch.no_grad
     def sample_actions_rtc(

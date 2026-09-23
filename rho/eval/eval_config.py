@@ -489,7 +489,7 @@ class EvalConfig:
 
     eval_mode: str = "standard"
     inference_delay: int = 6  # number of action steps it takes to inference
-    execution_horizon: int | None = None  # actions executed between inferences; overrides checkpoint default
+    execution_horizon: int | None = None  # actions executed between RTC inferences
     beta: int = 10  # weighting of rtc update vs flow matching update
     guidance_schedule: str = "paper"  # guidance coefficient schedule: 'paper' or 'constant'
 

@@ -1,0 +1,24 @@
+# Demonstrations produced by environments/metaworld/generate_demos.py.
+# Point root_dir at whatever that script printed; repo_id must match --repo_id.
+repo_id: "metaworld/assembly-v3"
+root_dir: null  # null = the LeRobot cache location
+use_imagenet_stats: false
+
+# MetaWorld is a single camera, a 4-D end-effector state and a 4-D action
+# (xyz delta + gripper) -- far smaller than the pretraining shape, which the
+# policy pads up to max_state_dim / max_action_dim.
+features:
+  observation.image:
+    type: VISUAL
+    shape: (3,256,256)
+  observation.state:
+    type: STATE
+    shape: (4,)
+  action:
+    type: ACTION
+    shape: (4,)
+
+normalization_mapping:
+  VISUAL: IDENTITY
+  STATE: MEAN_STD
+  ACTION: MEAN_STD

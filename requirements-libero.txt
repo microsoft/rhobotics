@@ -1,16 +1,34 @@
-hydra-core==1.3.4
-easydict==1.9
-robomimic==0.2.0
-thop==0.1.1-2209072238
-robosuite==1.4.0
-bddl==1.0.1
-future==0.18.3
-flash-attn==2.7.4.post1
-matplotlib==3.5.3
-cloudpickle==2.1.0
-gym==0.25.2
-numpy==1.24.4
-scipy==1.15.3
-tensorflow_datasets==4.9.9  # used for loading libero data when converting to lerobot
-ipywidgets==8.1.7  # used for jupter notebooks
--e git+https://github.com/Lifelong-Robot-Learning/LIBERO.git#egg=libero
+# LIBERO simulator dependencies.
+#
+# The container is the supported way to run LIBERO; see the LIBERO section of
+# README.md and environments/libero/docker/. This file mirrors what that image
+# installs, for the occasional environment where the container is not an option.
+# Keep the two in step.
+#
+# The `libero` distribution pulls in robosuite, robomimic, bddl, hydra-core,
+# gymnasium and the rest, so they are not repeated here.
+#
+# Install after `pip install -e ".[server]"` and `pip install -e ./rho_client`,
+# with build isolation disabled so that flash-attn and libero build against the
+# torch already in the environment:
+#
+#   CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+#     pip install --use-pep517 --no-build-isolation -r requirements-libero.txt
+#
+# Then do the two things the image does for you: install robosuite's default
+# private macros, and fetch the LIBERO assets.
+#
+#   python -c "import importlib.util, pathlib, shutil; \
+#   p = pathlib.Path(next(iter(importlib.util.find_spec('robosuite').submodule_search_locations))); \
+#   shutil.copyfile(p / 'macros.py', p / 'macros_private.py')"
+#   python environments/libero/docker/setup_libero_assets.py
+
+libero
+flash-attn==2.8.3
+
+# libero and robosuite both depend on mujoco unpinned; robosuite 1.4.0 reads
+# MjData.qM, which mujoco renamed to M in 3.4. Pin below the rename.
+mujoco==3.3.6
+
+tensorflow_datasets==4.9.10  # used for loading libero data when converting to lerobot
+ipywidgets==8.1.9  # used for jupyter notebooks

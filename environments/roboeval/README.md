@@ -98,7 +98,10 @@ preserve a target effective batch size.
 
 ## Evaluate
 
-Evaluation must explicitly select the finetuned checkpoint.
+The public end-effector checkpoint is available at
+[`microsoft/rho-roboeval`](https://huggingface.co/microsoft/rho-roboeval).
+Evaluation must explicitly select this hosted checkpoint or a finetuned local
+checkpoint.
 
 ### Standard benchmark (preferred)
 
@@ -107,7 +110,7 @@ Use the multieval configuration for the standard end-effector benchmark:
 ```bash
 python environments/roboeval/eval.py \
   --config_path=environments/roboeval/configs/multieval_roboeval_ee_6d_pos.yaml \
-  --pretrained_checkpoint=/path/to/checkpoint_step_0010000 \
+  --pretrained_checkpoint=microsoft/rho-roboeval \
   --output_dir=outputs/eval_roboeval/multieval
 ```
 
@@ -128,7 +131,7 @@ evaluation. For the default `lift_pot` task with end-effector actions:
 ```bash
 python environments/roboeval/eval.py \
   --config_path=environments/roboeval/configs/eval_ee_6d_pos.yaml \
-  --pretrained_checkpoint=/path/to/checkpoint_step_0010000 \
+  --pretrained_checkpoint=microsoft/rho-roboeval \
   --dataset_root_dir=/data/lift_pot
 ```
 

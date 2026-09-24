@@ -40,6 +40,10 @@ def _slice_chunk_stat_to_value(stat: Tensor, value: Tensor) -> Tensor:
     return stat
 
 
+def _stats_for_value(buffer: nn.ParameterDict, value: Tensor) -> dict[str, Tensor]:
+    return {name: stat.to(device=value.device) for name, stat in buffer.items()}
+
+
 def create_stats_buffers(
     features: dict[str, PolicyFeature],
     norm_map: dict[str, NormalizationMode],
@@ -427,7 +431,7 @@ class Normalize(nn.Module):
             if norm_mode is NormalizationMode.IDENTITY:
                 continue
 
-            buffer = getattr(self, "buffer_" + key.replace(".", "_"))
+            buffer = _stats_for_value(getattr(self, "buffer_" + key.replace(".", "_")), batch[key])
 
             if norm_mode is NormalizationMode.MEAN_STD:
                 mean = buffer["mean"]
@@ -563,7 +567,7 @@ class Unnormalize(nn.Module):
             if norm_mode is NormalizationMode.IDENTITY:
                 continue
 
-            buffer = getattr(self, "buffer_" + key.replace(".", "_"))
+            buffer = _stats_for_value(getattr(self, "buffer_" + key.replace(".", "_")), batch[key])
 
             if norm_mode is NormalizationMode.MEAN_STD:
                 mean = buffer["mean"]

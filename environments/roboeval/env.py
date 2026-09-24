@@ -8,7 +8,6 @@ RoboEval-specific observation spaces, actions, and rendering.
 """
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -64,15 +63,6 @@ TASK_ENVS = {
     "stack_two_blocks": StackTwoBlocksPositionAndOrientation,
     "cube_handover": CubeHandoverPositionAndOrientation,
 }
-
-
-def require_roboeval_data_root() -> None:
-    """Require the dataset root used by the public RoboEval configurations."""
-    if not os.environ.get("ROBOEVAL_DATA_ROOT"):
-        raise RuntimeError(
-            "ROBOEVAL_DATA_ROOT is not set. Point it to the directory containing "
-            "the converted RoboEval LeRobot datasets."
-        )
 
 
 def flatten_dict(observation: dict) -> dict:

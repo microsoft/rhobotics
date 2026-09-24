@@ -1,0 +1,67 @@
+# Multieval config for RoboEval — 8 tasks, 100 episodes each, n_envs=1
+pretrained_checkpoint: null
+
+eval_configs:
+  - <<: !include eval_ee_6d_pos.yaml
+    name: "lift_pot"
+    eval_num_episodes: 100
+    environment:
+      <<: !include ee_6d_pos/environment.yaml
+      task_name: "lift_pot"
+      max_episode_steps: 250
+
+  - <<: !include eval_ee_6d_pos.yaml
+    name: "lift_tray"
+    eval_num_episodes: 100
+    environment:
+      <<: !include ee_6d_pos/environment.yaml
+      task_name: "lift_tray"
+      max_episode_steps: 250
+
+  - <<: !include eval_ee_6d_pos.yaml
+    name: "pack_box"
+    eval_num_episodes: 100
+    environment:
+      <<: !include ee_6d_pos/environment.yaml
+      task_name: "pack_box"
+      max_episode_steps: 250
+
+  - <<: !include eval_ee_6d_pos.yaml
+    name: "pick_single_book_from_table"
+    eval_num_episodes: 100
+    environment:
+      <<: !include ee_6d_pos/environment.yaml
+      task_name: "pick_single_book_from_table"
+      max_episode_steps: 250
+
+  - <<: !include eval_ee_6d_pos.yaml
+    name: "rotate_valve"
+    eval_num_episodes: 100
+    environment:
+      <<: !include ee_6d_pos/environment.yaml
+      task_name: "rotate_valve"
+      max_episode_steps: 250
+
+  - <<: !include eval_ee_6d_pos.yaml
+    name: "stack_single_book_shelf"
+    eval_num_episodes: 100
+    environment:
+      <<: !include ee_6d_pos/environment.yaml
+      task_name: "stack_single_book_shelf"
+      max_episode_steps: 250
+
+  - <<: !include eval_ee_6d_pos.yaml
+    name: "stack_two_blocks"
+    eval_num_episodes: 100
+    environment:
+      <<: !include ee_6d_pos/environment.yaml
+      task_name: "stack_two_blocks"
+      max_episode_steps: 250
+
+  - <<: !include eval_ee_6d_pos.yaml
+    name: "cube_handover"
+    eval_num_episodes: 100
+    environment:
+      <<: !include ee_6d_pos/environment.yaml
+      task_name: "cube_handover"
+      max_episode_steps: 250

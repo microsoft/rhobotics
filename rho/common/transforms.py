@@ -974,6 +974,7 @@ class ConvertStatsTo6d(Transform):
                         (*stat_tensor.shape[:-1], 6),
                         identity_val,
                         dtype=stat_tensor.dtype,
+                        device=stat_tensor.device,
                     )
                     # Gripper stats (1 dim)
                     gripper_end = arm_start + input_dims_per_arm
@@ -986,6 +987,7 @@ class ConvertStatsTo6d(Transform):
                         (*stat_tensor.shape[:-1], 6),
                         identity_val,
                         dtype=stat_tensor.dtype,
+                        device=stat_tensor.device,
                     )
                     converted_parts.append(identity_rot_stats)
 

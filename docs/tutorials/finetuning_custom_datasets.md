@@ -338,6 +338,10 @@ The repository includes working multi-dataset configs you can use as references:
   `${ROBOEVAL_DATA_ROOT}` for its dataset root. The configuration also defines
   an `observation_whitelist` for the shared model inputs.
 
+  The public RoboEval training configuration now uses the pre-combined dataset
+  in `ee_6d_pos/roboeval_combined.yaml`. The multi-dataset file remains useful
+  as a reference when task datasets must be sampled with explicit weights.
+
 
 ## 3. Create a training configuration file
 

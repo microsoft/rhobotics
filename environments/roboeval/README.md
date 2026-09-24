@@ -5,28 +5,35 @@ This directory contains Rho training and evaluation configurations for
 dual-arm joint-position actions and end-effector position with 6D rotation
 actions.
 
-## Prepare the datasets
+## Download the training dataset
 
-The configurations expect converted LeRobot datasets arranged by task:
-
-```text
-/path/to/roboeval_datasets/
-├── cube_handover/
-├── lift_pot/
-├── lift_tray/
-├── pack_box/
-├── pick_single_book_from_table/
-├── rotate_valve/
-├── stack_single_book_shelf/
-└── stack_two_blocks/
-```
-
-Set `RHO_DATA_DIR` on the host to this directory. The container launcher mounts
-it at `/data` and sets `ROBOEVAL_DATA_ROOT=/data`.
+The training configurations use the combined LeRobot dataset hosted at
+[`microsoft/roboeval-data-for-rho`](https://huggingface.co/datasets/microsoft/roboeval-data-for-rho).
+The repository contains the dataset under `roboeval_combined/`, rather than at
+its top level, so download that subtree to a local directory under `HF_HOME`:
 
 ```bash
-export RHO_DATA_DIR=/path/to/roboeval_datasets
+export HF_HOME=/path/to/large/storage/huggingface
+mkdir -p "$HF_HOME/datasets/microsoft/roboeval-data-for-rho"
+
+hf download microsoft/roboeval-data-for-rho \
+  --repo-type dataset \
+  --include "roboeval_combined/**" \
+  --local-dir "$HF_HOME/datasets/microsoft/roboeval-data-for-rho"
 ```
+
+After downloading, the LeRobot dataset root is:
+
+```text
+$HF_HOME/datasets/microsoft/roboeval-data-for-rho/roboeval_combined/
+├── data/
+├── meta/
+└── videos/
+```
+
+The launcher mounts the host's `HF_HOME` at `/hf_home`; the training
+configurations read the dataset from
+`/hf_home/datasets/microsoft/roboeval-data-for-rho/roboeval_combined`.
 
 ## Build and launch the container
 
@@ -40,6 +47,7 @@ Build the base Rho image, then the RoboEval image:
 Launch an interactive GPU container:
 
 ```bash
+export HF_HOME=/path/to/large/storage/huggingface
 ./environments/roboeval/docker/run_interactive.sh
 ```
 
@@ -98,7 +106,12 @@ preserve a target effective batch size.
 
 ## Evaluate
 
-Evaluation must explicitly select the finetuned checkpoint.
+The public end-effector checkpoint is available at
+[`microsoft/rho-roboeval`](https://huggingface.co/microsoft/rho-roboeval).
+Evaluation must explicitly select this hosted checkpoint or a finetuned local
+checkpoint. The checkpoint supplies the feature schema, preprocessing,
+normalization statistics, and dataset configuration; simulation evaluation
+does not require `RHO_DATA_DIR` or a local training dataset.
 
 ### Standard benchmark (preferred)
 
@@ -107,7 +120,7 @@ Use the multieval configuration for the standard end-effector benchmark:
 ```bash
 python environments/roboeval/eval.py \
   --config_path=environments/roboeval/configs/multieval_roboeval_ee_6d_pos.yaml \
-  --pretrained_checkpoint=/path/to/checkpoint_step_0010000 \
+  --pretrained_checkpoint=microsoft/rho-roboeval \
   --output_dir=outputs/eval_roboeval/multieval
 ```
 
@@ -117,9 +130,6 @@ making this the preferred method for full benchmark runs. Results are written
 to one subdirectory per task, along with a `multieval_summary_*.json` file in
 the output directory.
 
-The dataset directories must be available under `ROBOEVAL_DATA_ROOT` as
-described in [Prepare the datasets](#prepare-the-datasets).
-
 ### Single-task evaluation
 
 Use the single-task configuration for smoke tests, debugging, or targeted
@@ -128,8 +138,7 @@ evaluation. For the default `lift_pot` task with end-effector actions:
 ```bash
 python environments/roboeval/eval.py \
   --config_path=environments/roboeval/configs/eval_ee_6d_pos.yaml \
-  --pretrained_checkpoint=/path/to/checkpoint_step_0010000 \
-  --dataset_root_dir=/data/lift_pot
+  --pretrained_checkpoint=microsoft/rho-roboeval
 ```
 
 For a joint-position checkpoint:
@@ -137,21 +146,14 @@ For a joint-position checkpoint:
 ```bash
 python environments/roboeval/eval.py \
   --config_path=environments/roboeval/configs/eval_joint_pos.yaml \
-  --pretrained_checkpoint=/path/to/checkpoint_step_0010000 \
-  --dataset_root_dir=/data/lift_pot
+  --pretrained_checkpoint=/path/to/checkpoint_step_0010000
 ```
 
-To evaluate another task, override both the environment task and the matching
-dataset root:
+To evaluate another task, override the environment task:
 
 ```bash
 python environments/roboeval/eval.py \
   --config_path=environments/roboeval/configs/eval_ee_6d_pos.yaml \
   --pretrained_checkpoint=/path/to/checkpoint_step_0010000 \
-  --environment.task_name=stack_two_blocks \
-  --dataset_root_dir=/data/stack_two_blocks
+  --environment.task_name=stack_two_blocks
 ```
-
-The dataset root selects the matching preprocessing and normalization
-statistics stored in the finetuned checkpoint; the evaluation YAML does not
-replace those statistics.

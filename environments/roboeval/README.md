@@ -109,29 +109,9 @@ preserve a target effective batch size.
 The public end-effector checkpoint is available at
 [`microsoft/rho-roboeval`](https://huggingface.co/microsoft/rho-roboeval).
 Evaluation must explicitly select this hosted checkpoint or a finetuned local
-checkpoint.
-
-RoboEval simulation evaluation also uses task-specific converted datasets for
-preprocessing and normalization. Arrange them by task and set `RHO_DATA_DIR`
-before launching the container:
-
-```text
-/path/to/roboeval_datasets/
-├── cube_handover/
-├── lift_pot/
-├── lift_tray/
-├── pack_box/
-├── pick_single_book_from_table/
-├── rotate_valve/
-├── stack_single_book_shelf/
-└── stack_two_blocks/
-```
-
-```bash
-export HF_HOME=/path/to/large/storage/huggingface
-export RHO_DATA_DIR=/path/to/roboeval_datasets
-./environments/roboeval/docker/run_interactive.sh
-```
+checkpoint. The checkpoint supplies the feature schema, preprocessing,
+normalization statistics, and dataset configuration; simulation evaluation
+does not require `RHO_DATA_DIR` or a local training dataset.
 
 ### Standard benchmark (preferred)
 
@@ -150,9 +130,6 @@ making this the preferred method for full benchmark runs. Results are written
 to one subdirectory per task, along with a `multieval_summary_*.json` file in
 the output directory.
 
-The dataset directories must be available under `ROBOEVAL_DATA_ROOT` as
-described in the evaluation setup above.
-
 ### Single-task evaluation
 
 Use the single-task configuration for smoke tests, debugging, or targeted
@@ -161,8 +138,7 @@ evaluation. For the default `lift_pot` task with end-effector actions:
 ```bash
 python environments/roboeval/eval.py \
   --config_path=environments/roboeval/configs/eval_ee_6d_pos.yaml \
-  --pretrained_checkpoint=microsoft/rho-roboeval \
-  --dataset_root_dir=/data/lift_pot
+  --pretrained_checkpoint=microsoft/rho-roboeval
 ```
 
 For a joint-position checkpoint:
@@ -170,21 +146,14 @@ For a joint-position checkpoint:
 ```bash
 python environments/roboeval/eval.py \
   --config_path=environments/roboeval/configs/eval_joint_pos.yaml \
-  --pretrained_checkpoint=/path/to/checkpoint_step_0010000 \
-  --dataset_root_dir=/data/lift_pot
+  --pretrained_checkpoint=/path/to/checkpoint_step_0010000
 ```
 
-To evaluate another task, override both the environment task and the matching
-dataset root:
+To evaluate another task, override the environment task:
 
 ```bash
 python environments/roboeval/eval.py \
   --config_path=environments/roboeval/configs/eval_ee_6d_pos.yaml \
   --pretrained_checkpoint=/path/to/checkpoint_step_0010000 \
-  --environment.task_name=stack_two_blocks \
-  --dataset_root_dir=/data/stack_two_blocks
+  --environment.task_name=stack_two_blocks
 ```
-
-The dataset root selects the matching preprocessing and normalization
-statistics stored in the finetuned checkpoint; the evaluation YAML does not
-replace those statistics.

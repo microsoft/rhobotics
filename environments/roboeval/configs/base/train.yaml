@@ -23,7 +23,7 @@ gradient_accumulation_steps: 1
 record_videos: true
 eval_num_episodes: 2
 eval_interval: 5000
-eval_dataset_root_dir: "${ROBOEVAL_DATA_ROOT}/lift_pot"
+eval_dataset_root_dir: "${HF_HOME}/datasets/microsoft/roboeval-data-for-rho/roboeval_combined"
 
 resume: false
 pretrained_checkpoint: null

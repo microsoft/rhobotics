@@ -5,28 +5,35 @@ This directory contains Rho training and evaluation configurations for
 dual-arm joint-position actions and end-effector position with 6D rotation
 actions.
 
-## Prepare the datasets
+## Download the training dataset
 
-The configurations expect converted LeRobot datasets arranged by task:
-
-```text
-/path/to/roboeval_datasets/
-├── cube_handover/
-├── lift_pot/
-├── lift_tray/
-├── pack_box/
-├── pick_single_book_from_table/
-├── rotate_valve/
-├── stack_single_book_shelf/
-└── stack_two_blocks/
-```
-
-Set `RHO_DATA_DIR` on the host to this directory. The container launcher mounts
-it at `/data` and sets `ROBOEVAL_DATA_ROOT=/data`.
+The training configurations use the combined LeRobot dataset hosted at
+[`microsoft/roboeval-data-for-rho`](https://huggingface.co/datasets/microsoft/roboeval-data-for-rho).
+The repository contains the dataset under `roboeval_combined/`, rather than at
+its top level, so download that subtree to a local directory under `HF_HOME`:
 
 ```bash
-export RHO_DATA_DIR=/path/to/roboeval_datasets
+export HF_HOME=/path/to/large/storage/huggingface
+mkdir -p "$HF_HOME/datasets/microsoft/roboeval-data-for-rho"
+
+hf download microsoft/roboeval-data-for-rho \
+  --repo-type dataset \
+  --include "roboeval_combined/**" \
+  --local-dir "$HF_HOME/datasets/microsoft/roboeval-data-for-rho"
 ```
+
+After downloading, the LeRobot dataset root is:
+
+```text
+$HF_HOME/datasets/microsoft/roboeval-data-for-rho/roboeval_combined/
+├── data/
+├── meta/
+└── videos/
+```
+
+The launcher mounts the host's `HF_HOME` at `/hf_home`; the training
+configurations read the dataset from
+`/hf_home/datasets/microsoft/roboeval-data-for-rho/roboeval_combined`.
 
 ## Build and launch the container
 
@@ -40,6 +47,7 @@ Build the base Rho image, then the RoboEval image:
 Launch an interactive GPU container:
 
 ```bash
+export HF_HOME=/path/to/large/storage/huggingface
 ./environments/roboeval/docker/run_interactive.sh
 ```
 
@@ -103,6 +111,28 @@ The public end-effector checkpoint is available at
 Evaluation must explicitly select this hosted checkpoint or a finetuned local
 checkpoint.
 
+RoboEval simulation evaluation also uses task-specific converted datasets for
+preprocessing and normalization. Arrange them by task and set `RHO_DATA_DIR`
+before launching the container:
+
+```text
+/path/to/roboeval_datasets/
+├── cube_handover/
+├── lift_pot/
+├── lift_tray/
+├── pack_box/
+├── pick_single_book_from_table/
+├── rotate_valve/
+├── stack_single_book_shelf/
+└── stack_two_blocks/
+```
+
+```bash
+export HF_HOME=/path/to/large/storage/huggingface
+export RHO_DATA_DIR=/path/to/roboeval_datasets
+./environments/roboeval/docker/run_interactive.sh
+```
+
 ### Standard benchmark (preferred)
 
 Use the multieval configuration for the standard end-effector benchmark:
@@ -121,7 +151,7 @@ to one subdirectory per task, along with a `multieval_summary_*.json` file in
 the output directory.
 
 The dataset directories must be available under `ROBOEVAL_DATA_ROOT` as
-described in [Prepare the datasets](#prepare-the-datasets).
+described in the evaluation setup above.
 
 ### Single-task evaluation
 

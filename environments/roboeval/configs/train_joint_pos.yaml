@@ -2,6 +2,6 @@
 
 <<: !include "base/train.yaml"
 
-dataset: !include "joint_pos/roboeval_multidataset.yaml"
+dataset: !include "joint_pos/roboeval_combined.yaml"
 
 environment: !include "joint_pos/environment.yaml"

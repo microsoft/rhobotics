@@ -1,0 +1,4 @@
+repo_id: "microsoft/roboeval-data-for-rho"
+root_dir: "${HF_HOME}/datasets/microsoft/roboeval-data-for-rho/roboeval_combined"
+
+<<: !include features.yaml

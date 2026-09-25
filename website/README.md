@@ -66,18 +66,18 @@ use it instead of `import.meta.env.BASE_URL` directly.
 
 ## Publishing
 
-**The site is not published yet.** `.github/workflows/deploy-website.yml` is
-currently gated to `workflow_dispatch` only, so nothing deploys on push.
+The site is published at <https://microsoft.github.io/rhobotics/>.
+`.github/workflows/deploy-website.yml` is currently gated to
+`workflow_dispatch` only, so pushes do not deploy automatically.
 
-To publish for the first time:
+To deploy an update:
 
-1. In the GitHub repo, set **Settings → Pages → Build and deployment →
-   Source = GitHub Actions**. Until this is done, the workflow builds fine but
-   fails at the deploy step.
-2. Run the workflow once by hand: **Actions** tab → "Deploy website to GitHub
-   Pages" → **Run workflow**. Check the result at
+1. Open the **Actions** tab → "Deploy website to GitHub Pages" → **Run
+   workflow**, and select the `main` branch. Do not use **Re-run jobs** on an
+   older deployment because that rebuilds the original commit.
+2. Check the result at
    <https://microsoft.github.io/rhobotics/>.
-3. To then deploy on every change, uncomment the `push` trigger at the top of
+3. To deploy on every website change, uncomment the `push` trigger at the top of
    `.github/workflows/deploy-website.yml`. Pushes to `main` touching
    `website/**` will publish automatically from then on.
 

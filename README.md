@@ -4,7 +4,8 @@ Rho is a vision-language-action policy for robot learning. This repository
 provides the code needed to finetune Rho on LeRobot datasets, evaluate it in
 simulation, and serve it over a websocket for deployment.
 
-Project website source lives in [`website/`](website/); it is not published yet.
+Visit the [Rho project page](https://microsoft.github.io/rhobotics/). Its source
+lives in [`website/`](website/).
 
 ## Features
 

@@ -157,7 +157,6 @@ const embodiments = [
 >
   <section class="hero">
     <div class="container container--wide">
-      <p class="eyebrow">Open-weight models for bimanual robotic manipulation and efficient adaptation</p>
       <h1>Rho</h1>
       <p class="hero__title-expansion">Robotic Manipulation Models With Adaptation In Mind</p>
       <p class="hero__dek">
@@ -179,9 +178,9 @@ const embodiments = [
         </span>
       </div>
       <dl class="hero__stats">
-        <div><dt>LIBERO average</dt><dd>97.9%</dd></div>
-        <div><dt>RoboEval average</dt><dd>73.0%</dd></div>
-        <div><dt>FR3 Duo physical success</dt><dd>80.0%</dd></div>
+        <div><dt>Model size</dt><dd>5B params</dd></div>
+        <div><dt>Action expert</dt><dd>542M params</dd></div>
+        <div><dt>Pretraining data</dt><dd>3,219+ hours</dd></div>
       </dl>
       <p class="hero__stats-note">
         FR3 Duo task success vs π0.5 46.7% · GR00T&nbsp;N1.7 50.0% — 30 rollouts per task, per model.
@@ -193,7 +192,7 @@ const embodiments = [
             alt="FR3 Duo highlight reel"
             loading="lazy"
           />
-          <figcaption>FR3 Duo · precision bimanual manipulation</figcaption>
+          <figcaption>FR3 Duo</figcaption>
         </figure>
         <figure>
           <img
@@ -201,7 +200,7 @@ const embodiments = [
             alt="UR AI Trainer highlight reel"
             loading="lazy"
           />
-          <figcaption>UR AI Trainer · pick-and-place workflows</figcaption>
+          <figcaption>UR AI Trainer</figcaption>
         </figure>
         <figure>
           <img
@@ -209,7 +208,7 @@ const embodiments = [
             alt="YAM Box highlight reel"
             loading="lazy"
           />
-          <figcaption>YAM Box · bimanual panel and control-board tasks</figcaption>
+          <figcaption>YAM Box</figcaption>
         </figure>
       </div>
     </div>
@@ -292,22 +291,24 @@ const embodiments = [
           capabilities while the model learns continuous control.
         </p>
 
-        <h3 class="pretraining-mixture-title">Pretraining mixture</h3>
-        <figure class="figure figure--paper figure--mixture">
-          <img
-            src={withBase("assets/rho-tomyum-mixture-figure3.png")}
-            alt="Rho-Tomyum pretraining mixture, showing each robot, UMI-style, simulation, and vision-language source with its hours, control frequency, and sampling weight"
-            loading="lazy"
-          />
-          <figcaption>
-            Figure 3. Rho-Tomyum mixture. It consists of 90% robot and UMI-style
-            data and 10% vision-language data. All the robot/UMI-style data is
-            bimanual, with the exception of a small subset of Open X-Embodiment
-            Magic Soup we call OXE Amuse Bouche. The robot data includes
-            trajectories from policies controlling a UR AI Trainer simulated in
-            NVIDIA Isaac Sim, trained using RL and the OmniReset framework.
-          </figcaption>
-        </figure>
+        <details class="pretraining-mixture-details">
+          <summary>Pretraining mixture</summary>
+          <figure class="figure figure--paper figure--mixture">
+            <img
+              src={withBase("assets/rho-tomyum-mixture-figure3.png")}
+              alt="Rho-Tomyum pretraining mixture, showing each robot, UMI-style, simulation, and vision-language source with its hours, control frequency, and sampling weight"
+              loading="lazy"
+            />
+            <figcaption>
+              Figure 3. Rho-Tomyum mixture. It consists of 90% robot and UMI-style
+              data and 10% vision-language data. All the robot/UMI-style data is
+              bimanual, with the exception of a small subset of Open X-Embodiment
+              Magic Soup we call OXE Amuse Bouche. The robot data includes
+              trajectories from policies controlling a UR AI Trainer simulated in
+              NVIDIA Isaac Sim, trained using RL and the OmniReset framework.
+            </figcaption>
+          </figure>
+        </details>
 
         <div class="adaptation-flow" role="group" aria-label="Four-stage Rho training pipeline">
           {adaptationStages.map((stage, index) => (
@@ -1115,7 +1116,6 @@ const embodiments = [
       radial-gradient(circle at 85% 20%, rgba(209, 73, 91, 0.1), transparent 30%);
     text-align: center;
   }
-  .eyebrow,
   .section-kicker {
     margin: 0 0 10px;
     color: var(--link);
@@ -1469,10 +1469,8 @@ const embodiments = [
     max-width: 900px;
     margin-inline: auto;
   }
-  .pretraining-mixture-title {
-    margin: 44px 0 0;
-    font-size: var(--type-subsection-heading);
-  }
+  .pretraining-mixture-details { margin-top: 44px; }
+  .pretraining-mixture-details .figure { margin-bottom: 4px; }
   .figure--mixture {
     max-width: 1100px;
   }

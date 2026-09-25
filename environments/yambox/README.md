@@ -34,8 +34,12 @@ $HF_HOME/datasets/microsoft/BusyBox/I2RT_YAM_Box/
 This is the path referenced by `configs/yambox_dataset.yaml`
 (`root_dir: "${HF_HOME}/datasets/microsoft/BusyBox/I2RT_YAM_Box"`), so make sure
 `HF_HOME` is exported in the shell you launch training from. The dataset has
+<<<<<<< HEAD
+**2,766 episodes / ~606k frames at 30 Hz** (≈5.6 hours).
+=======
 **2,766 episodes / ~606k frames at 30 Hz** (≈5.6 hours) and requires
 approximately **17 GB** of local storage.
+>>>>>>> main
 
 ## Training
 
@@ -51,12 +55,22 @@ accelerate launch --multi-gpu \
   --config_path=environments/yambox/configs/train_yambox_rho.yaml
 ```
 
+<<<<<<< HEAD
+For a quick single-GPU smoke test (override the step count / batch size):
+=======
 For a 10-step single-GPU smoke test, reduce the data-loading and flow-sampling
 work as well as the batch size:
+>>>>>>> main
 
 ```bash
 python environments/yambox/train.py \
   --config_path=environments/yambox/configs/train_yambox_rho.yaml \
+<<<<<<< HEAD
+  --steps=200 --batch_size=1
+```
+
+Checkpoints are written under `output_dir` (default `outputs/yambox_busybox_rho`).
+=======
   --steps=10 \
   --batch_size=1 \
   --num_workers=0 \
@@ -71,13 +85,18 @@ training without reproducing the full recipe's effective batch size or
 multi-sample flow-matching workload. Run it in the same GPU environment used
 for Rho training, including FlashAttention support. Checkpoints are written
 under `output_dir` (default `outputs/yambox_busybox_rho` for the full recipe).
+>>>>>>> main
 
 ### Recipe summary (`configs/train_yambox_rho.yaml`)
 
 | Setting | Value |
 |---|---|
+<<<<<<< HEAD
+| Policy | `rho` (published base model), fully unfrozen |
+=======
 | Starting checkpoint | [`microsoft/rho-yam-box`](https://huggingface.co/microsoft/rho-yam-box) |
 | Policy | `rho`, fully unfrozen |
+>>>>>>> main
 | Action chunk | `chunk_size=32`, `n_action_steps=32` |
 | Flow matching | `num_flow_samples=8` |
 | Dropout | `0.1` |
@@ -100,9 +119,14 @@ under `output_dir` (default `outputs/yambox_busybox_rho` for the full recipe).
 
 ## Notes
 
+<<<<<<< HEAD
+- The config uses Rho's **hosted pretrained checkpoint by default**. To start
+  from a different base (or resume a full training checkpoint), pass
+=======
 - The config uses the hosted **YAM Box midtrained checkpoint**
   (`microsoft/rho-yam-box`) by default. To start from a different checkpoint,
   pass
+>>>>>>> main
   `--pretrained_checkpoint=<repository-or-path>`.
 - **Fewer/more GPUs:** keep the reference global batch (128) by adjusting
   `--gradient_accumulation_steps` and `--num_processes`. For example, on 8 GPUs

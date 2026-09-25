@@ -18,6 +18,9 @@ dataset: !include "yambox_dataset.yaml"
 
 environment: null
 
+# Start from the YAM Box robot-specific midtrained checkpoint.
+pretrained_checkpoint: "microsoft/rho-yam-box"
+
 policy:
   type: "rho"
   # Images are cropped/resized to 256x256 by the dataset transform_mapping.

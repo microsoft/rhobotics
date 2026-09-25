@@ -1,0 +1,63 @@
+# Rho flow-matching finetune on the Yambox BusyBox (I2RT YAM Box, 30 Hz) dataset.
+#
+# This is the public counterpart of the recipe we use internally for the Yambox
+# models: fully-unfrozen phi-style VLA, 32-step action chunk, multi-sample
+# flow-matching (num_flow_samples=8), QUANTILE normalization, and the 5-step
+# FR3-duo image-augmentation pipeline (defined in yambox_dataset.yaml).
+#
+# We run this on 4x H100 (80 GB) GPUs; adjust batch_size / gradient_accumulation
+# for other hardware. See environments/yambox/README.md.
+
+wandb:
+  project: "rho"
+  tags: ["yambox", "busybox", "rho", "30hz"]
+  group: "yambox"
+  enabled: false
+
+dataset: !include "yambox_dataset.yaml"
+
+environment: null
+
+# Start from the YAM Box robot-specific midtrained checkpoint.
+pretrained_checkpoint: "microsoft/rho-yam-box"
+
+policy:
+  type: "rho"
+  # Images are cropped/resized to 256x256 by the dataset transform_mapping.
+  resize_imgs_with_padding: null
+  # Action chunk (matches the 30 Hz dataset horizon used for the Yambox models).
+  chunk_size: 32
+  n_action_steps: 32
+  # Multi-sample flow matching.
+  num_flow_samples: 8
+  dropout_p: 0.1
+  # Full finetune (train the VLM backbone + vision + action expert together).
+  freeze_vlm_backbone: false
+  freeze_vision_encoder: false
+  freeze_language_model: false
+  train_expert_only: false
+  optimizer_lr: 1e-4
+  lr_scheduler:
+    type: "cosine_decay_with_warmup"
+    peak_lr: 1e-4
+    decay_lr: 2.5e-6
+    num_warmup_steps: 2500
+    num_decay_steps: 50000
+
+# Global batch size = batch_size * num_gpus * gradient_accumulation_steps.
+# batch_size 16 x 4 H100 x GA 2 = 128 (our reference global batch).
+batch_size: 16
+num_workers: 4
+gradient_accumulation_steps: 2
+steps: 50000
+grad_clip_norm: 1.0
+mixed_precision: "bf16"
+
+output_dir: "outputs/yambox_busybox_rho"
+save_checkpoint_every: 5000
+keep_checkpoint_interval: 10000
+logging_interval: 200
+eval_interval: 999999
+validation_interval: 999999
+
+resume: false

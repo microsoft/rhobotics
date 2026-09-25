@@ -1,0 +1,142 @@
+# Yambox BusyBox (I2RT YAM Box, 30 Hz) training dataset for the Rho flow policy.
+#
+# Source: https://huggingface.co/datasets/microsoft/BusyBox  (subtree I2RT_YAM_Box/)
+# See environments/yambox/README.md for download instructions.
+#
+# Action space: dual-arm end-effector position + quaternion (EE_QUAT_POS_XYZW),
+# converted to 6D rotation and trained as state-relative deltas with absolute
+# grippers. Normalization: QUANTILE (state) / ACTIONCHUNK_QUANTILE (action).
+# Image pipeline (per camera): center_crop 480 -> resize_pad 448 ->
+# random_resized_crop 448 -> color_jitter (no hue) -> resize_pad 256.
+
+repo_id: "microsoft/BusyBox"
+root_dir: "${HF_HOME}/datasets/microsoft/BusyBox/I2RT_YAM_Box"
+num_workers: 4
+use_imagenet_stats: false
+prefetch_factor: 2
+shuffle_buffer_size: 1000
+
+# Map the raw LeRobot keys to the policy's observation/action slots.
+# Observation order matches pretraining: scene=0, left_wrist=1, right_wrist=2.
+observation_mapping:
+  "observation.eef_pos_quat": "observation.state"
+  "action.eef_pos_quat": "action"
+  "observation.images.cam_scene": "observation.image.0"
+  "observation.images.cam_left_wrist": "observation.image.1"
+  "observation.images.cam_right_wrist": "observation.image.2"
+
+features:
+  observation.image.0:
+    type: VISUAL
+    shape: (3,256,256)
+  observation.image.1:
+    type: VISUAL
+    shape: (3,256,256)
+  observation.image.2:
+    type: VISUAL
+    shape: (3,256,256)
+  observation.state:
+    type: STATE
+    shape: (20,)
+  action:
+    type: ACTION
+    shape: (20,)
+
+normalization_mapping:
+  VISUAL: IDENTITY
+  STATE: QUANTILE
+  ACTION: ACTIONCHUNK_QUANTILE
+
+action_type: EE_QUAT_POS_XYZW
+
+transform_mapping:
+  "action":
+    - type: convert_to_6d_actions
+      action_type: "EE_QUAT_POS_XYZW"
+      action_key: "action"
+      post_norm: false
+
+    - type: convert_to_6d_actions
+      action_type: "EE_QUAT_POS_XYZW"
+      action_key: "observation.state"
+      post_norm: false
+
+    - type: delta_actions
+      action_type: "EE_6D_POS"
+      action_key: "action"
+      state_key: "observation.state"
+      relative_to_state: true
+      use_absolute_grippers: true
+      post_norm: false
+
+  "observation.image.0":
+    - type: center_crop
+      height: 480
+      width: 480
+    - type: resize_with_padding
+      height: 448
+      width: 448
+      mode: bilinear
+      align_corners: false
+    - type: random_resized_crop
+      height: 448
+      width: 448
+      scale: [0.9, 1.0]
+      ratio: [0.98, 1.02]
+    - type: color_jitter
+      brightness: 0.15
+      contrast: [0.85, 1.15]
+      saturation: [0.85, 1.15]
+    - type: resize_with_padding
+      height: 256
+      width: 256
+      mode: bilinear
+      align_corners: false
+
+  "observation.image.1":
+    - type: center_crop
+      height: 480
+      width: 480
+    - type: resize_with_padding
+      height: 448
+      width: 448
+      mode: bilinear
+      align_corners: false
+    - type: random_resized_crop
+      height: 448
+      width: 448
+      scale: [0.9, 1.0]
+      ratio: [0.98, 1.02]
+    - type: color_jitter
+      brightness: 0.15
+      contrast: [0.85, 1.15]
+      saturation: [0.85, 1.15]
+    - type: resize_with_padding
+      height: 256
+      width: 256
+      mode: bilinear
+      align_corners: false
+
+  "observation.image.2":
+    - type: center_crop
+      height: 480
+      width: 480
+    - type: resize_with_padding
+      height: 448
+      width: 448
+      mode: bilinear
+      align_corners: false
+    - type: random_resized_crop
+      height: 448
+      width: 448
+      scale: [0.9, 1.0]
+      ratio: [0.98, 1.02]
+    - type: color_jitter
+      brightness: 0.15
+      contrast: [0.85, 1.15]
+      saturation: [0.85, 1.15]
+    - type: resize_with_padding
+      height: 256
+      width: 256
+      mode: bilinear
+      align_corners: false

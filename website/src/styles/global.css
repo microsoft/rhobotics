@@ -9,6 +9,12 @@
     BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", Helvetica, Arial,
     sans-serif;
 
+  /* Typography scale */
+  --type-body: 1rem;
+  --type-subtitle: 1.125rem;
+  --type-section-heading: clamp(2rem, 4vw, 3.2rem);
+  --type-subsection-heading: 1.5rem;
+
   /* Color palette */
   --page-bg: #ffffff;
   --text: #171717;
@@ -78,18 +84,19 @@ h1 {
 }
 
 h2 {
-  font-size: 1.7rem;
+  font-size: var(--type-section-heading);
   margin-top: 2.2rem;
   padding-bottom: 0.35rem;
   border-bottom: 1px solid var(--rule);
 }
 
 h3 {
-  font-size: 1.25rem;
+  font-size: var(--type-subsection-heading);
   margin-top: 1.6rem;
 }
 
 p {
+  font-size: var(--type-body);
   margin: 0 0 1.1em;
 }
 
@@ -102,6 +109,13 @@ a:hover,
 a:focus {
   color: var(--link-hover);
   text-decoration: underline;
+}
+
+p a,
+figcaption a {
+  text-decoration: underline;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.16em;
 }
 
 img {

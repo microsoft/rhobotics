@@ -185,33 +185,33 @@ const embodiments = [
       <p class="hero__stats-note">
         FR3 Duo task success vs π0.5 46.7% · GR00T&nbsp;N1.7 50.0% — 30 rollouts per task, per model.
       </p>
-      <div class="hero__media hero__media--sizzle" role="group" aria-label="Rho manipulation examples">
+    </div>
+      <div class="container hero__media hero__media--sizzle" role="group" aria-label="Rho manipulation examples">
         <figure>
-          <img
-            src={withBase("assets/fr3-duo-sizzle.webp")}
-            alt="FR3 Duo highlight reel"
-            loading="lazy"
-          />
+          <video
+            src={withBase("assets/fr3-duo-sizzle.mp4")}
+            aria-label="FR3 Duo highlight reel"
+            controls autoplay muted loop playsinline preload="metadata"
+          ></video>
           <figcaption>FR3 Duo</figcaption>
         </figure>
         <figure>
-          <img
-            src={withBase("assets/ur5e-sizzle.webp")}
-            alt="UR AI Trainer highlight reel"
-            loading="lazy"
-          />
+          <video
+            src={withBase("assets/ur5e-sizzle.mp4")}
+            aria-label="UR AI Trainer highlight reel"
+            controls autoplay muted loop playsinline preload="metadata"
+          ></video>
           <figcaption>UR AI Trainer</figcaption>
         </figure>
         <figure>
-          <img
-            src={withBase("assets/yambox-sizzle.webp")}
-            alt="YAM Box highlight reel"
-            loading="lazy"
-          />
+          <video
+            src={withBase("assets/yambox-sizzle.mp4")}
+            aria-label="YAM Box highlight reel"
+            controls autoplay muted loop playsinline preload="metadata"
+          ></video>
           <figcaption>YAM Box</figcaption>
         </figure>
       </div>
-    </div>
   </section>
 
   <nav class="section-nav" aria-label="Page sections">
@@ -1199,7 +1199,8 @@ const embodiments = [
   }
   .hero__media--sizzle {
     grid-template-columns: repeat(3, 1fr);
-    max-width: 1240px;
+    /* 20% wider video tracks, retaining 48px padding and two 16px gaps. */
+    max-width: calc(var(--wide-width) * 1.2 - 16px);
   }
   .hero__media figure { margin: 0; }
   .hero__media img,
@@ -1629,7 +1630,7 @@ const embodiments = [
   .diagnostic-card__lbl { font-weight: 600; }
   .diagnostic-card__sub { color: var(--text-muted); font-size: 0.82rem; }
   @media (max-width: 900px) {
-    .hero__media--sizzle { grid-template-columns: 1fr; max-width: 720px; }
+    .hero__media--sizzle { grid-template-columns: 1fr; max-width: 768px; }
   }
   @media (max-width: 720px) {
     .diagnostic-grid { grid-template-columns: 1fr; }

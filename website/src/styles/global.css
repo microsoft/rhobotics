@@ -9,8 +9,11 @@
     BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", Helvetica, Arial,
     sans-serif;
 
-  /* Typography scale */
-  --type-body: 1rem;
+  /* Typography scale. Nothing meant to be read is set below --type-small;
+     --type-label is only for short uppercase labels. */
+  --type-body: 1.125rem;
+  --type-small: 1.0625rem;
+  --type-label: 0.875rem;
   --type-subtitle: 1.125rem;
   --type-section-heading: clamp(1.5rem, 2.3vw, 1.875rem);
   --type-subsection-heading: 1.5rem;
@@ -18,7 +21,7 @@
   /* Color palette */
   --page-bg: #ffffff;
   --text: #171717;
-  --text-muted: #505050;
+  --text-muted: #333333;
   --rule: #e6e6e6;
 
   /* Microsoft hyperlink blue */
@@ -60,7 +63,7 @@ body {
   background: var(--page-bg);
   color: var(--text);
   font-family: var(--font-sans);
-  font-size: 17px;
+  font-size: var(--type-body);
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;

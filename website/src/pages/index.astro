@@ -1,5 +1,8 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
+import MixturePie from "../components/MixturePie.astro";
+import BarChart from "../components/BarChart.astro";
+import ChartLegend from "../components/ChartLegend.astro";
 import { withBase } from "../lib/url";
 
 const resources = [
@@ -52,22 +55,18 @@ const modelCitations: Record<string, string> = {
   "MolmoAct2": "https://arxiv.org/abs/2605.02881",
   "GR00T": "https://huggingface.co/nvidia/GR00T-N1.7-3B",
   "GR00T N1.7": "https://huggingface.co/nvidia/GR00T-N1.7-3B",
-  "OLA-Sem": "https://github.com/chris1220313648/OLA-Sem",
-  "GigaBrain-0.7": "https://github.com/open-gigaai/giga-brain-0",
-  "4D-WAM": "https://arxiv.org/abs/2608.08023",
 };
 
-const modelSpecs = [
-  ["Action expert", "542M parameters"],
-  ["Transformer", "12 blocks; width 2,048; MLP width 4,096"],
-  ["Attention", "Action self-attention and cross-attention to VLM context"],
-  ["Block structure", "16 query heads; 4 key/value heads; head dimension 128"],
-  ["Flow conditioning", "Shared adaLN-single with block-specific offsets"],
-  ["Flow target", "Linear noise-action interpolation; velocity-prediction MSE"],
-  ["Training flow samples", "k = NFS; independent noise/timestep draws per example, with MSE averaged over the k draws"],
-  ["State/action interface", "Continuous vectors up to 32 dimensions with padding and loss masks"],
-  ["Inference solver", "10 explicit Euler steps"],
-];
+const checkpoints = {
+  base: "https://huggingface.co/microsoft/rho-base",
+  yam: "https://huggingface.co/microsoft/rho-yam-box",
+  ur: "https://huggingface.co/microsoft/rho-ur-ai-trainer",
+  fr3: "https://huggingface.co/microsoft/rho-fr3-duo",
+  libero: "https://huggingface.co/microsoft/rho-libero",
+  busybox: "https://huggingface.co/datasets/microsoft/BusyBox",
+};
+
+// --- Training recipe (report Sections 2-5) ---------------------------------
 
 const adaptationStages = [
   {
@@ -76,45 +75,309 @@ const adaptationStages = [
     title: "Phi-Phy",
     subtitle: "Physically grounded VLM",
     description:
-      "Retrains a 4.68B-parameter Phi-family VLM with robotics-relevant grounding and visual-question-answering data so physical perception and reasoning are strengthened before action learning begins.",
-    data: "≈100M supervised records",
-    mix: "General VLM SFT + physical-grounding data",
-    output: "Grounded VLM backbone",
+      "A 4.68B-parameter Phi-family vision-language model gets extra robotics-relevant grounding, pointing, spatial-reasoning, and multi-image VQA training, so it understands physical scenes before it is asked to control anything.",
+    data: "≈36M physical-grounding records in a 100M-record SFT mix",
+    mix: "General VLM data + physical grounding",
+    output: "Phi-Phy backbone (no actions yet)",
   },
   {
     number: "02",
     label: "Pretrain",
-    title: "Pretrained Rho",
+    title: "Rho-base",
     subtitle: "Multi-embodiment VLA",
     description:
-      "Adds the flow-matching action expert and jointly trains the backbone and action modules on a balanced mixture spanning more than a dozen physical and simulated robot embodiments. The full run uses 48 B200 GPUs and one pass over the robot corpus.",
-    data: "3,200+ robot hours",
+      "A 542M-parameter flow-matching action expert is attached and trained with the backbone on Rho-Tomyum: 3,200+ hours from more than a dozen robots, mostly dual-arm, plus VQA data that keeps the backbone grounded.",
+    data: "3,200+ robot hours · 48 B200 GPUs",
     mix: "90% robot data · 10% vision-language",
-    output: "General-purpose VLA",
+    output: "Rho-base: the shared foundation",
   },
   {
     number: "03",
     label: "Midtrain",
-    title: "Midtrained Rho",
-    subtitle: "Embodiment-specialized VLA",
+    title: "Rho-⟨robot⟩",
+    subtitle: "Embodiment-specific VLA",
     description:
-      "Adapts pretrained Rho horizontally across many tasks and motions on one target platform, producing a reusable embodiment checkpoint. Each released embodiment model is trained for two epochs while retaining the robot/vision-language co-training recipe.",
-    data: "≈300 hours per embodiment",
+      "Rho-base is trained for two epochs on ~300 hours of one robot's data across dozens of task families. The goal is to learn the robot — cameras, kinematics, workspace, control conventions — not to master any one task.",
+    data: "≈280–300 hours of one robot · 19–65 task families",
     mix: "90% target robot · 10% vision-language",
-    output: "Reusable embodiment checkpoint",
+    output: "Rho-YAM-Box · Rho-UR-AI-Trainer · Rho-FR3-Duo",
   },
   {
     number: "04",
     label: "Finetune",
-    title: "Finetuned Rho",
-    subtitle: "Task-specialized policy",
+    title: "Task policy",
+    subtitle: "Offline task adaptation",
     description:
-      "Specializes either pretrained Rho or an embodiment-midtrained checkpoint using target-task demonstrations. This stage retains the flow-matching objective and action representation but uses robot data only, without interleaved vision-language batches.",
-    data: "Target-task demonstrations",
-    mix: "100% robot flow matching",
+      "A midtrained variant is finetuned on demonstrations of the target task: same flow-matching objective, all parameters trainable, robot data only. Because the robot is already familiar, a few hundred demonstrations go a long way.",
+    data: "≈100–300 demonstrations per task on physical robots",
+    mix: "100% target-task demonstrations",
     output: "Deployable task policy",
   },
+  {
+    number: "05",
+    label: "Correct",
+    title: "Online adaptation",
+    subtitle: "Learning from corrections",
+    description:
+      "After deployment, a small latent policy inside the model learns from human corrective takeovers while the backbone and action expert stay frozen. It changes only where action generation starts, so the offline-learned behavior is preserved.",
+    data: "15 corrected episodes per task on FR3 Duo",
+    mix: "Corrective takeovers only; rest of the model frozen",
+    output: "Same checkpoint, improved in place",
+  },
 ];
+
+// Mixture pies (report Figures 3 and 4). Shares are of training updates; the
+// colour families follow the report's figures (cool hues: YAM/UMI sources,
+// reds and oranges: UR/FR3/Trossen). Steps are adjusted from the report's so
+// that neighbouring slices stay distinguishable in all four charts, including
+// under colour-vision deficiency (validated with the dataviz palette checker).
+// A colour always means the same source. RoboPoint and RefSpatial are always an
+// even 5% / 5% split, so they are drawn as one vision-language slice.
+const pieColors = {
+  xmi: "#17598F",
+  yamWild: "#4A90D9",
+  yamBox: "#12A07A",
+  yamStation: "#6CB8F0",
+  ur: "#8A2E08",
+  fr3: "#D1491B",
+  trossen: "#E8963F",
+  oxe: "#6E6AC8",
+  sim: "#A03A82",
+  vqa: "#D4B02A",
+};
+
+const pretrainingMix = [
+  { label: "XMI (UMI-style)", pct: 22.05, color: pieColors.xmi, detail: "520 h @ 30 Hz" },
+  { label: "YAM Box (in the wild)", pct: 17.53, color: pieColors.yamWild, detail: "1,004 h @ 30 Hz" },
+  { label: "YAM Box", pct: 9.53, color: pieColors.yamBox, detail: "449 h @ 30 Hz" },
+  { label: "YAM Station", pct: 6.15, color: pieColors.yamStation, detail: "290 h @ 30 Hz" },
+  { label: "UR AI Trainer", pct: 17.42, color: pieColors.ur, detail: "263 h @ 50 Hz" },
+  { label: "FR3 Duo", pct: 11.03, color: pieColors.fr3, detail: "278 h @ 30 Hz" },
+  { label: "Trossen Stationary AI", pct: 2.87, color: pieColors.trossen, detail: "72 h @ 30 Hz" },
+  { label: "OXE Amuse Bouche", pct: 2.73, color: pieColors.oxe, detail: "292 h @ 3–30 Hz" },
+  { label: "OmniReset UR AI Trainer (sim)", pct: 0.69, color: pieColors.sim, detail: "36 h @ 50 Hz" },
+  { label: "Vision-language data", pct: 10.0, color: pieColors.vqa, detail: "RoboPoint + RefSpatial VQA, 5% each" },
+];
+
+const vqaSlices = [
+  { label: "Vision-language data", pct: 10.0, color: pieColors.vqa },
+];
+
+const midtrainingMixes = [
+  {
+    checkpoint: "Rho-YAM-Box",
+    hours: "289 h",
+    detail: "65 task families · 2,617 instructions",
+    sub: "Lab and in-the-wild YAM Box data, sampled evenly at the episode level.",
+    href: checkpoints.yam,
+    slices: [
+      { label: "YAM Box (lab)", pct: 45.53, color: pieColors.yamBox, detail: "146 h" },
+      { label: "YAM Box (in the wild)", pct: 44.47, color: pieColors.yamWild, detail: "143 h" },
+      ...vqaSlices,
+    ],
+  },
+  {
+    checkpoint: "Rho-UR-AI-Trainer",
+    hours: "299 h",
+    detail: "31 task families · 40,220 instructions",
+    sub: "Physical demonstrations plus Isaac Sim rollouts on the same robot and cameras.",
+    href: checkpoints.ur,
+    slices: [
+      { label: "UR AI Trainer", pct: 79.27, color: pieColors.ur, detail: "263 h" },
+      { label: "OmniReset (sim)", pct: 10.73, color: pieColors.sim, detail: "36 h" },
+      ...vqaSlices,
+    ],
+  },
+  {
+    checkpoint: "Rho-FR3-Duo",
+    hours: "278 h",
+    detail: "19 task families · 33,883 instructions",
+    sub: "Cleaning, folding, sorting, pouring, packing, cable insertion.",
+    href: checkpoints.fr3,
+    slices: [
+      { label: "FR3 Duo", pct: 90.0, color: pieColors.fr3, detail: "278 h" },
+      ...vqaSlices,
+    ],
+  },
+];
+
+// --- Architecture (report Sections 2-3) ------------------------------------
+
+const backboneSpecs = [
+  ["Full vision-language model", "4.68B parameters"],
+  ["Language decoder", "32 layers; width 3,072; MLP width 8,192"],
+  ["Vision encoder", "SigLIP 2 SO400M NaFlex; 428M parameters"],
+  ["Image representation", "16×16 patches; 256–3,600 visual tokens; camera views padded to 256×256"],
+  ["Cross-modal projector", "MLP 1,152 → 3,072 → 3,072 with GELU"],
+  ["Backbone context for actions", "Decoder block 14; learned 3,072 → 2,048 projection"],
+];
+
+const expertSpecs = [
+  ["Action expert", "542M parameters"],
+  ["Transformer", "12 blocks; width 2,048; MLP width 4,096"],
+  ["Attention", "16 query heads; 4 key/value heads; head dimension 128"],
+  ["Block structure", "Action self-attention; cross-attention to VLM context; feed-forward"],
+  ["Flow conditioning", "Shared adaLN-single with block-specific offsets"],
+  ["Flow target", "Linear noise–action interpolation; velocity-prediction MSE"],
+  ["State/action interface", "Continuous vectors up to 32 dimensions; padding and loss masks"],
+  ["Inference solver", "10 explicit Euler steps"],
+  ["Prediction horizon", "Configurable action-chunk length (≈1 s, up to 50 steps in pretraining)"],
+];
+
+const shapeRows = [
+  ["1,024", "16", "64", "16", "0.617"],
+  ["1,024", "8", "128", "16", "0.640"],
+  ["1,024", "8", "128", "32", "0.642"],
+  ["2,048", "8", "256", "16", "0.623"],
+  ["2,048", "16", "128", "16", "0.673"],
+];
+
+const compressionRows = [
+  ["Wide baseline", "16 / 16", "16", "1.649B", "0.673"],
+  ["+ shared adaLN", "16 / 16", "16", "882M", "0.673"],
+  ["+ grouped-query attention", "16 / 4", "16", "693M", "0.672"],
+  ["+ 12 blocks (Rho)", "16 / 4", "12", "542M", "0.671"],
+];
+
+const pretrainingAblation = [
+  { val: "0.673", lbl: "Robot + vision-language pretraining", sub: "Rho's recipe" },
+  { val: "0.652", lbl: "Robot-only pretraining", sub: "Same robot data, no VQA batches" },
+  { val: "0.610", lbl: "No pretraining", sub: "Grounded backbone, fresh action expert" },
+];
+
+// --- Midtraining experiments (report Section 6.3) --------------------------
+
+const fr3Epochs = [
+  { val: "60.0%", lbl: "Pretrained only", sub: "Rho-base finetuned directly" },
+  { val: "76.7%", lbl: "1 midtraining epoch", sub: "Same task data and budget" },
+  { val: "86.7%", lbl: "2 midtraining epochs", sub: "The released Rho-FR3-Duo" },
+];
+
+// --- Physical robots (report Section 6.5) ----------------------------------
+
+const embodiments = [
+  {
+    name: "YAM Box",
+    maker: "I²RT",
+    image: "assets/yam_box.jpg",
+    spec: "2 × 6-DoF YAM arms · parallel-jaw grippers · 3 RealSense cameras · 30 Hz",
+    role: "Portable bimanual platform common in research labs.",
+    checkpoint: checkpoints.yam,
+    slug: "rho-yam-box",
+  },
+  {
+    name: "UR AI Trainer",
+    maker: "Universal Robots",
+    image: "assets/ur_ai_trainer.jpg",
+    spec: "2 × UR5e arms · Robotiq 2F-85 grippers · 3 Orbbec cameras · 18 Hz",
+    role: "An emerging standard for industrial bimanual manipulation.",
+    checkpoint: checkpoints.ur,
+    slug: "rho-ur-ai-trainer",
+  },
+  {
+    name: "FR3 Duo",
+    maker: "Franka",
+    image: "assets/fr3_duo.jpg",
+    spec: "2 × 7-DoF FR3 arms · Robotiq grippers · ZED + 2 RealSense cameras · 30 Hz",
+    role: "Straddles research and industry use.",
+    checkpoint: checkpoints.fr3,
+    slug: "rho-fr3-duo",
+  },
+];
+
+// Result charts (report Figures 5 and 7-10). Series colours follow the report's
+// figures, adjusted where neighbouring bars were hard to tell apart (validated
+// with the dataviz palette checker). A colour always means the same model.
+const chartColors = {
+  rho: "#D1495B",
+  pi: "#4577B0",
+  groot: "#59A14F",
+  molmo: "#8A63B0",
+  pretrainedOnly: "#2A9D8F",
+};
+
+const robotwinSeries = [
+  { name: "Rho-base (pretrained only)", color: chartColors.pretrainedOnly },
+  { name: "Rho-RoboTwin (midtrained)", color: chartColors.rho },
+];
+const robotwinEasy = [
+  { label: "12.5%", values: [28.1, 40.6], errors: [1.32, 1.01] },
+  { label: "25%", values: [42.9, 50.0], errors: [2.15, 3.82] },
+  { label: "50%", values: [52.5, 58.1], errors: [2.05, 0.38] },
+  { label: "100%", values: [65.2, 65.6], errors: [1.88, 2.19] },
+];
+const robotwinHard = [
+  { label: "12.5%", values: [30.9, 38.9], errors: [2.05, 2.05] },
+  { label: "25%", values: [39.1, 46.4], errors: [2.01, 1.2] },
+  { label: "50%", values: [50.0, 56.3], errors: [1.74, 1.4] },
+  { label: "100%", values: [56.9, 59.6], errors: [1.22, 1.74] },
+];
+
+const roboevalSeries = [
+  { name: "Rho-base", color: chartColors.rho },
+  { name: "π0.5", color: chartColors.pi },
+  { name: "GR00T N1.7", color: chartColors.groot },
+  { name: "MolmoAct2", color: chartColors.molmo },
+];
+const roboevalSuccess = [
+  { label: "Lift Pot", values: [71.33, 72.0, 72.33, 57.33], errors: [2.52, 1.73, 4.73, 3.06] },
+  { label: "Lift Tray", values: [98.67, 99.67, 96.67, 96.33], errors: [0.58, 0.58, 1.53, 0.58] },
+  { label: "Pack Box", values: [50.33, 53.0, 42.67, 28.33], errors: [6.35, 3.61, 6.43, 1.53] },
+  { label: "Pick Book", values: [84.67, 71.67, 60.67, 69.0], errors: [3.51, 3.79, 5.77, 3.0] },
+  { label: "Rotate Valve", values: [69.33, 57.33, 55.67, 59.67], errors: [1.53, 5.13, 6.03, 8.08] },
+  { label: "Stack Book Shelf", values: [77.33, 60.67, 37.33, 41.67], errors: [4.04, 2.52, 2.08, 5.13] },
+  { label: "Stack 2 Blocks", values: [55.0, 43.33, 53.67, 47.0], errors: [4.58, 2.89, 10.07, 9.85] },
+  { label: "Cube Handover", values: [80.33, 79.33, 64.0, 85.67], errors: [9.45, 3.21, 2.65, 1.53] },
+  { label: "Overall", values: [73.4, 67.1, 60.4, 60.6], errors: [1.21, 0.78, 2.63, 1.6], summary: true },
+];
+const threeModels = (rhoName: string) => [
+  { name: rhoName, color: chartColors.rho },
+  { name: "π0.5", color: chartColors.pi },
+  { name: "GR00T N1.7", color: chartColors.groot },
+];
+
+const yamSeries = [...threeModels("Rho-YAM-Box"), { name: "MolmoAct2", color: chartColors.molmo }];
+const yamSuccess = [
+  { label: "Buttons", values: [100, 100, 90, 60] },
+  { label: "Switches", values: [80, 100, 80, 20] },
+  { label: "Sliders", values: [90, 60, 30, 50] },
+  { label: "Knob", values: [100, 80, 30, 50] },
+  { label: "Wires", values: [90, 100, 60, 40] },
+  { label: "Repositioning", values: [80, 100, 30, 40] },
+  { label: "Overall", values: [90, 90, 53.3, 43.3], summary: true },
+];
+
+const urSeries = threeModels("Rho-UR-AI-Trainer");
+const urSuccess = [
+  { label: "Toolbox packing", values: [46.7, 20.0, 16.7] },
+  { label: "Small-electronics cleanup", values: [60.0, 40.0, 13.3] },
+  { label: "Overall", values: [53.4, 30.0, 15.0], summary: true },
+];
+const urProgress = [
+  { label: "Toolbox packing", values: [57.5, 27.5, 37.5] },
+  { label: "Small-electronics cleanup", values: [82.5, 80.8, 45.8] },
+  { label: "Overall", values: [70.0, 54.1, 41.6], summary: true },
+];
+
+const fr3Series = threeModels("Rho-FR3-Duo");
+const fr3Success = [
+  { label: "Plug insertion", values: [80.0, 40.0, 60.0] },
+  { label: "Tumbler stacking", values: [70.0, 26.7, 36.7] },
+  { label: "Tumbler unstacking", values: [93.3, 53.3, 56.7] },
+  { label: "Test-tube racking", values: [63.3, 33.3, 23.3] },
+  { label: "Test-tube unracking", values: [93.3, 80.0, 73.3] },
+  { label: "Overall", values: [80.0, 46.7, 50.0], summary: true },
+];
+const fr3Progress = [
+  { label: "Plug insertion", values: [90.0, 70.0, 80.0] },
+  { label: "Tumbler stacking", values: [85.8, 45.0, 70.0] },
+  { label: "Tumbler unstacking", values: [95.0, 60.0, 68.3] },
+  { label: "Test-tube racking", values: [75.0, 63.3, 48.9] },
+  { label: "Test-tube unracking", values: [97.8, 84.4, 89.4] },
+  { label: "Overall", values: [88.7, 64.5, 71.3], summary: true },
+];
+
+// --- Simulation (report Section 6.4) ---------------------------------------
 
 const liberoRows = [
   ["OpenVLA", "84.7", "88.4", "79.2", "53.7", "76.5"],
@@ -126,69 +389,22 @@ const liberoRows = [
   ["Rho", "98.3", "99.6", "97.6", "95.9", "97.9"],
 ];
 
-const midtrainingRows = [
-  ["RoboTwin midtraining_set_B", "23,100", "3,238,752", "50", "18.0", "18.0"],
-  ["UR_AI_Trainer", "141,007", "47,357,161", "50", "263.1", "263.1"],
-  ["FR3_Duo", "23,793", "29,986,315", "30", "277.7", "277.7"],
-  ["YAM_Box_lab", "36,177", "48,527,355", "30", "449.3", "147.6"],
-  ["YAM_Box_wild", "76,486", "108,383,230", "30", "1,003.5", "152.4"],
-];
+// --- Website-only systems measurements (not part of the report) -----------
 
 const efficiencyRows = [
   ["OpenPI π0.5", "Full fine-tuning", "3.0B", "On", "71.7 GB", "1.70 s"],
   ["GR00T", "Full fine-tuning", "3.14B (100%)", "Off", "85.2 GB", "0.81 s"],
-  ["Rho", "Full, NFS=1", "4.92B (94%)", "On", "30.4 GB", "1.16 s"],
-  ["Rho", "Full, NFS=8", "4.92B (94%)", "On", "35.0 GB", "1.63 s"],
-  ["MolmoAct2", "Full, NFS=1", "5.05B (93%)", "On", "59.2 GB", "3.70 s"],
-  ["MolmoAct2", "Full, NFS=8", "5.05B (93%)", "On", "59.5 GB", "3.80 s"],
-  ["MolmoAct2", "Expert-only, NFS=1", "578M (10.6%)", "—", "19.3 GB", "2.20 s"],
-  ["MolmoAct2", "Expert-only, NFS=8", "578M (10.6%)", "—", "19.8 GB", "2.30 s"],
+  ["Rho", "Full fine-tuning", "4.92B (94%)", "On", "30.4 GB", "1.16 s"],
+  ["MolmoAct2", "Full fine-tuning", "5.05B (93%)", "On", "59.2 GB", "3.70 s"],
   ["GR00T", "Expert-only", "1.62B (51%)", "Off", "41.6 GB", "0.42 s"],
-  ["Rho", "Expert-only, NFS=1", "544M (10%)", "On", "17.2 GB", "0.38 s"],
-  ["Rho", "Expert-only, NFS=8", "544M (10%)", "On", "20.2 GB", "0.88 s"],
-];
-
-const robotwinSummary = [
-  ["OLA-Sem", "69.0", "60.8", "64.9"],
-  ["GigaBrain-0.7", "60.8", "65.2", "63.0"],
-  ["Rho 100% Midtrain", "65.6", "59.6", "62.6"],
-  ["Rho 100% Pretrain", "65.2", "56.9", "61.1"],
-  ["4D-WAM", "73.2", "26.8", "50.0"],
-  ["π0.5", "59.6", "35.2", "47.4"],
-  ["π0", "51.0", "9.2", "30.1"],
-];
-
-const robotwinTaskRows = [
-  ["Hanging Mug", "18.0", "17.0", "18.0", "14.0"],
-  ["Move Stapler Pad", "57.0", "20.0", "44.0", "18.0"],
-  ["Place Burger Fries", "76.0", "82.0", "72.0", "86.0"],
-  ["Handover Mic", "93.5", "98.0", "88.0", "6.0"],
-  ["Stack Bowls Three", "83.5", "81.0", "76.0", "52.0"],
-  ["Mean", "65.6", "59.6", "59.6", "35.2"],
-];
-
-const embodiments = [
-  {
-    name: "FR3 Duo",
-    image: "assets/fr3_duo.jpg",
-    checkpoint: "https://huggingface.co/microsoft/rho-fr3-duo",
-  },
-  {
-    name: "UR AI Trainer",
-    image: "assets/ur_ai_trainer.jpg",
-    checkpoint: "https://huggingface.co/microsoft/rho-ur-ai-trainer",
-  },
-  {
-    name: "YAM Box",
-    image: "assets/yam_box.jpg",
-    checkpoint: "https://huggingface.co/microsoft/rho-yam-box",
-  },
+  ["Rho", "Expert-only", "544M (10%)", "On", "17.2 GB", "0.38 s"],
+  ["MolmoAct2", "Expert-only", "578M (10.6%)", "—", "19.3 GB", "2.20 s"],
 ];
 ---
 
 <BaseLayout
   title="Rho: A Foundation for Efficiently Adaptable VLA Models"
-  description="Rho is a family of open-weight, 5B-parameter physical AI models for bimanual robotic manipulation and efficient adaptation."
+  description="Rho is a family of open-weights, 5B-parameter vision-language-action models for bimanual robotic manipulation, built for data-efficient adaptation to new robots and tasks."
 >
   <section class="hero">
     <div class="container container--wide">
@@ -230,12 +446,12 @@ const embodiments = [
         <p class="authors__note" id="author-note"><sup>1</sup>Authors are listed alphabetically.</p>
       </div>
       <p class="hero__dek">
-        Rho is a family of open-weight, 5B-parameter physical AI models that
-        combines a physically grounded Phi-family vision-language backbone with a
-        continuous flow-matching action expert. Its regularized progressive
-        adaptation recipe moves from physical grounding, to multi-embodiment
-        pretraining, to embodiment-targeted horizontal midtraining, and finally to
-        vertical task adaptation.
+        Rho is a family of open-weights, 5B-parameter vision-language-action
+        models for bimanual robotic manipulation, designed for data-light
+        adaptation. One foundation model, Rho-base, is <em>midtrained</em> into
+        ready-to-adapt variants for three common dual-arm robots — YAM Box,
+        UR AI Trainer, and FR3 Duo — and a task policy derived from any of them
+        can keep improving after deployment from a handful of human corrections.
       </p>
       <div class="hero__links">
         {resources.map((resource) => (
@@ -246,7 +462,7 @@ const embodiments = [
       </div>
       <dl class="hero__stats">
         <div><dt>Model size</dt><dd>5B params</dd></div>
-        <div><dt>Action expert</dt><dd>542M params</dd></div>
+        <div><dt>Robot-ready variants</dt><dd>3 embodiments</dd></div>
         <div><dt>Pretraining data</dt><dd>3,200+ hours</dd></div>
       </dl>
     </div>
@@ -286,98 +502,91 @@ const embodiments = [
   <nav class="section-nav" aria-label="Page sections">
     <div class="container container--wide">
       <a href="#overview">Overview</a>
-      <a href="#adaptation">Training recipe</a>
-      <a href="#method">Method</a>
-      <a href="#embodiments">Embodiments</a>
-      <a href="#benchmarks">Benchmarks</a>
+      <a href="#recipe">Recipe</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#midtraining">Midtraining</a>
+      <a href="#robots">Robots</a>
+      <a href="#simulation">Simulation</a>
       <a href="#online-adaptation">Online adaptation</a>
-      <a href="#efficiency">Efficiency</a>
-      <a href="#models">Models</a>
+      <a href="#release">Release</a>
     </div>
   </nav>
 
   <div class="page-content">
+    <!-- ================================================================ -->
     <section id="overview" class="section container container--wide">
       <p class="section-kicker">Overview</p>
-      <h2>General-purpose manipulation, designed for adaptation</h2>
+      <h2>Adaptation is the bottleneck. Rho is built for it.</h2>
       <div>
         <p class="section-intro">
-          Physical AI models combine the semantic and perceptual capabilities of
-          pretrained vision-language models with continuous robot control, but
-          reliable deployment still requires adaptation. Broad pretraining exposes
-          a model to many robots and tasks without fully teaching the sensing,
-          kinematics, action space, and control conventions of any one platform. As
-          a result, adapting directly from a general pretrained model can require
-          downstream data to teach both the target robot and the target task at once.
+          Vision-language-action models (VLAs) promise general-purpose robot
+          manipulation, but their zero-shot success on unseen tasks and in new
+          environments is still low. In practice, <em>adaptation</em> — turning a
+          pretrained model into one that works on a particular robot for a
+          particular task — is the crucial step, and it is data-hungry.
         </p>
         <p class="section-intro">
-          Rho separates adaptation to an <em>embodiment</em> from adaptation to a{" "}
-          <em>task</em>. After physical grounding and multi-embodiment pretraining,
-          horizontal midtraining teaches one robot across a broad set of tasks and
-          motions. The resulting checkpoint becomes a reusable starting point for
-          many downstream policies on that platform. Vertical task adaptation then
-          specializes the model from comparatively small target-task datasets, and
-          an optional internal latent policy can continue adapting after deployment
-          from corrective interaction. We release the{" "}
-          <a href="https://huggingface.co/microsoft/rho-base">base model</a> and
-          embodiment-midtrained checkpoints for{" "}
-          <a href="https://huggingface.co/microsoft/rho-fr3-duo">FR3 Duo</a>,{" "}
-          <a href="https://huggingface.co/microsoft/rho-ur-ai-trainer">UR AI Trainer</a>,
-          and <a href="https://huggingface.co/microsoft/rho-yam-box">YAM Box</a>.
+          The reason is that pretraining exposes a model to a broad but shallow
+          mix of robots, tasks, and environments. It never masters the sensing,
+          kinematics, action space, and data conventions of any one platform. So
+          when a pretrained model is finetuned on a new task, the demonstrations
+          have to teach it the <em>robot</em> and the <em>task</em> at the same
+          time. Rho's premise is that a model should master the robot{" "}
+          <em>before</em> task adaptation begins. Its training recipe separates
+          adaptation to an embodiment from adaptation to a task, and absorbs the
+          first, expensive part into the released checkpoints.
         </p>
       </div>
       <div class="feature-grid">
         <article>
           <span class="feature-number">01</span>
-          <h3>Physically grounded VLM</h3>
-          <p>A compact Phi-family backbone is retrained with robotics-relevant grounding, pointing, spatial reasoning, OCR, counting, and multi-image visual-question-answering data before it learns continuous actions.</p>
+          <h3>One foundation, three robot-ready variants</h3>
+          <p>
+            A single pretrained model, <a href={checkpoints.base}>Rho-base</a>, is
+            midtrained into <a href={checkpoints.yam}>Rho-YAM-Box</a>,{" "}
+            <a href={checkpoints.ur}>Rho-UR-AI-Trainer</a>, and{" "}
+            <a href={checkpoints.fr3}>Rho-FR3-Duo</a> — reusable starting points
+            for many downstream tasks on each robot. All four are open weights.
+          </p>
         </article>
         <article>
           <span class="feature-number">02</span>
-          <h3>Flow-matching action expert</h3>
-          <p>A 542M-parameter action expert conditions on vision, language, and robot state, then transforms Gaussian noise into configurable chunks of continuous actions using flow matching.</p>
+          <h3>Midtraining halves the task data you need</h3>
+          <p>
+            In controlled experiments, a midtrained variant reaches a given success
+            rate with half as much finetuning data as Rho-base. After finetuning on
+            the same demonstrations, the variants match or outperform π0.5,
+            GR00T N1.7, and MolmoAct2 on three physical robots.
+          </p>
         </article>
         <article>
           <span class="feature-number">03</span>
-          <h3>Embodiment-first adaptation</h3>
-          <p>Horizontal midtraining learns a target robot's observations, kinematics, workspace, and control conventions before vertical adaptation specializes the model to a deployment task.</p>
+          <h3>Keeps learning after deployment</h3>
+          <p>
+            A lightweight latent policy inside every Rho model learns from
+            corrective feedback while the rest stays frozen. Fifteen corrected
+            episodes lifted test-tube assembly on FR3 Duo from 30% to 70%
+            success on the hardest configurations.
+          </p>
         </article>
       </div>
     </section>
 
-    <section id="adaptation" class="section adaptation-section">
+    <!-- ================================================================ -->
+    <section id="recipe" class="section adaptation-section">
       <div class="container container--wide">
         <p class="section-kicker">Training recipe</p>
-        <h2>Regularized progressive adaptation</h2>
+        <h2>Regularized progressive adaptation, stage by stage</h2>
         <p class="section-intro">
-          Rho's regularized progressive adaptation recipe first grounds a Phi-family
-          vision-language backbone in physical-world perception, then couples it to
-          a flow-matching action expert through heterogeneous multi-embodiment
-          pretraining. Embodiment-targeted horizontal midtraining teaches one robot
-          across many tasks, and vertical adaptation specializes that checkpoint to
-          a target task. Vision-language batches remain in the mixture during
-          pretraining and midtraining to preserve useful spatial and linguistic
-          capabilities while the model learns continuous control.
+          Every Rho task policy is produced by the same recipe: four offline stages
+          and an optional fifth that runs after deployment. Each stage adds a
+          capability — physical understanding, continuous control, one robot's
+          conventions, one task, then corrections from use — while taking care not
+          to erase what the previous stages built: vision-language batches stay in
+          the mix through pretraining and midtraining, and online adaptation
+          touches only a small internal module. That is the "regularized" in
+          regularized progressive adaptation.
         </p>
-
-        <details class="pretraining-mixture-details">
-          <summary>Pretraining mixture</summary>
-          <figure class="figure figure--paper figure--mixture">
-            <img
-              src={withBase("assets/rho-tomyum-mixture-figure3.png")}
-              alt="Rho-Tomyum pretraining mixture, showing each robot, UMI-style, simulation, and vision-language source with its hours, control frequency, and sampling weight"
-              loading="lazy"
-            />
-            <figcaption>
-              Figure 3. Rho-Tomyum mixture. It consists of 90% robot and UMI-style
-              data and 10% vision-language data. All the robot/UMI-style data is
-              bimanual, with the exception of a small subset of Open X-Embodiment
-              Magic Soup we call OXE Amuse Bouche. The robot data includes
-              trajectories from policies controlling a UR AI Trainer simulated in
-              NVIDIA Isaac Sim, trained using RL and the OmniReset framework.
-            </figcaption>
-          </figure>
-        </details>
 
         <div class="adaptation-flow" role="group" aria-label="Four-stage Rho training pipeline">
           {adaptationStages.map((stage, index) => (
@@ -401,225 +610,329 @@ const embodiments = [
           ))}
         </div>
 
-        <div class="adaptation-extension">
-          <div class="adaptation-extension__icon" aria-hidden="true">↻</div>
-          <div>
-            <strong>Optional online extension</strong>
-            <p>
-              After offline specialization, an internal latent policy can learn an
-              observation-conditioned initial condition for the frozen
-              flow-matching action generator. In the report's physical experiments,
-              15 corrected episodes substantially improve performance on difficult
-              initial configurations outside the core offline-data distribution.
-            </p>
+        <div class="mixture-block">
+          <h3>Stage 02 · What Rho-base is pretrained on</h3>
+          <div class="mixture-block__body">
+            <MixturePie
+              slices={pretrainingMix}
+              center="3,203 h"
+              centerLabel="robot data"
+              size={280}
+              title="Rho-Tomyum pretraining mixture"
+            />
           </div>
+          <p class="note">
+            The Rho-Tomyum mixture. Shares are of training updates: 90% robot and
+            UMI-style data, 10% vision-language data. All robot data is bimanual
+            except the small OXE "Amuse Bouche" subset. Every source is
+            standardized to chunk-relative end-effector deltas with 6D rotations
+            (10 dimensions per arm) over about one second of motion, and
+            demonstration segments labeled as errors are removed.
+          </p>
         </div>
 
-        <div class="adaptation-details">
-          <article>
-            <span>Phi-Phy</span>
-            <h3>Ground physical understanding first</h3>
-            <p>
-              Phi-Phy is a 4.68B-parameter model with a Phi-family causal language
-              decoder, a <a href="https://arxiv.org/abs/2502.14786">SigLIP 2 NaFlex</a>{" "}
-              vision encoder, and a two-layer cross-modal projector. Its
-              physical-grounding mix augments general vision-language training with
-              public robotics-relevant data, reprocessed multi-image grounding,
-              pointing, OCR, and counting examples, and synthetic
-              difference-spotting and odd-one-out tasks. At this stage the model
-              strengthens physical-world comprehension but does not yet predict
-              actions.
-            </p>
-          </article>
-          <article>
-            <span>Pretraining</span>
-            <h3>Learn a shared action representation</h3>
-            <p>
-              Multi-embodiment pretraining turns the grounded backbone and randomly
-              initialized action expert into a general continuous-control VLA.
-              Robot trajectories span diverse embodiments, environments, camera
-              layouts, action spaces, and control frequencies; source weights
-              balance dataset scale and embodiment coverage rather than sampling a
-              raw concatenation uniformly. Robot and physical-grounding updates are
-              sampled in a 9:1 ratio so the backbone continues receiving spatial and
-              visual-language supervision as it learns actions.
-            </p>
-          </article>
-          <article>
-            <span>Midtraining</span>
-            <h3>Learn the robot, not one task</h3>
-            <p>
-              Embodiment midtraining focuses the pretrained model on one robot's
-              observation layout, kinematics, action space, control conventions, and
-              characteristic workspace. Training horizontally across many tasks and
-              motions produces a platform checkpoint that can be reused for multiple
-              downstream policies rather than relearning the robot during every task
-              adaptation.
-            </p>
-          </article>
-          <article>
-            <span>Fine-tuning</span>
-            <h3>Specialize for deployment</h3>
-            <p>
-              Offline vertical adaptation fine-tunes either pretrained Rho or an
-              embodiment-midtrained checkpoint on demonstrations from the target
-              task set. The full model remains trainable, but the data mixture
-              narrows to target-task robot demonstrations. Controlled RoboTwin
-              experiments show that embodiment midtraining can halve the downstream
-              data needed to reach a given success level before performance
-              saturates.
-            </p>
-          </article>
-        </div>
-
-        <details class="checkpoint-details">
-          <summary>Released checkpoints and training step counts</summary>
-          <div class="table-wrap">
-            <table class="results-table">
-              <thead>
-                <tr><th>Checkpoint</th><th>Stage</th><th>Global batch</th><th>Steps</th></tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <th scope="row"><code>rho-base</code> (Hero2 · epoch 1)</th>
-                  <td>Pretrain</td>
-                  <td>3,072</td>
-                  <td>212,000 (1 epoch)</td>
-                </tr>
-                <tr>
-                  <th scope="row"><code>rho-ur-ai-trainer</code></th>
-                  <td>Embodiment midtrain</td>
-                  <td>1,024</td>
-                  <td>130,000 (2 epochs)</td>
-                </tr>
-                <tr>
-                  <th scope="row"><code>rho-yam-box</code></th>
-                  <td>Embodiment midtrain</td>
-                  <td>1,024</td>
-                  <td>90,000 (2 epochs)</td>
-                </tr>
-                <tr>
-                  <th scope="row"><code>rho-fr3-duo</code></th>
-                  <td>Embodiment midtrain</td>
-                  <td>1,024</td>
-                  <td>68,000 (2 epochs)</td>
-                </tr>
-                <tr>
-                  <th scope="row"><code>rho-robotwin-midtrain</code></th>
-                  <td>Controlled midtrain</td>
-                  <td>1,024</td>
-                  <td>2 epochs</td>
-                </tr>
-                <tr>
-                  <th scope="row">RoboEval evaluation policy</th>
-                  <td>Task fine-tune</td>
-                  <td>128</td>
-                  <td>40,000</td>
-                </tr>
-                <tr>
-                  <th scope="row">LIBERO evaluation policy</th>
-                  <td>Task fine-tune</td>
-                  <td>128</td>
-                  <td>40,000</td>
-                </tr>
-              </tbody>
-            </table>
+        <div class="mixture-block">
+          <h3>Stage 03 · What each variant is midtrained on</h3>
+          <div class="mixture-grid" role="group" aria-label="Midtraining mixtures of the three embodiment variants">
+            {midtrainingMixes.map((mix) => (
+              <div class="diagnostic-card mixture-card">
+                <span class="diagnostic-card__lbl"><a href={mix.href}>{mix.checkpoint}</a></span>
+                <span class="diagnostic-card__lbl diagnostic-card__lbl--light">{mix.detail}</span>
+                <MixturePie
+                  slices={mix.slices}
+                  center={mix.hours}
+                  size={132}
+                  legend="compact"
+                  title={`${mix.checkpoint} midtraining mixture`}
+                />
+                <span class="diagnostic-card__sub">{mix.sub}</span>
+              </div>
+            ))}
           </div>
-        </details>
+          <p class="note">
+            Each mixture averages no more than ~15 hours per task family — not
+            enough to master any high-precision task, but enough to cover a robot's
+            motions, workspace, and camera views. Instruction counts include task
+            and subtask descriptions; the vision-language share is the same
+            RoboPoint and RefSpatial data as in pretraining, 5% each.
+          </p>
+        </div>
       </div>
     </section>
 
-    <section id="method" class="section section--tint">
+    <!-- ================================================================ -->
+    <section id="architecture" class="section section--tint">
       <div class="container container--wide">
         <p class="section-kicker">Architecture</p>
-        <h2>Continuous action generation with a compact flow-matching expert</h2>
+        <h2>A compact Phi-family VLM coupled to a flow-matching action expert</h2>
         <p class="section-intro">
-          Rho conditions on one or more camera views, a language instruction, and
-          proprioceptive state. Phi-Phy processes the interleaved image and language
-          tokens, while robot state is projected directly into the action stream.
-          The model supports continuous state and action vectors up to 32 dimensions
-          and configurable action chunks, allowing different end-effector or
-          joint-space parameterizations across single- and multi-arm robots.
+          At each control step Rho sees one or more camera views, a language
+          instruction, and the robot's proprioceptive state, and outputs a chunk of
+          future actions. Images and text are processed by Phi-Phy; robot state is
+          projected straight into the action expert. The expert learns a velocity
+          field that carries Gaussian noise to an action chunk and integrates it in
+          10 Euler steps at inference. Every expert block cross-attends to the same
+          intermediate Phi-Phy representation (decoder block 14), which is computed
+          once per query and reused across all flow steps.
         </p>
         <p class="section-intro">
-          The action expert learns a conditional velocity field that transforms
-          Gaussian noise into future robot actions. At inference, Rho integrates
-          this field from noise to an action chunk using <strong>10 explicit Euler
-          steps</strong>. Every expert block cross-attends to the same projected
-          intermediate Phi-Phy representation, which is computed once and reused
-          across all flow steps. Architecture ablations select a width of 2,048 and
-          128-dimensional attention heads, then reduce the expert from 1.65B to{" "}
-          <strong>542M parameters</strong> through shared adaLN modulation,
-          grouped-query attention, and a 12-block depth while preserving RoboEval
-          success (0.673 vs 0.671).
+          The interface is deliberately generic: continuous state and action vectors
+          of up to 32 dimensions, masked when unused, so the same model supports
+          joint-space or end-effector control, delta or absolute targets, and one
+          or two arms. The chunk length and control rate are properties of a
+          training recipe, not of the architecture.
         </p>
         <figure class="figure figure--paper">
           <a href={withBase("assets/action_expert.pdf")} target="_blank">
             <img src={withBase("assets/action-expert.png")} alt="Rho flow-matching action expert architecture" />
           </a>
           <figcaption>
-            State and noisy-action tokens pass through 12 transformer blocks with
-            grouped-query self-attention, cross-attention to VLM context, and
-            flow-timestep conditioning.
+            The action expert: state and noisy-action tokens pass through 12 wide
+            transformer blocks with grouped-query self-attention, cross-attention to
+            the VLM context, and feed-forward updates; the flow timestep conditions
+            each block through shared adaLN maps with block-specific offsets.
           </figcaption>
         </figure>
-        <div class="table-wrap">
-          <table>
-            <tbody>
-              {modelSpecs.map(([component, specification]) => (
-                <tr><th scope="row">{component}</th><td>{specification}</td></tr>
-              ))}
-            </tbody>
-          </table>
+        <div class="spec-grid">
+          <div>
+            <h3>Phi-Phy backbone</h3>
+            <div class="table-wrap">
+              <table>
+                <tbody>
+                  {backboneSpecs.map(([component, specification]) => (
+                    <tr><th scope="row">{component}</th><td>{specification}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <h3>Action expert</h3>
+            <div class="table-wrap">
+              <table>
+                <tbody>
+                  {expertSpecs.map(([component, specification]) => (
+                    <tr><th scope="row">{component}</th><td>{specification}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
+        <p class="note">
+          Phi-Phy starts from Microsoft's Phi family, chosen for capability per
+          parameter. Its physical grounding adds public robotics-relevant sets
+          (MGrounding, RefSpatial, XVR, RoboPoint), multi-image grounding, pointing,
+          OCR, and counting data, and synthetic difference-spotting and odd-one-out
+          questions to the general vision-language mix.
+        </p>
 
+        <article class="result-block">
+          <div class="result-block__header">
+            <div>
+              <h3>Why this shape: what the ablations chose</h3>
+              <p>
+                Design choices were selected on RoboEval, where each candidate was
+                pretrained on a 15% subset of Rho-Tomyum and then adapted for 40k
+                steps; success is the mean over eight tasks and three evaluation
+                passes. Two dimensions mattered: <strong>128-dimensional attention
+                heads</strong> beat both smaller and larger heads at either width,
+                and <strong>width 2,048</strong> beat 1,024 even when the narrower
+                expert was made twice as deep. The gains concentrate on contact and
+                precision tasks — lifting a flat book, stacking blocks, shelving a
+                book — where successful action chunks occupy a narrow region of
+                action space and the velocity field must be resolved finely around it.
+              </p>
+            </div>
+          </div>
+          <div class="spec-grid">
+            <div>
+              <p class="table-subhead"><strong>Shape sweep</strong> (RoboEval success after 40k adaptation steps)</p>
+              <div class="table-wrap">
+                <table class="results-table">
+                  <thead>
+                    <tr><th>Width</th><th>Heads</th><th>Head dim.</th><th>Blocks</th><th>Success</th></tr>
+                  </thead>
+                  <tbody>
+                    {shapeRows.map((row, index) => (
+                      <tr class:list={{ highlight: index === shapeRows.length - 1 }}>
+                        {row.map((value, i) => i === 0 ? <th scope="row">{value}</th> : <td>{value}</td>)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div>
+              <p class="table-subhead"><strong>Compression</strong> (width 2,048 and head dim. 128 kept fixed)</p>
+              <div class="table-wrap">
+                <table class="results-table">
+                  <thead>
+                    <tr><th>Variant</th><th>Q / KV heads</th><th>Blocks</th><th>Params</th><th>Success</th></tr>
+                  </thead>
+                  <tbody>
+                    {compressionRows.map((row, index) => (
+                      <tr class:list={{ highlight: index === compressionRows.length - 1 }}>
+                        {row.map((value, i) => i === 0 ? <th scope="row">{value}</th> : <td>{value}</td>)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <p class="note">
+            Sharing the adaLN modulation maps, grouped-query attention, and a
+            12-block depth cut the expert from 1.65B to 542M parameters — about
+            two thirds — at the same success rate. Routing successive blocks to
+            different backbone layers was also tried and was worse (0.605 vs
+            0.673), so every block reads decoder block 14.
+          </p>
+          <p class="table-subhead"><strong>Pretraining recipe</strong> (RoboEval success after 40k adaptation steps, same 15% subset)</p>
+          <div class="diagnostic-grid" role="group" aria-label="Effect of the pretraining mixture on downstream adaptation">
+            {pretrainingAblation.map((item) => (
+              <div class="diagnostic-card">
+                <span class="diagnostic-card__val">{item.val}</span>
+                <span class="diagnostic-card__lbl">{item.lbl}</span>
+                <span class="diagnostic-card__sub">{item.sub}</span>
+              </div>
+            ))}
+          </div>
+          <p class="note">
+            Keeping vision-language batches in the pretraining mix helps most on
+            tasks with semantic and temporal structure: on LIBERO at 20k adaptation
+            steps it lifts the Goal suite from 94.7% to 97.7% and the Long suite from
+            92.7% to 96.0% relative to robot-only pretraining. A learning-rate sweep
+            for the action expert selected 10⁻⁴; the choice affects the quality of
+            the transferred initialization, not just early adaptation speed.
+          </p>
+        </article>
       </div>
     </section>
 
-    <section id="embodiments" class="section section--dark">
+    <!-- ================================================================ -->
+    <section id="midtraining" class="section container container--wide">
+      <p class="section-kicker">Embodiment midtraining</p>
+      <h2>Midtraining halves the task data a robot needs</h2>
+      <p class="section-intro">
+        Two controlled experiments isolate what the midtraining stage buys. The
+        first varies the amount of task data and holds compute fixed; the second
+        holds the task data fixed and varies the amount of midtraining.
+      </p>
+
+      <article class="result-block">
+        <div class="result-block__header">
+          <div>
+            <h3>Data efficiency: same success with half the demonstrations</h3>
+            <p>
+              In <a href="https://arxiv.org/abs/2506.18088">RoboTwin 2.0</a>, the 50
+              dual-arm UR5e tasks are split into 45 for midtraining and 5 held out
+              for finetuning. Rho-base and the midtrained Rho-RoboTwin are then
+              finetuned on nested subsets holding 12.5%, 25%, 50%, and 100% of the
+              held-out demonstrations, each for the same 40k steps. Until
+              performance saturates, the midtrained model matches Rho-base trained
+              on <strong>twice</strong> the data: midtrained at 25% ≈ pretrained at
+              50%. In the lowest-data regime it is about 30% better in relative
+              terms — <strong>28.1% → 40.6%</strong> on the Easy protocol and{" "}
+              <strong>30.9% → 38.9%</strong> on Hard, which adds distractor objects.
+            </p>
+          </div>
+        </div>
+        <div class="chart-block">
+          <ChartLegend series={robotwinSeries} />
+          <div class="chart-pair">
+            <BarChart
+              title="RoboTwin Easy: success by finetuning data budget"
+              heading="RoboTwin / Easy"
+              yLabel="Success rate (%)"
+              xLabel="Share of the finetuning dataset used"
+              series={robotwinSeries}
+              groups={robotwinEasy}
+              height={250}
+            />
+            <BarChart
+              title="RoboTwin Hard: success by finetuning data budget"
+              heading="RoboTwin / Hard"
+              yLabel="Success rate (%)"
+              xLabel="Share of the finetuning dataset used"
+              series={robotwinSeries}
+              groups={robotwinHard}
+              height={250}
+            />
+          </div>
+          <p class="chart-caption">
+            Success on the five held-out RoboTwin tasks (50 episodes per task)
+            after 40k finetuning steps. Bars are means over seeds and whiskers
+            show ± one standard deviation; the midtraining advantage is largest
+            with little data and shrinks as the finetuning set grows.
+          </p>
+        </div>
+      </article>
+
+      <article class="result-block">
+        <div class="result-block__header">
+          <div>
+            <h3>Midtraining compute: more epochs, better task policies</h3>
+            <p>
+              On a physical FR3 Duo, the same ~150 plug-insertion demonstrations and
+              the same 50k-step finetuning budget were applied to Rho-base directly
+              and to Rho-base after one or two epochs of FR3 Duo midtraining. Success
+              over 30 trials rises with midtraining exposure. Most of the gain
+              appears on plug positions near the edge of the finetuning
+              distribution: broad midtraining seems to give the policy a better model
+              of the robot's reach and motion geometry than any single task's
+              demonstrations can.
+            </p>
+          </div>
+        </div>
+        <div class="diagnostic-grid" role="group" aria-label="Plug-insertion success versus midtraining epochs on FR3 Duo">
+          {fr3Epochs.map((item) => (
+            <div class="diagnostic-card">
+              <span class="diagnostic-card__val">{item.val}</span>
+              <span class="diagnostic-card__lbl">{item.lbl}</span>
+              <span class="diagnostic-card__sub">{item.sub}</span>
+            </div>
+          ))}
+        </div>
+        <p class="note">
+          Bimanual plug insertion on FR3 Duo, success over 30 trials, identical
+          task data and finetuning budget in every condition.
+        </p>
+      </article>
+    </section>
+
+    <!-- ================================================================ -->
+    <section id="robots" class="section section--dark">
       <div class="container container--wide">
-        <p class="section-kicker">Physical systems</p>
-        <h2>Reusable checkpoints for three dual-arm embodiments</h2>
+        <p class="section-kicker">Physical robots</p>
+        <h2>Finetuned Rho variants vs. π0.5, GR00T N1.7, and MolmoAct2</h2>
         <p class="section-intro">
-          Multi-embodiment pretraining provides a general initialization, but
-          deployment still requires learning a platform's observation layout,
-          kinematics, action space, control conventions, and workspace. Rho performs
-          this adaptation once through horizontal midtraining, producing reusable
-          checkpoints for FR3 Duo, UR AI Trainer, and YAM Box. Each checkpoint is
-          initialized from pretrained Rho, trained for two epochs across a broad
-          multitask dataset from one platform, and continues receiving
-          physical-grounding supervision alongside robot updates. Downstream
-          evaluations then adapt each embodiment checkpoint to task-specific
-          demonstrations and report both full-task success and partial task progress
-          on long, multi-stage behaviors.
+          The central experiments of the report finetune each midtrained Rho variant
+          and the strongest open-weights VLAs on the <em>same</em> task
+          demonstrations, then evaluate them side by side on the physical robot.
+          Baselines start from their own pretrained checkpoints; MolmoAct2 is
+          included on YAM Box because its training mix contains 720 hours from a
+          similar dual-arm YAM robot. Rollouts follow a paired A/B protocol with
+          matched initial configurations, 30 per task (60 on YAM Box), and no human
+          intervention during a scored trial.
         </p>
         <div class="embodiment-grid">
           {embodiments.map((embodiment) => (
             <article class="embodiment-card">
-              <img src={withBase(embodiment.image)} alt={embodiment.name} loading="lazy" />
+              <img src={withBase(embodiment.image)} alt={`${embodiment.maker} ${embodiment.name}`} loading="lazy" />
               <div>
-                <span class="badge" title="Two arms × (x, y, z end-effector position + 6D rotation + gripper) = 20 continuous action dimensions">Dual-arm · 20 action dims</span>
+                <span class="badge">{embodiment.maker}</span>
                 <h3>{embodiment.name}</h3>
-                <a href={embodiment.checkpoint}>Checkpoint ↗</a>
+                <p>{embodiment.role} {embodiment.spec}.</p>
+                <a href={embodiment.checkpoint}>{embodiment.slug} ↗</a>
               </div>
             </article>
           ))}
         </div>
-        <div class="table-wrap table-wrap--dark">
-          <table>
-            <thead>
-              <tr><th>Dataset</th><th>Episodes</th><th>Frames</th><th>FPS</th><th>Original hours</th><th>Sampled hours</th></tr>
-            </thead>
-            <tbody>
-              {midtrainingRows.map((row) => (
-                <tr>{row.map((value, index) => index === 0 ? <th scope="row">{value}</th> : <td>{value}</td>)}</tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
         <p class="note note--dark">
-          YAM Box was subsampled to roughly 300 hours, distributed evenly across task
-          types, to align its mid-training volume with the other physical datasets.
+          On every platform Rho commands bimanual Cartesian end-effector targets
+          (position, 6D orientation, gripper) from three RGB views and the two arm
+          poses; the robot's controller turns them into joint commands.
         </p>
       </div>
     </section>
@@ -627,380 +940,369 @@ const embodiments = [
     <section class="section container container--wide">
       <div class="hardware-result">
         <div>
-          <p class="section-kicker">FR3 Duo</p>
-          <h2>Contact-rich manipulation on FR3 Duo</h2>
+          <p class="section-kicker">YAM Box · high-data regime</p>
+          <h2>BusyBox: on par with π0.5 with far less YAM data</h2>
           <p>
-            Rho-FR3-Duo adapts Rho to a dual-arm Franka platform using about 280
-            hours of physical demonstrations spanning 19 task families. Its
-            midtraining data covers broad workspace motion and precise bimanual
-            coordination through cleaning, folding, sorting, pouring, packing, and
-            cable-insertion behaviors. Task-specific evaluation spans five
-            categories: plug insertion, tumbler stacking, tumbler unstacking,
-            racking a test tube, and unracking a test tube. Across these
-            long-horizon tasks, Rho achieves <strong>80.0% success and 88.7% mean
-            task progress</strong>, ahead of{" "}
-            <a href={modelCitations["π0.5"]}>π0.5</a> (46.7% / 64.5%) and{" "}
-            <a href={modelCitations["GR00T N1.7"]}>GR00T N1.7</a> (50.0% / 71.3%).
+            Rho-YAM-Box, π0.5, GR00T N1.7, and MolmoAct2 were each finetuned on
+            about 2,000 demonstrations spanning the six task categories of the{" "}
+            <a href="https://github.com/microsoft/BusyBox">BusyBox</a> benchmark —
+            pushing illuminated buttons, flipping switches, moving sliders, turning a
+            knob, pulling wires, and rotating or sliding the whole box — and
+            evaluated over 60 rollouts with varied instructions and box poses.
+            Rho-YAM-Box reaches <strong>90% overall success</strong>, tied with
+            π0.5 and well ahead of GR00T N1.7 (53%) and MolmoAct2 (43%).
           </p>
           <p class="note">
-            Success rate credits only fully completed task sequences; mean task
-            progress credits the fraction of each task's steps that were completed.
+            The result shows that Rho scales well when finetuning data is
+            plentiful, and that its recipe is data-efficient: MolmoAct2 and π0.5
+            were post-trained on hundreds to thousands of hours from YAM-like
+            robots, more than Rho saw of YAM Box in pretraining and midtraining
+            combined. The finetuning dataset is released as{" "}
+            <a href={checkpoints.busybox}>microsoft/BusyBox</a>.
           </p>
-          <a class="text-link" href="https://huggingface.co/microsoft/rho-fr3-duo">
-            Download rho-fr3-duo ↗
-          </a>
+          <a class="text-link" href={checkpoints.yam}>Download rho-yam-box ↗</a>
         </div>
-        <figure class="figure hardware-result__chart">
-          <img src={withBase("assets/fig-fr3-duo.png")} alt="FR3 Duo success rate and mean task progress" loading="lazy" />
-          <figcaption>Success rate and mean task progress across the five FR3 Duo evaluation tasks.</figcaption>
-        </figure>
-        <div class="task-clips task-clips--fr3 hardware-result__media" role="group" aria-label="FR3 Duo task examples">
+        <div class="hardware-result__chart chart-block">
+          <ChartLegend series={yamSeries} />
+          <BarChart
+            title="BusyBox success rate by task category"
+            yLabel="Success rate (%)"
+            series={yamSeries}
+            groups={yamSuccess}
+            height={270}
+          />
+          <p class="chart-caption">
+            Success rate on the six BusyBox task categories and overall;
+            10 rollouts per category per model.
+          </p>
+        </div>
+        <div class="clip-grid hardware-result__media" role="group" aria-label="YAM Box task examples">
           <figure>
-            <video src={withBase("assets/fr3-beaker-open.mp4")} aria-label="FR3 Duo opening a beaker" controls autoplay muted loop playsinline preload="metadata"></video>
-            <figcaption>Opening a beaker</figcaption>
+            <video src={withBase("assets/yambox-buttons.mp4")} aria-label="YAM Box pushing a button" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Pushing buttons</figcaption>
           </figure>
           <figure>
-            <video src={withBase("assets/fr3-beaker-close.mp4")} aria-label="FR3 Duo closing a beaker" controls autoplay muted loop playsinline preload="metadata"></video>
-            <figcaption>Closing a beaker</figcaption>
+            <video src={withBase("assets/yambox-switches.mp4")} aria-label="YAM Box flipping a switch" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Flipping switches (bimanual)</figcaption>
           </figure>
           <figure>
-            <video src={withBase("assets/fr3-glasses-stack-a.mp4")} aria-label="FR3 Duo stacking glasses" controls autoplay muted loop playsinline preload="metadata"></video>
-            <figcaption>Glass stacking</figcaption>
+            <video src={withBase("assets/yambox-slider.mp4")} aria-label="YAM Box moving a slider" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Moving sliders</figcaption>
           </figure>
           <figure>
-            <video src={withBase("assets/fr3-glasses-stack-b.mp4")} aria-label="FR3 Duo unstacking glasses" controls autoplay muted loop playsinline preload="metadata"></video>
-            <figcaption>Glass unstacking</figcaption>
+            <video src={withBase("assets/yambox-knob.mp4")} aria-label="YAM Box turning a knob" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Rotating the knob</figcaption>
+          </figure>
+          <figure>
+            <video src={withBase("assets/yambox-wires.mp4")} aria-label="YAM Box pulling a wire" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Pulling wires</figcaption>
+          </figure>
+          <figure>
+            <video src={withBase("assets/yambox-repositioning.mp4")} aria-label="YAM Box repositioning the BusyBox" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Repositioning the BusyBox</figcaption>
           </figure>
         </div>
       </div>
 
       <div class="hardware-result hardware-result--reverse">
         <div>
-          <p class="section-kicker">UR AI Trainer</p>
-          <h2>Packing and electronics manipulation on UR AI Trainer</h2>
+          <p class="section-kicker">UR AI Trainer · low-data regime</p>
+          <h2>Multi-stage tasks from ~150 demonstrations</h2>
           <p>
-            Rho-UR-AI-Trainer is midtrained on approximately 260 hours of physical
-            demonstrations spanning 28 task families, augmented with approximately
-            36 hours of successful NVIDIA Isaac Sim trajectories collected on the
-            same robot and camera configuration. The mixture includes tool and
-            electronics packing, sorting, cable routing, storage-device insertion,
-            garment handling, placement, and insertion under domain randomization.
-            Downstream evaluations focus on toolbox packing and small-electronics
-            sorting, where Rho reaches <strong>53.4% success and 70.0% mean task
-            progress</strong>.
+            Two long-horizon tasks, one policy per task: <strong>toolbox
+            packing</strong> (~150 demonstrations; lift a tray, fit it into a
+            toolbox without spilling, close the lid, engage the latch) and{" "}
+            <strong>small-electronics cleanup</strong> (~160 demonstrations; pick two
+            gripper-tip-sized components and place each into an empty tray
+            compartment). Rho-UR-AI-Trainer reaches <strong>53.4% success and
+            70.0% mean task progress</strong> overall, roughly double π0.5 (30.0%
+            success) and well above GR00T N1.7 (15.0%).
           </p>
-          <a class="text-link" href="https://huggingface.co/microsoft/rho-ur-ai-trainer">
-            Download rho-ur-ai-trainer ↗
-          </a>
+          <p class="note">
+            Neither baseline has seen much dual-arm UR data, so their finetuning
+            must learn the robot and the task together — the situation
+            midtraining is designed to avoid. On electronics cleanup, π0.5 nearly
+            matches Rho's task progress: it tends to fail at the final placement,
+            while Rho's rarer failures happen at the pick.
+          </p>
+          <a class="text-link" href={checkpoints.ur}>Download rho-ur-ai-trainer ↗</a>
         </div>
-        <figure class="figure hardware-result__chart">
-          <img
-            src={withBase("assets/fig-ur-ai-trainer.png")}
-            alt="UR AI Trainer success rate and mean task progress"
-            loading="lazy"
-          />
-          <figcaption>Success rate and mean task progress across tasks with available UR5e evaluation data.</figcaption>
-        </figure>
+        <div class="hardware-result__chart chart-block">
+          <ChartLegend series={urSeries} />
+          <div class="chart-pair">
+            <BarChart
+              title="UR AI Trainer success rate"
+              yLabel="Success rate (%)"
+              series={urSeries}
+              groups={urSuccess}
+              height={230}
+            />
+            <BarChart
+              title="UR AI Trainer mean task progress"
+              yLabel="Mean task progress (%)"
+              series={urSeries}
+              groups={urProgress}
+              height={230}
+            />
+          </div>
+          <p class="chart-caption">
+            Success rate (left) and mean task progress (right) over 30 rollouts
+            per task. Task progress credits each completed stage of a task.
+          </p>
+        </div>
         <div class="task-clips task-clips--ur5e hardware-result__media" role="group" aria-label="UR AI Trainer task examples">
           <figure>
             <video
-              src={withBase("assets/ur5e-moving-two-items.mp4")}
-              aria-label="UR AI Trainer moving two items"
+              src={withBase("assets/ur5e-tool-chest.mp4")}
+              aria-label="UR AI Trainer packing a toolbox"
               controls autoplay muted loop playsinline preload="metadata"
             ></video>
-            <figcaption>Moving multiple items</figcaption>
+            <figcaption>Toolbox packing</figcaption>
           </figure>
           <figure>
             <video
-              src={withBase("assets/ur5e-tool-chest.mp4")}
-              aria-label="UR AI Trainer performing a tool chest task"
+              src={withBase("assets/ur5e-moving-two-items.mp4")}
+              aria-label="UR AI Trainer placing small electronics into a tray"
               controls autoplay muted loop playsinline preload="metadata"
             ></video>
-            <figcaption>Tool chest cleanup</figcaption>
+            <figcaption>Small-electronics cleanup</figcaption>
           </figure>
         </div>
       </div>
 
       <div class="hardware-result">
         <div>
-          <p class="section-kicker">YAM Box</p>
-          <h2>Laboratory and everyday manipulation on YAM Box</h2>
+          <p class="section-kicker">FR3 Duo · precision and coordination</p>
+          <h2>Five contact-rich task variants, 80% success</h2>
           <p>
-            Rho-YAM-Box is trained on a roughly 300-hour subset spanning 60 task
-            families, divided approximately evenly between controlled laboratory
-            demonstrations and data collected in everyday environments. The mixture
-            includes insertion and assembly, articulated and deformable objects,
-            tool use, clothing and office-equipment manipulation, and long-horizon
-            bimanual tasks under varied visual conditions. We evaluate the
-            task-adapted model on six{" "}
-            <a href="https://github.com/microsoft/BusyBox">BusyBox</a> families —
-            buttons, switches, sliders, knobs, wires, and object repositioning —
-            where its overall success reaches <strong>90%</strong>. The task
-            dataset is available from{" "}
-            <a href="https://huggingface.co/datasets/microsoft/BusyBox">Microsoft on Hugging Face</a>.
+            Three finetuning datasets yield five evaluation variants: <strong>plug
+            insertion</strong> (~150 demonstrations; one arm steadies a power strip
+            while the other removes, reorients, and inserts the adapter into a second
+            strip), <strong>tumbler stacking and unstacking</strong> (~100), and{" "}
+            <strong>test-tube racking and unracking</strong> (~300; cork
+            manipulation plus constrained insertion into a rack). Rho-FR3-Duo
+            achieves <strong>80.0% success and 88.7% task progress</strong> across
+            the five, against 50.0% / 71.3% for GR00T N1.7 and 46.7% / 64.5% for
+            π0.5, and leads on every variant.
           </p>
           <p class="note">
-            <em>For YAM Box comparisons, the <a href={modelCitations["MolmoAct2"]}>MolmoAct2</a> baseline uses the authors'
-            own mid-trained YAM Box checkpoint rather than one we mid-trained, so
-            each model runs in its intended configuration.</em>
+            The forward tasks — stacking and racking — are harder than their
+            reverses for every model, because they require establishing and holding
+            precise alignment under contact. Rho's largest margins are exactly
+            there: +33.3 points on tumbler stacking and +30.0 on racking over the
+            best baseline, plus +20.0 on plug insertion, where the two arms play
+            distinct roles over a long sequence.
           </p>
-          <a class="text-link" href="https://huggingface.co/microsoft/rho-yam-box">
-            Download rho-yam-box ↗
-          </a>
+          <a class="text-link" href={checkpoints.fr3}>Download rho-fr3-duo ↗</a>
         </div>
-        <figure class="figure">
-          <img src={withBase("assets/fig-yam-box.png")} alt="YAM Box BusyBox benchmark results" loading="lazy" />
-        </figure>
-      </div>
-
-      <div class="clip-grid" role="group" aria-label="YAM Box task examples">
-        <figure>
-          <video src={withBase("assets/yambox-buttons.mp4")} aria-label="YAM Box operating a push button" controls autoplay muted loop playsinline preload="metadata"></video>
-          <figcaption>Buttons</figcaption>
-        </figure>
-        <figure>
-          <video src={withBase("assets/yambox-switches.mp4")} aria-label="YAM Box operating a switch" controls autoplay muted loop playsinline preload="metadata"></video>
-          <figcaption>Switches</figcaption>
-        </figure>
-        <figure>
-          <video src={withBase("assets/yambox-slider.mp4")} aria-label="YAM Box moving a slider" controls autoplay muted loop playsinline preload="metadata"></video>
-          <figcaption>Sliders</figcaption>
-        </figure>
-        <figure>
-          <video src={withBase("assets/yambox-knob.mp4")} aria-label="YAM Box turning a knob" controls autoplay muted loop playsinline preload="metadata"></video>
-          <figcaption>Knobs</figcaption>
-        </figure>
-        <figure>
-          <video src={withBase("assets/yambox-wires.mp4")} aria-label="YAM Box manipulating a wire" controls autoplay muted loop playsinline preload="metadata"></video>
-          <figcaption>Wires</figcaption>
-        </figure>
-        <figure>
-          <video
-            src={withBase("assets/yambox-repositioning.mp4")}
-            aria-label="YAM Box repositioning an object"
-            controls autoplay muted loop playsinline preload="metadata"
-          ></video>
-          <figcaption>Repositioning</figcaption>
-        </figure>
+        <div class="hardware-result__chart chart-block">
+          <ChartLegend series={fr3Series} />
+          <BarChart
+            title="FR3 Duo success rate"
+            yLabel="Success rate (%)"
+            series={fr3Series}
+            groups={fr3Success}
+            height={230}
+          />
+          <BarChart
+            title="FR3 Duo mean task progress"
+            yLabel="Mean task progress (%)"
+            series={fr3Series}
+            groups={fr3Progress}
+            height={230}
+          />
+          <p class="chart-caption">
+            Success rate (top) and mean task progress (bottom) over 30 matched
+            initial configurations per variant.
+          </p>
+        </div>
+        <div class="clip-grid clip-grid--centered hardware-result__media" role="group" aria-label="FR3 Duo task examples">
+          <figure>
+            <video src={withBase("assets/fr3-charger-move.mp4")} aria-label="FR3 Duo inserting a plug adapter into a power strip" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Plug insertion</figcaption>
+          </figure>
+          <figure>
+            <video src={withBase("assets/fr3-glasses-stack-a.mp4")} aria-label="FR3 Duo stacking tumblers" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Tumbler stacking</figcaption>
+          </figure>
+          <figure>
+            <video src={withBase("assets/fr3-glasses-stack-b.mp4")} aria-label="FR3 Duo unstacking tumblers" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Tumbler unstacking</figcaption>
+          </figure>
+          <figure>
+            <video src={withBase("assets/fr3-beaker-close.mp4")} aria-label="FR3 Duo corking a test tube and placing it in a rack" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Test-tube racking</figcaption>
+          </figure>
+          <figure>
+            <video src={withBase("assets/fr3-beaker-open.mp4")} aria-label="FR3 Duo removing a test tube from a rack and uncorking it" controls autoplay muted loop playsinline preload="metadata"></video>
+            <figcaption>Test-tube unracking</figcaption>
+          </figure>
+        </div>
       </div>
     </section>
 
-    <section id="benchmarks" class="section container container--wide">
-      <p class="section-kicker">Simulation</p>
-      <h2>Simulation benchmarks for adaptation and absolute performance</h2>
-      <p class="section-intro">
-        Rho is evaluated in RoboTwin, LIBERO, and RoboEval. RoboTwin provides a
-        controlled study of how embodiment midtraining changes downstream data
-        efficiency, while LIBERO and RoboEval measure absolute performance after
-        benchmark-specific task adaptation. Each comparison uses the benchmark's
-        task data and protocol; Rho's LIBERO and RoboEval policies are adapted for
-        40,000 optimizer updates with global batch size 128 and eight flow samples
-        per training example.
-      </p>
-
-      <article class="result-block">
-        <div class="result-block__header">
-          <div>
-            <h3><a href="https://libero-project.github.io/main.html">LIBERO</a></h3>
-            <p>
-              Rho is jointly adapted on all 40 tasks from the four standard LIBERO
-              suites for 40,000 optimizer updates. Each task is evaluated in 50
-              trials per seed using benchmark-provided initial states, for 6,000
-              trials across three complete evaluation seeds. Rho reaches{" "}
-              <strong>97.9% average success</strong>; its largest margin is on
-              LIBERO-Long, where multi-stage tasks require connecting language and
-              scene context to extended goal-directed behavior.
-            </p>
-          </div>
-          <a class="text-link" href="https://huggingface.co/microsoft/rho-libero">
-            Download rho-libero ↗
-          </a>
-        </div>
-        <div class="table-wrap">
-          <table class="results-table">
-            <thead>
-              <tr><th>Model</th><th>Spatial</th><th>Object</th><th>Goal</th><th>Long</th><th>Average</th></tr>
-            </thead>
-            <tbody>
-              {liberoRows.map((row) => (
-                <tr class:list={{ highlight: row[0] === "Rho" }}>
-                  {row.map((value, index) => index === 0 ? <th scope="row">{modelCitations[value] ? <a href={modelCitations[value]}>{value}</a> : value}</th> : <td>{value}</td>)}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p class="note">
-          Evaluate the released checkpoint by following the instructions in the{" "}
-          <a href="https://github.com/microsoft/rhobotics#readme">repository README</a>.
+    <!-- ================================================================ -->
+    <section id="simulation" class="section section--tint">
+      <div class="container container--wide">
+        <p class="section-kicker">Simulation benchmarks</p>
+        <h2>Rho-base on LIBERO and RoboEval</h2>
+        <p class="section-intro">
+          The simulation comparisons start from Rho-base rather than a midtrained
+          variant and follow each benchmark's standard protocol, finetuning on the
+          benchmark's own data. Rho's policies are adapted for 40k steps at batch
+          size 128; success is averaged over three evaluation seeds or passes.
         </p>
-      </article>
 
-      <article class="result-block">
-        <div class="result-block__header">
-          <div>
-            <h3>
-              <a href="https://arxiv.org/abs/2507.00435" target="_blank" rel="noopener noreferrer">
-                RoboEval
-              </a>
-            </h3>
-            <p>
-              RoboEval contains eight bimanual tasks covering lifting, packing,
-              object pickup, articulated-object interaction, stacking, and handover.
-              Rho is jointly adapted across all eight datasets and evaluated in
-              three complete passes of 100 trials per task — 300 trials per task and
-              2,400 trials per model. In addition to binary success, the benchmark
-              reports task progression and behavioral measures for coordination,
-              motion efficiency, collisions, slips, and self-collisions. In the
-              final results reported in Table 7, Rho achieves <strong>73% overall
-              success</strong>, the highest task progression, and the shortest
-              aggregate Cartesian, joint, and orientation paths in the comparison.
-            </p>
+        <article class="result-block">
+          <div class="result-block__header">
+            <div>
+              <h3><a href="https://libero-project.github.io/main.html">LIBERO</a></h3>
+              <p>
+                One policy finetuned on all 40 tasks of the four LIBERO suites.
+                Rho-base reaches <strong>97.9% average success</strong>, the strongest
+                aggregate among the compared models. The margin comes almost entirely
+                from LIBERO-Long, the hardest suite, where it leads the next-best
+                model by 2.7 points; on the three shorter-horizon suites it is
+                within 0.5 points of the best reported value.
+              </p>
+            </div>
+            <a class="text-link" href={checkpoints.libero}>Download rho-libero ↗</a>
           </div>
-          <strong class="metric">73% overall</strong>
-        </div>
-        <figure class="figure figure--wide">
-          <img src={withBase("assets/fig-roboeval.png")} alt="RoboEval task-level and overall success for Rho, π0.5, GR00T N1.7, and MolmoAct2" loading="lazy" />
-          <figcaption>
-            RoboEval task-level and overall success for Rho,{" "}
-            <a href={modelCitations["π0.5"]}>π0.5</a>,{" "}
-            <a href={modelCitations["GR00T N1.7"]}>GR00T N1.7</a>, and{" "}
-            <a href={modelCitations["MolmoAct2"]}>MolmoAct2</a>.
-          </figcaption>
-        </figure>
-        <div class="diagnostic-grid" role="group" aria-label="RoboEval behavioral and safety diagnostics">
-          <div class="diagnostic-card">
-            <span class="diagnostic-card__val">0.85</span>
-            <span class="diagnostic-card__lbl">Task progression</span>
-            <span class="diagnostic-card__sub">Highest of the compared models</span>
-          </div>
-          <div class="diagnostic-card">
-            <span class="diagnostic-card__val">1.41 m</span>
-            <span class="diagnostic-card__lbl">Cartesian path length</span>
-            <span class="diagnostic-card__sub">Shortest of the compared models</span>
-          </div>
-          <div class="diagnostic-card">
-            <span class="diagnostic-card__val">7.70 / 4.69 rad</span>
-            <span class="diagnostic-card__lbl">Joint / orientation path length</span>
-            <span class="diagnostic-card__sub">Shortest aggregate motion paths</span>
-          </div>
-        </div>
-        <p class="note">
-          Aggregate behavioral metrics are summarized in report Table 7, with the
-          task-level breakdown in Appendix G. No single model leads every safety
-          diagnostic: π0.5 has the fewest environment collisions, while MolmoAct2
-          has the lowest bimanual gripper-height difference, self-collision count,
-          and slip count.
-        </p>
-      </article>
-
-      <article class="result-block">
-        <div class="result-block__header">
-          <div>
-            <h3><a href="https://arxiv.org/abs/2506.18088">RoboTwin</a></h3>
-            <p>
-              RoboTwin provides a controlled test of embodiment transfer. We select
-              its dual-arm UR5e embodiment, use 45 tasks for horizontal midtraining,
-              and hold out five disjoint tasks for downstream adaptation. Starting
-              from either pretrained Rho or Rho-RoboTwin, we fine-tune on nested
-              subsets containing 12.5%, 25%, 50%, and 100% of the held-out
-              demonstrations under the same 40,000-step budget. Across the
-              non-saturated regimes, the midtrained checkpoint reaches a given
-              success level with roughly half as much downstream data. At the 12.5%
-              budget, Easy success rises from <strong>28.1% to 40.6%</strong>, while
-              Hard success rises from <strong>30.9% to 38.9%</strong>.
-            </p>
-          </div>
-          <a class="text-link" href="https://robotwin-platform.github.io/leaderboard">
-            RoboTwin leaderboard ↗
-          </a>
-        </div>
-        <figure class="figure figure--wide">
-          <img
-            src={withBase("assets/fig-robotwin-midtraining.png")}
-            alt="RoboTwin easy and hard results across fine-tuning data budgets"
-            loading="lazy"
-          />
-          <figcaption>
-            Mid-training provides the largest gains in low-data adaptation and
-            improves the 100% data result on the Hard protocol.
-          </figcaption>
-        </figure>
-        <details>
-          <summary>Five-task leaderboard comparison</summary>
-          <p class="note">
-            The comparison uses Hanging Mug, Move Stapler Pad, Place Burger Fries,
-            Handover Mic, and Stack Bowls Three. Rho values are from the Rho 100%
-            Midtrain checkpoint and average four Easy seeds and three Hard seeds
-            with 50 episodes per task and seed. π0.5 values are the official
-            100-trial-per-task leaderboard results from its 50-task Aloha-AgileX
-            co-training run. This provides task-level evaluation context, not a
-            controlled head-to-head training comparison.
-          </p>
           <div class="table-wrap">
             <table class="results-table">
               <thead>
-                <tr><th>Policy</th><th>Easy</th><th>Hard</th><th>Average</th></tr>
+                <tr><th>Model</th><th>Spatial</th><th>Object</th><th>Goal</th><th>Long</th><th>Average</th></tr>
               </thead>
               <tbody>
-                {robotwinSummary.map((row) => (
-                  <tr class:list={{ highlight: row[0] === "Rho 100% Midtrain" }}>
+                {liberoRows.map((row) => (
+                  <tr class:list={{ highlight: row[0] === "Rho" }}>
                     {row.map((value, index) => index === 0 ? <th scope="row">{modelCitations[value] ? <a href={modelCitations[value]}>{value}</a> : value}</th> : <td>{value}</td>)}
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          <p class="table-subhead"><strong>Task-level Rho 100% Midtrain vs π0.5</strong></p>
-          <div class="table-wrap">
-            <table class="results-table">
-              <thead>
-                <tr>
-                  <th>Task</th>
-                  <th>Rho Midtrained Easy</th>
-                  <th>π0.5 Easy</th>
-                  <th>Rho Midtrained Hard</th>
-                  <th>π0.5 Hard</th>
-                </tr>
-              </thead>
-              <tbody>
-                {robotwinTaskRows.map((row) => (
-                  <tr class:list={{ highlight: row[0] === "Mean" }}>
-                    {row.map((value, index) => index === 0 ? <th scope="row">{value}</th> : <td>{value}%</td>)}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <p class="note">
+            Success rates in percent. Baseline values are taken from each model's
+            report or official release, so adaptation and evaluation protocols may
+            differ; Rho is the mean over three seeds.
+          </p>
+        </article>
+
+        <article class="result-block">
+          <div class="result-block__header">
+            <div>
+              <h3><a href="https://arxiv.org/abs/2507.00435">RoboEval</a></h3>
+              <p>
+                Eight bimanual tasks — lifting, packing, picking, valve rotation,
+                stacking, shelving, and handover — evaluated in three passes of 100
+                rollouts per task, with π0.5 and GR00T N1.7 finetuned and evaluated
+                in the same harness. Rho-base reaches <strong>73% overall success</strong>{" "}
+                versus 67% for π0.5 and 61% for GR00T N1.7 and MolmoAct2. It wins
+                outright on Pick Book, Stack Book on Shelf, and Rotate Valve and
+                matches the best baseline on the other five; since a different
+                baseline is best on each task, π0.5 keeps up with Rho on only four
+                of the eight.
+              </p>
+            </div>
+            <strong class="metric">73% overall</strong>
           </div>
-        </details>
-      </article>
+          <div class="chart-block">
+            <ChartLegend series={roboevalSeries} />
+            <BarChart
+              title="RoboEval success rate by task"
+              yLabel="Success rate (%)"
+              series={roboevalSeries}
+              groups={roboevalSuccess}
+              height={280}
+              showValues={false}
+            />
+            <p class="chart-caption">
+              RoboEval task-level and overall success for Rho-base,{" "}
+              <a href={modelCitations["π0.5"]}>π0.5</a>,{" "}
+              <a href={modelCitations["GR00T N1.7"]}>GR00T N1.7</a>, and{" "}
+              <a href={modelCitations["MolmoAct2"]}>MolmoAct2</a>. Whiskers show
+              ± one standard deviation over three evaluation passes; hover a bar
+              for its value.
+            </p>
+            <details>
+              <summary>RoboEval success rates as a table</summary>
+              <div class="table-wrap">
+                <table class="results-table">
+                  <thead>
+                    <tr><th>Task</th>{roboevalSeries.map((s) => <th>{s.name}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {roboevalSuccess.map((g) => (
+                      <tr class:list={{ highlight: g.summary }}>
+                        <th scope="row">{g.label}</th>
+                        {g.values.map((v, i) => <td>{v.toFixed(1)} ± {g.errors[i].toFixed(1)}</td>)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          </div>
+          <div class="diagnostic-grid" role="group" aria-label="RoboEval behavioral metrics">
+            <div class="diagnostic-card">
+              <span class="diagnostic-card__val">0.85</span>
+              <span class="diagnostic-card__lbl">Task progression</span>
+              <span class="diagnostic-card__sub">Highest of the compared models</span>
+            </div>
+            <div class="diagnostic-card">
+              <span class="diagnostic-card__val">1.41 m</span>
+              <span class="diagnostic-card__lbl">Cartesian path length</span>
+              <span class="diagnostic-card__sub">Shortest of the compared models</span>
+            </div>
+            <div class="diagnostic-card">
+              <span class="diagnostic-card__val">7.70 / 4.69 rad</span>
+              <span class="diagnostic-card__lbl">Joint / orientation path length</span>
+              <span class="diagnostic-card__sub">Shortest of the compared models</span>
+            </div>
+          </div>
+          <p class="note">
+            Beyond success, RoboEval reports behavioral metrics. Rho leads on five
+            of nine; π0.5 has the fewest environment collisions, and MolmoAct2 the
+            lowest gripper-height difference, self-collision count, and slip count.
+          </p>
+        </article>
+      </div>
     </section>
 
+    <!-- ================================================================ -->
     <section id="online-adaptation" class="section section--dark">
       <div class="container container--wide">
         <p class="section-kicker">Online adaptation</p>
-        <h2>Corrective feedback in Rho's latent action space</h2>
+        <h2>After deployment, Rho keeps learning from corrections</h2>
         <p class="section-intro">
-          Offline task adaptation is limited by the states represented in its
-          demonstration dataset. Rho addresses failures after deployment through an
-          internal latent policy that predicts an observation-conditioned initial
-          condition for the frozen flow-matching action generator. Corrected action
-          chunks are inverted through the same discretized flow used for generation,
-          producing latent targets for this lightweight module. The vision-language
-          backbone and action expert remain frozen, so online learning changes where
-          generation begins without rewriting the offline-trained controller.
+          A policy finetuned offline is only as good as the states in its
+          demonstrations; once deployed, it will meet configurations where it is
+          unreliable. Rho addresses this with an optional <em>internal latent
+          policy</em>. Normally the action generator <em>G</em> starts its flow
+          from Gaussian noise <em>z</em>; with the latent policy enabled, it starts
+          from a learned, observation-conditioned <em>z</em> = π(<em>o</em>) instead,
+          so <em>a</em> = <em>G</em>(<em>o</em>, π(<em>o</em>)). The backbone and
+          action expert stay frozen; only this small module is trained, and it is
+          stored and served inside the same checkpoint.
         </p>
         <p class="section-intro">
-          In Meta-World, 50 additional scripted-expert episodes per task raise
-          average success from <strong>57.5% to 73.3%</strong> across six
-          challenging tasks. On FR3 Duo, only 15 additional human-supervised
-          episodes per task improve difficult edge-of-distribution configurations:
-          test-tube assembly success rises from <strong>30.0% to 70.0%</strong>,
-          and plug insertion rises from <strong>66.7% to 93.3%</strong>.
+          Training data comes from corrective takeovers (the FlowDAgger recipe):
+          when a human — or, in simulation, a scripted expert — takes over, the
+          actions actually executed are assembled into a chunk, inverted through
+          the frozen flow to recover the latent that would have produced them, and
+          used as a regression target for π. Online learning therefore changes{" "}
+          <em>where generation starts</em>, while every action is still produced by
+          the unchanged offline-trained model.
         </p>
         <div class="online-results-grid">
           <div>
-            <h3>Meta-World</h3>
+            <h3>Meta-World (simulation)</h3>
+            <p class="note note--dark">
+              A deliberately under-trained Rho policy on all 50 Meta-World tasks,
+              adapted on six hard tasks with 50 scripted-expert episodes each.
+              Success over 100 rollouts per task.
+            </p>
             <div class="table-wrap table-wrap--dark">
               <table class="results-table">
                 <thead>
@@ -1019,38 +1321,100 @@ const embodiments = [
             </div>
           </div>
           <div>
-            <h3>FR3 Duo</h3>
+            <h3>FR3 Duo (physical robot)</h3>
+            <p class="note note--dark">
+              Rho-FR3-Duo policies finetuned offline on 150 demonstrations per task,
+              then adapted from 15 human-supervised episodes — a tenth of the
+              offline budget — and evaluated on 10 hard configurations at the edge
+              of the workspace, three trials each.
+            </p>
             <div class="table-wrap table-wrap--dark">
               <table class="results-table">
                 <thead>
-                  <tr><th>Task</th><th>Offline success</th><th>Online success</th><th>Offline progress</th><th>Online progress</th></tr>
+                  <tr><th>Task · metric</th><th>Offline</th><th>+ Online</th><th>Gain</th></tr>
                 </thead>
                 <tbody>
-                  <tr><th scope="row">Test-tube assembly</th><td>30.0%</td><td>70.0%</td><td>56.7%</td><td>81.7%</td></tr>
-                  <tr><th scope="row">Plug insertion</th><td>66.7%</td><td>93.3%</td><td>83.3%</td><td>96.7%</td></tr>
+                  <tr><th scope="row">Test-tube assembly · success</th><td>30.0%</td><td>70.0%</td><td>+40.0</td></tr>
+                  <tr><th scope="row">Test-tube assembly · progress</th><td>56.7%</td><td>81.7%</td><td>+25.0</td></tr>
+                  <tr><th scope="row">Plug insertion · success</th><td>66.7%</td><td>93.3%</td><td>+26.6</td></tr>
+                  <tr><th scope="row">Plug insertion · progress</th><td>83.3%</td><td>96.7%</td><td>+13.4</td></tr>
                 </tbody>
               </table>
             </div>
           </div>
         </div>
+        <p class="note note--dark">
+          Corrections on FR3 Duo are given with a SpaceMouse while the operator
+          keeps emergency-stop authority; the learned policy can only change a
+          bounded latent, and every generated action remains subject to the
+          controller's joint, workspace, and action limits.
+        </p>
       </div>
     </section>
 
-    <section id="efficiency" class="section section--tint">
-      <div class="container container--wide">
-        <p class="section-kicker">Supplemental systems measurements</p>
-        <h2>Training and inference efficiency</h2>
-        <p class="section-intro">
-          The technical report defines Rho's architecture and training recipe; the
-          measurements below supplement that discussion with implementation-level
-          memory, throughput, and inference profiles. Rho supports both full-model
-          adaptation and expert-only training. Lower values are better for peak
-          VRAM and seconds per step.
+    <!-- ================================================================ -->
+    <section id="release" class="section container container--wide">
+      <p class="section-kicker">Open weights</p>
+      <h2>Models, data, and code</h2>
+      <p class="section-intro">
+        We release Rho-base together with the three embodiment-midtrained
+        checkpoints, code to finetune them offline and adapt them online, and the
+        BusyBox finetuning dataset collected on YAM Box. Start from a midtrained
+        checkpoint if you have one of the three robots; start from Rho-base to
+        midtrain a new platform or to adapt to a different one directly.
+      </p>
+      <div class="release-grid">
+        <a href={checkpoints.base}><strong>rho-base</strong><span>Pretrained foundation model</span></a>
+        <a href={checkpoints.yam}><strong>rho-yam-box</strong><span>Midtrained for I²RT YAM Box</span></a>
+        <a href={checkpoints.ur}><strong>rho-ur-ai-trainer</strong><span>Midtrained for Universal Robots AI Trainer</span></a>
+        <a href={checkpoints.fr3}><strong>rho-fr3-duo</strong><span>Midtrained for Franka FR3 Duo</span></a>
+        <a href={checkpoints.libero}><strong>rho-libero</strong><span>Rho-base finetuned on LIBERO</span></a>
+        <a href={checkpoints.busybox}><strong>BusyBox dataset</strong><span>~2,000 YAM Box demonstrations, six task categories</span></a>
+        <a href="https://github.com/microsoft/rhobotics"><strong>rhobotics</strong><span>Finetuning, online adaptation, and evaluation code</span></a>
+        <a href={withBase("assets/rho.pdf")}><strong>Technical report</strong><span>Full recipe, protocols, and ablations (PDF)</span></a>
+      </div>
+
+      <div class="feature-grid">
+        <article>
+          <span class="feature-number">Open question 1</span>
+          <h3>Language steerability</h3>
+          <p>How well Rho follows varied phrasings has not been evaluated systematically — an open issue for all current manipulation VLAs, which are built for single-task finetuning, and one we expect to become central.</p>
+        </article>
+        <article>
+          <span class="feature-number">Open question 2</span>
+          <h3>Rho inside agentic systems</h3>
+          <p>Frontier reasoning models can act as governors that plan for a VLA. How Rho performs in that role, and how midtraining and adaptation should change to strengthen it, is untested.</p>
+        </article>
+        <article>
+          <span class="feature-number">Open question 3</span>
+          <h3>Tactile and other feedback</h3>
+          <p>Rho is vision-only. With tactile datasets and simulated tactile data becoming available, extending it to touch could improve robustness on contact-rich tasks.</p>
+        </article>
+      </div>
+
+      <p class="note">
+        <strong>Scope and responsible use.</strong> The strongest-model claims hold
+        for the baselines, budgets, and protocols in the report; results on three
+        platforms and a handful of benchmarks do not establish universal
+        generalization. Offline adaptation still depends on representative
+        demonstrations, and online adaptation should run under human supervision
+        with platform-specific safeguards, workspace constraints, and evaluation
+        gates before deployment.
+      </p>
+
+      <details class="systems-details">
+        <summary>Systems measurements (website supplement, not part of the report)</summary>
+        <p class="note">
+          Observed training and inference profiles from our harness, not
+          model-quality results. Precision, gradient checkpointing (GC), and
+          trainable scope differ across recipes. The π0.5 implementation is{" "}
+          <a href="https://github.com/Physical-Intelligence/openpi">OpenPI</a>.
         </p>
+        <p class="table-subhead"><strong>Training footprint</strong> (lower is better)</p>
         <div class="table-wrap">
           <table class="results-table">
             <thead>
-              <tr><th>Framework</th><th>Recipe</th><th>Trainable</th><th>GC</th><th>Peak VRAM ↓</th><th>Time/step ↓</th></tr>
+              <tr><th>Framework</th><th>Recipe</th><th>Trainable</th><th>GC</th><th>Peak VRAM</th><th>Time/step</th></tr>
             </thead>
             <tbody>
               {efficiencyRows.map((row) => (
@@ -1061,121 +1425,32 @@ const embodiments = [
             </tbody>
           </table>
         </div>
+        <p class="table-subhead"><strong>Inference latency and memory</strong> (one action-chunk prediction)</p>
+        <div class="table-wrap">
+          <table class="results-table">
+            <thead>
+              <tr><th>Framework</th><th>Flow steps</th><th>Horizon</th><th>Latency, batch 1</th><th>Latency, batch 8</th><th>VRAM, batch 1</th><th>VRAM, batch 8</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row"><a href={modelCitations["OpenPI π0.5"]}>OpenPI π0.5</a></th><td>10</td><td>18</td><td>44.8 ms (22 Hz)</td><td>201 ms</td><td>7.4 GB</td><td>8.0 GB</td></tr>
+              <tr><th scope="row"><a href={modelCitations["GR00T N1.7"]}>GR00T N1.7</a></th><td>4</td><td>40</td><td>48.2 ms (21 Hz)</td><td>112 ms</td><td>7.1 GB</td><td>8.4 GB</td></tr>
+              <tr class="highlight"><th scope="row">Rho</th><td>10</td><td>50</td><td>83.9 ms (12 Hz)</td><td>186 ms</td><td>11.0 GB</td><td>12.5 GB</td></tr>
+              <tr><th scope="row"><a href={modelCitations["MolmoAct2"]}>MolmoAct2</a></th><td>10</td><td>16</td><td>110.4 ms (9 Hz)</td><td>357 ms</td><td>13.0 GB</td><td>15.5 GB</td></tr>
+            </tbody>
+          </table>
+        </div>
         <p class="note">
-          These are observed systems profiles rather than model-quality results.
-          Precision, gradient checkpointing, trainable scope, and the number of
-          flow samples differ across recipes.{" "}
-          <a href="#flow-samples">NFS (also written k)</a> is the number of
-          flow-matching samples per training example, not inference steps.
-          The π0.5 implementation is <a href="https://github.com/Physical-Intelligence/openpi">OpenPI</a>.
+          Median GPU model-forward time and peak VRAM on an NVIDIA RTX PRO 6000
+          (Blackwell) in bfloat16, each model at its default number of flow or
+          denoising steps; end-to-end robot-loop latency adds framework-specific
+          CPU preprocessing. Rho encodes the cameras and instruction once per query
+          and reuses the projected context across its 10 Euler steps, which
+          sustains a &gt;10 Hz replanning loop on a single 24 GB GPU.
         </p>
-
-        <div class="efficiency-study">
-          <h3>Inference latency and deployment footprint</h3>
-          <p>
-            Rho encodes all camera views and the language instruction once per
-            policy query, extracts and projects the intermediate Phi-Phy context,
-            and reuses it throughout 10 explicit Euler integration steps. The
-            action horizon is a configurable recipe choice; the reported deployment
-            profile predicts a 50-step chunk and can execute the full chunk or
-            replan after a shorter prefix. This cached-context design sustains a
-            &gt;10 Hz replanning loop in the measured setup and is compatible with
-            real-time chunking.
-          </p>
-          <div class="table-wrap">
-            <table class="results-table">
-              <thead>
-                <tr><th>Framework</th><th>Flow steps</th><th>Horizon</th><th>Latency (bs=1)</th><th>bs=4</th><th>bs=8</th><th>VRAM (bs=1)</th><th>VRAM (bs=8)</th></tr>
-              </thead>
-              <tbody>
-                <tr><th scope="row"><a href={modelCitations["OpenPI π0.5"]}>OpenPI π0.5</a></th><td>10</td><td>18</td><td>44.8 ms (22 Hz)</td><td>112 ms</td><td>201 ms</td><td>7.4 GB</td><td>8.0 GB</td></tr>
-                <tr><th scope="row"><a href={modelCitations["GR00T N1.7"]}>GR00T N1.7</a></th><td>4</td><td>40</td><td>48.2 ms (21 Hz)</td><td>66 ms</td><td>112 ms</td><td>7.1 GB</td><td>8.4 GB</td></tr>
-                <tr class="highlight"><th scope="row">Rho</th><td>10</td><td>50</td><td>83.9 ms (12 Hz)</td><td>126 ms</td><td>186 ms</td><td>11.0 GB</td><td>12.5 GB</td></tr>
-                <tr><th scope="row"><a href={modelCitations["MolmoAct2"]}>MolmoAct2</a></th><td>10</td><td>16</td><td>110.4 ms (9 Hz)</td><td>205 ms</td><td>357 ms</td><td>13.0 GB</td><td>15.5 GB</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <p class="note">
-            Median GPU model-forward time and peak VRAM for one action-chunk prediction,
-            measured in our harness on an NVIDIA RTX PRO 6000 (Blackwell) in bfloat16, each
-            model at its native default flow/denoising steps. These are model-forward times;
-            end-to-end robot-loop latency adds framework-specific CPU preprocessing. Latency
-            and memory are architecture-driven and are not a model-quality benchmark. At batch
-            size 8, Rho (186 ms) is faster than OpenPI π0.5 (201 ms) and roughly 2× faster than
-            MolmoAct2 (357 ms); its 11–12.5 GB footprint fits a single 24 GB GPU.
-          </p>
-        </div>
-
-        <div id="flow-samples" class="efficiency-study">
-          <h3>Multiple flow samples improve training efficiency</h3>
-          <p>
-            The report's final LIBERO and RoboEval adaptation recipes use eight
-            flow samples per training example. <strong>k=8</strong> means drawing
-            eight independent Gaussian noise inputs and flow timesteps for the{" "}
-            <em>same</em> observation and target action chunk. Each draw produces a
-            flow-matching mean-squared error, and the eight losses are averaged to
-            form the training loss for that example. The predicted actions
-            themselves are not averaged, and no best candidate is selected.
-          </p>
-          <p>
-            In short: <strong>loss per example = (MSE₁ + … + MSEₖ) / k</strong>.
-            The observation's VLM features are reused across draws, giving the
-            action expert more supervision per encoded observation at the cost of
-            additional action-expert compute and memory. <strong>k is a training
-            sample count, not the number of inference-time flow-integration
-            steps</strong>; inference still uses 10 explicit Euler steps.
-          </p>
-          <div class="table-wrap">
-            <table class="results-table">
-              <thead>
-                <tr><th>Condition</th><th>10k</th><th>20k</th><th>30k</th><th>40k</th></tr>
-              </thead>
-              <tbody>
-                <tr><th scope="row"><a href={modelCitations["GR00T N1.7"]}>GR00T N1.7</a></th><td>33.50%</td><td>38.63%</td><td>56.38%</td><td>57.63%</td></tr>
-                <tr><th scope="row"><a href={modelCitations["MolmoAct2"]}>MolmoAct2</a>, k=1</th><td>49.12%</td><td>57.25%</td><td>62.38%</td><td>59.88%</td></tr>
-                <tr><th scope="row"><a href={modelCitations["MolmoAct2"]}>MolmoAct2</a>, k=8</th><td>58.75%</td><td>57.25%</td><td>61.12%</td><td>62.00%</td></tr>
-                <tr><th scope="row">Rho, k=1</th><td>55.12%</td><td>69.12%</td><td>72.00%</td><td>70.00%</td></tr>
-                <tr class="highlight"><th scope="row">Rho, k=8</th><td>67.50%</td><td>67.50%</td><td>72.75%</td><td>74.75%</td></tr>
-                <tr><th scope="row"><a href={modelCitations["π0.5"]}>π0.5</a></th><td>57.75%</td><td>66.38%</td><td>69.88%</td><td>66.50%</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <p class="note">
-            <a href="https://arxiv.org/abs/2507.00435">RoboEval</a> success rate by optimizer-step
-            checkpoint (10k–40k). Here, <code>k</code> and <code>NFS</code> both
-            denote the number of noise/timestep samples per training example.
-          </p>
-        </div>
-      </div>
+      </details>
     </section>
-
-    <section id="models" class="section container container--wide">
-      <p class="section-kicker">Open weights</p>
-      <h2>Models and resources</h2>
-      <p class="section-intro">
-        We release pretrained Rho together with embodiment-midtrained checkpoints
-        for FR3 Duo, UR AI Trainer, and YAM Box. The release includes code for
-        downstream fine-tuning and evaluation, giving practitioners a choice
-        between adapting the general multi-embodiment model or starting from a
-        checkpoint that has already learned the sensing and control conventions of
-        a target platform. The BusyBox task dataset collected on YAM Box is also
-        publicly available. Robot deployment and online updates should remain
-        human-supervised and use platform-specific safeguards, workspace
-        constraints, and evaluation gates.
-      </p>
-      <div class="release-grid">
-        <a href="https://huggingface.co/microsoft/rho-base"><strong>rho-base</strong><span>Base pretrained model</span></a>
-        <a href="https://huggingface.co/microsoft/rho-libero"><strong>rho-libero</strong><span>LIBERO fine-tuned model</span></a>
-        <a href="https://huggingface.co/microsoft/rho-fr3-duo"><strong>rho-fr3-duo</strong><span>FR3 Duo mid-trained model</span></a>
-        <a href="https://huggingface.co/microsoft/rho-ur-ai-trainer"><strong>rho-ur-ai-trainer</strong><span>UR AI Trainer mid-trained model</span></a>
-        <a href="https://huggingface.co/microsoft/rho-yam-box"><strong>rho-yam-box</strong><span>YAM Box mid-trained model</span></a>
-        <a href="https://github.com/microsoft/rhobotics"><strong>rhobotics</strong><span>Training and evaluation code</span></a>
-      </div>
-    </section>
-
   </div>
 </BaseLayout>
-
 <style>
   #flow-samples { scroll-margin-top: 80px; }
   .hero {
@@ -1934,4 +2209,184 @@ const embodiments = [
     .hero__stats div { border-right: 0; border-bottom: 1px solid var(--rule); }
     .hero__stats div:last-child { border-bottom: 0; }
   }
+  /* Two spec tables (or two ablation tables) side by side. */
+  .spec-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 22px;
+    margin-top: 28px;
+  }
+  .spec-grid h3 {
+    margin: 0;
+    font-size: var(--type-subsection-heading);
+  }
+  .spec-grid .table-wrap { margin: 12px 0 0; }
+  .spec-grid .table-subhead { margin: 0; }
+  .result-block .spec-grid { margin-top: 20px; }
+  /* Midtraining mixture cards reuse the diagnostic-card look. */
+  .mixture-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-top: 44px;
+  }
+  .diagnostic-card__lbl--light {
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+  .online-results-grid .note--dark { margin: 0 0 14px; }
+  .release-grid + .feature-grid { margin-top: 54px; }
+  .systems-details { margin-top: 36px; }
+  .spec-grid > * { min-width: 0; }
+  @media (max-width: 900px) {
+    .spec-grid { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 720px) {
+    .mixture-grid { grid-template-columns: 1fr; }
+  }
+  /* Five recipe stages in one row; below 1100px the fifth spans a full row. */
+  .adaptation-flow {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 16px;
+  }
+  .adaptation-stage {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 20px 18px;
+  }
+  .adaptation-stage__description { min-height: 0; }
+  /* Pin the data/mixture/output summary to the card bottom, whatever the text length. */
+  .adaptation-stage dl {
+    margin-top: auto;
+    padding-top: 22px;
+  }
+  .adaptation-stage__arrow { right: -27px; }
+  @media (max-width: 1100px) {
+    .adaptation-flow { grid-template-columns: repeat(2, 1fr); }
+    .adaptation-stage:last-child { grid-column: 1 / -1; }
+    .adaptation-stage__arrow { display: none; }
+  }
+  @media (max-width: 560px) {
+    .adaptation-flow { grid-template-columns: 1fr; }
+  }
+  /* Odd number of clips: wrap and center the last row instead of leaving a gap. */
+  .clip-grid--centered {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .clip-grid--centered figure {
+    flex: 0 1 calc((100% - 32px) / 3);
+  }
+  @media (max-width: 560px) {
+    .clip-grid--centered figure { flex-basis: 100%; }
+  }
+  /* Task-name captions under clips: readable, not footnote-sized. */
+  .clip-grid figcaption,
+  .task-clips figcaption {
+    margin-top: 10px;
+    color: var(--text);
+    font-size: var(--type-body);
+    font-weight: 600;
+    line-height: 1.35;
+  }
+  /* Let column headers wrap rather than force a horizontal scrollbar. */
+  thead th {
+    white-space: normal;
+    vertical-align: bottom;
+  }
+  /* Mixture charts under the recipe cards. */
+  .mixture-block { margin-top: 44px; }
+  .mixture-block h3 {
+    margin: 0 0 14px;
+    font-size: var(--type-subsection-heading);
+  }
+  .mixture-block__body {
+    padding: 22px 24px;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: #fff;
+  }
+  .mixture-grid { margin-top: 0; }
+  .mixture-card { gap: 6px; }
+  .mixture-card .pie { margin: 10px 0 8px; gap: 12px 18px; }
+  .mixture-card .diagnostic-card__sub { margin-top: 2px; }
+  /* Robot results: text, then the chart at full width (so the lettering inside
+     the chart image is large enough to read), then the clips. */
+  .hardware-result,
+  .hardware-result--reverse {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 26px;
+  }
+  .hardware-result--reverse > div,
+  .hardware-result--reverse > figure { order: initial; }
+  .hardware-result__chart {
+    width: 100%;
+    max-width: 1080px;
+    margin-inline: auto;
+  }
+  /* Live charts in the robot results. */
+  .chart-block { display: grid; gap: 22px; }
+  .chart-block .chart-legend { margin-bottom: 0; }
+  .chart-pair {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 28px 36px;
+  }
+  @media (max-width: 900px) {
+    .chart-pair { grid-template-columns: minmax(0, 1fr); }
+  }
+  /* Readable everywhere: notes and captions are set like body text (same size,
+     dark ink); compact text is --type-small; only short uppercase labels use
+     --type-label. Overrides the older per-element sizes above. */
+  .note,
+  .figure figcaption,
+  .chart-caption {
+    color: var(--text);
+    font-size: var(--type-body);
+    line-height: 1.55;
+  }
+  .chart-caption {
+    max-width: 900px;
+    margin: 0 auto;
+    text-align: center;
+  }
+  .note--dark { color: #e6eef3; }
+  .hero__media figcaption,
+  .diagnostic-card__sub,
+  .button,
+  table {
+    font-size: var(--type-small);
+  }
+  .diagnostic-card__sub { color: var(--text); }
+  thead th,
+  .badge {
+    font-size: var(--type-label);
+  }
+  thead th { color: var(--text); }
+  /* Stage-card summaries: blue letter-spaced labels, plain dark values. */
+  .adaptation-stage dt {
+    color: var(--link);
+    font-size: var(--type-label);
+    font-weight: 700;
+    letter-spacing: 0.12em;
+  }
+  .adaptation-stage dd {
+    margin-top: 3px;
+    color: var(--text);
+    font-size: var(--type-small);
+    font-weight: 400;
+    line-height: 1.4;
+  }
+  .adaptation-stage__description { font-size: 1.0625rem; }
+  .figure figcaption { max-width: 900px; line-height: 1.5; }
+  th,
+  td { padding: 11px 12px; }
+  /* Key-value spec tables sit two abreast; let their values wrap. */
+  .spec-grid table:not(.results-table) th,
+  .spec-grid table:not(.results-table) td {
+    white-space: normal;
+  }
+  .spec-grid table:not(.results-table) th { width: 38%; vertical-align: top; }
 </style>

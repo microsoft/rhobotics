@@ -12,7 +12,7 @@
   /* Typography scale */
   --type-body: 1rem;
   --type-subtitle: 1.125rem;
-  --type-section-heading: clamp(1.625rem, 2.8vw, 2.25rem);
+  --type-section-heading: clamp(1.5rem, 2.3vw, 1.875rem);
   --type-subsection-heading: 1.5rem;
 
   /* Color palette */
@@ -32,7 +32,7 @@
   --ribbon-bg: linear-gradient(115deg, #062138 0%, #0b4f80 55%, #0e7397 100%);
   --ribbon-fg: #ffffff;
   --ribbon-fg-muted: #d2d2d2;
-  --ribbon-height: 180px;
+  --ribbon-height: 96px;
 
   /* Footer (Microsoft open-source style) */
   --footer-bg: #f2f2f2;

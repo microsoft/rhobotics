@@ -11,8 +11,8 @@ import { withBase } from "../lib/url";
       <!-- Microsoft four-square logo -->
       <svg
         class="ribbon__logo"
-        width="30"
-        height="30"
+        width="42"
+        height="42"
         viewBox="0 0 23 23"
         aria-hidden="true"
         focusable="false"
@@ -45,7 +45,7 @@ import { withBase } from "../lib/url";
   .ribbon__brand {
     display: inline-flex;
     align-items: center;
-    gap: 14px;
+    gap: 12px;
     color: var(--ribbon-fg);
     text-decoration: none;
   }
@@ -60,13 +60,21 @@ import { withBase } from "../lib/url";
 
   .ribbon__wordmark {
     font-weight: 600;
-    font-size: 2rem;
+    font-size: 1.5rem;
     letter-spacing: 0.01em;
+    /* Trim the text box to cap height so the logo centers on the capitals
+       rather than on the line box (which includes descender space). */
+    line-height: 1;
+    text-box: trim-both cap alphabetic;
   }
 
   @media (max-width: 720px) {
+    .ribbon__logo {
+      width: 34px;
+      height: 34px;
+    }
     .ribbon__wordmark {
-      font-size: 1.6rem;
+      font-size: 1.25rem;
     }
   }
 </style>

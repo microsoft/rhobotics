@@ -1,11 +1,30 @@
-# Rho
+[project-page]: https://microsoft.github.io/rhobotics/
 
-Rho is a vision-language-action policy for robot learning. This repository
+<h1 align="center">
+  <a href="https://microsoft.github.io/rhobotics/"><b>Rho</b>: A Foundation for Efficiently Adaptable VLA Models<br></a>
+</h1>
+<h2 align="center"><a href="https://microsoft.github.io/rhobotics/">Webpage</a> | <a href="https://microsoft.github.io/rhobotics/assets/rho.pdf">Technical Report</a> | <a href="https://huggingface.co/collections/microsoft/rho">Models</a> | <a href="https://huggingface.co/collections/microsoft/rho">Data</a></h2>
+
+<table align="center">
+  <tr>
+    <td align="center" width="33%"><img src="website/public/assets/fr3-duo-sizzle.webp" alt="Rho highlight reel on the FR3 Duo" width="100%"></td>
+    <td align="center" width="33%"><img src="website/public/assets/ur5e-sizzle.webp" alt="Rho highlight reel on the UR AI Trainer" width="100%"></td>
+    <td align="center" width="33%"><img src="website/public/assets/yambox-sizzle.webp" alt="Rho highlight reel on the YAM Box" width="100%"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>FR3 Duo</b></td>
+    <td align="center"><b>UR AI Trainer</b></td>
+    <td align="center"><b>YAM Box</b></td>
+  </tr>
+</table>
+
+## 📚 Overview
+
+Rho is a family of open-weight, 5B-parameter vision-language-action models for
+robot learning, combining a physically grounded Phi-family vision-language
+backbone with a continuous flow-matching action expert. This repository
 provides the code needed to finetune Rho on LeRobot datasets, evaluate it in
 simulation, and serve it over a websocket for deployment.
-
-Visit the [Rho project page](https://microsoft.github.io/rhobotics/). Its source
-lives in [`website/`](website/).
 
 ## Features
 

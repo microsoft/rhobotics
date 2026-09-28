@@ -1,0 +1,42 @@
+---
+// Legend shared by one or more charts: a colour chip and the series name.
+interface Props {
+  series: { name: string; color: string }[];
+}
+const { series } = Astro.props;
+---
+
+<ul class="chart-legend">
+  {series.map((s) => (
+    <li>
+      <span class="chart-legend__swatch" style={`background:${s.color}`} aria-hidden="true"></span>
+      {s.name}
+    </li>
+  ))}
+</ul>
+
+<style>
+  .chart-legend {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px 28px;
+    margin: 0 0 14px;
+    padding: 0;
+    list-style: none;
+    color: var(--text);
+    font-size: var(--type-small);
+    font-weight: 600;
+  }
+  .chart-legend li {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chart-legend__swatch {
+    display: inline-block;
+    width: 26px;
+    height: 12px;
+    border-radius: 3px;
+  }
+</style>

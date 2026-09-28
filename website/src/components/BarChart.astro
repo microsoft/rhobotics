@@ -1,0 +1,241 @@
+---
+// Grouped bar chart drawn in HTML/CSS from the report's numbers. Unlike a
+// chart image, its lettering does not shrink with the layout: labels and
+// values keep a fixed, readable size however wide the chart is drawn.
+export interface Series {
+  name: string;
+  color: string;
+}
+export interface Group {
+  label: string;
+  values: number[]; // one per series, in percent
+  errors?: number[]; // optional +/- one s.d. per value, drawn as whiskers
+  summary?: boolean; // e.g. "Overall": set apart by a dashed rule
+}
+
+interface Props {
+  title: string; // accessible name
+  yLabel: string;
+  xLabel?: string; // optional caption under the group labels
+  heading?: string; // optional visible panel title
+  series: Series[];
+  groups: Group[];
+  height?: number; // plot height in px
+  showValues?: boolean; // print each bar's value above it
+}
+
+const {
+  title,
+  yLabel,
+  xLabel,
+  heading,
+  series,
+  groups,
+  height = 250,
+  showValues = true,
+} = Astro.props;
+
+const scaleMax = 114; // headroom so the value above a 100% bar still fits
+const ticks = [0, 20, 40, 60, 80, 100];
+const fmt = (v: number) => v.toFixed(1).replace(/\.0$/, "");
+const barCount = groups.length * series.length;
+const barMin = showValues ? 30 : 16; // px; value labels need wider bars
+const describe = (g: Group, i: number) =>
+  `${series[i].name} · ${g.label}: ${fmt(g.values[i])}%` +
+  (g.errors ? ` (± ${fmt(g.errors[i])})` : "");
+---
+
+<figure class="bars" role="group" aria-label={title}>
+  {heading && <p class="bars__heading">{heading}</p>}
+  <div class="bars__scroll">
+    <div class="bars__frame" style={`--bars:${barCount};--bar-min:${barMin}px`}>
+      <div class="bars__ylabel" aria-hidden="true"><span>{yLabel}</span></div>
+      <div class="bars__plot" style={`height:${height}px`} aria-hidden="true">
+        {ticks.map((t) => (
+          <div class="bars__tick" style={`bottom:${(t / scaleMax) * 100}%`}><span>{t}</span></div>
+        ))}
+        <div class="bars__groups" style={`grid-template-columns:repeat(${groups.length}, minmax(0, 1fr))`}>
+          {groups.map((g) => (
+            <div class:list={["bars__group", { "bars__group--summary": g.summary }]}>
+              {g.values.map((v, i) => {
+                const sd = g.errors?.[i] ?? 0;
+                const half = v > 0 ? (sd / v) * 100 : 0; // whisker half-length, % of bar height
+                return (
+                  <div
+                    class="bars__bar"
+                    style={`height:${(v / scaleMax) * 100}%;background:${series[i].color}`}
+                    title={describe(g, i)}
+                  >
+                    {sd > 0 && (
+                      <span class="bars__err" style={`top:${-half}%;height:${2 * half}%`}></span>
+                    )}
+                    {showValues && (
+                      <span class="bars__val" style={`bottom:${100 + half}%`}>{fmt(v)}</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
+      <div class="bars__labels" style={`grid-template-columns:repeat(${groups.length}, minmax(0, 1fr))`} aria-hidden="true">
+        {groups.map((g) => (
+          <div class:list={["bars__label", { "bars__label--summary": g.summary }]}>{g.label}</div>
+        ))}
+      </div>
+      {xLabel && <div class="bars__xlabel" aria-hidden="true">{xLabel}</div>}
+    </div>
+  </div>
+  <div class="visually-hidden">
+    <table>
+      <caption>{title} — {yLabel}</caption>
+      <thead>
+        <tr><th>{xLabel ?? "Task"}</th>{series.map((s) => <th>{s.name}</th>)}</tr>
+      </thead>
+      <tbody>
+        {groups.map((g) => (
+          <tr>
+            <th scope="row">{g.label}</th>
+            {g.values.map((v, i) => (
+              <td>{fmt(v)}%{g.errors ? ` ± ${fmt(g.errors[i])}` : ""}</td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+</figure>
+
+<style>
+  .bars {
+    margin: 0;
+    min-width: 0;
+  }
+  .bars__heading {
+    margin: 0 0 6px;
+    color: var(--text);
+    font-size: var(--type-body);
+    font-weight: 700;
+    text-align: center;
+  }
+  .bars__scroll { overflow-x: auto; }
+  .bars__frame {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr);
+    /* Never squeeze bars below a width that fits their value labels. */
+    min-width: calc(var(--bars) * var(--bar-min) + 80px);
+  }
+  .bars__ylabel {
+    grid-row: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .bars__ylabel span {
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    color: var(--text);
+    font-size: var(--type-small);
+    white-space: nowrap;
+  }
+  .bars__plot {
+    position: relative;
+    grid-column: 2;
+    margin-left: 38px;
+    border-bottom: 1.5px solid var(--text);
+    border-left: 1.5px solid var(--text);
+  }
+  .bars__tick {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 0;
+    border-top: 1px solid var(--rule);
+  }
+  .bars__tick:first-child { border-top: 0; }
+  .bars__tick span {
+    position: absolute;
+    right: calc(100% + 8px);
+    top: 0;
+    transform: translateY(-50%);
+    color: var(--text);
+    font-size: var(--type-small);
+    font-variant-numeric: tabular-nums;
+  }
+  .bars__groups {
+    position: absolute;
+    inset: 0;
+    display: grid;
+  }
+  .bars__group {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 2px;
+    height: 100%;
+    padding-inline: 6%;
+  }
+  .bars__group--summary { border-left: 1.5px dashed #8a8a8a; }
+  .bars__bar {
+    position: relative;
+    flex: 1 1 0;
+    max-width: 46px;
+    min-height: 2px;
+    border-radius: 4px 4px 0 0;
+    transition: opacity 120ms ease;
+  }
+  .bars__plot:hover .bars__bar:not(:hover) { opacity: 0.55; }
+  /* Error whisker: +/- one s.d., centred on the bar top. */
+  .bars__err {
+    position: absolute;
+    left: 50%;
+    width: 9px;
+    min-height: 3px;
+    transform: translateX(-50%);
+    border-block: 1.5px solid var(--text);
+    background: linear-gradient(var(--text), var(--text)) center / 1.5px 100% no-repeat;
+  }
+  .bars__val {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    padding-bottom: 3px;
+    color: var(--text);
+    font-size: 0.9375rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .bars__labels {
+    grid-column: 2;
+    display: grid;
+    margin-left: 38px;
+    padding-top: 8px;
+  }
+  .bars__label {
+    padding-inline: 4px;
+    color: var(--text);
+    font-size: var(--type-small);
+    line-height: 1.25;
+    text-align: center;
+  }
+  .bars__label--summary { font-weight: 700; }
+  .bars__xlabel {
+    grid-column: 2;
+    margin-left: 38px;
+    padding-top: 8px;
+    color: var(--text);
+    font-size: var(--type-small);
+    text-align: center;
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+</style>

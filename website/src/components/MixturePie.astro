@@ -1,0 +1,165 @@
+---
+// Donut chart of a training-data mixture, drawn from the same numbers and
+// colours as the report's pie figures. Identity is carried by the legend (and a
+// native tooltip on each slice), never by colour alone; the centre shows the
+// mixture's total hours.
+export interface Slice {
+  label: string;
+  pct: number; // share of training updates, in percent
+  color: string;
+  detail?: string; // e.g. "520 h @ 30 Hz"
+}
+
+interface Props {
+  slices: Slice[];
+  center: string; // hero number in the middle, e.g. "3,203 h"
+  centerLabel?: string; // small caption under it, e.g. "total"
+  size?: number; // rendered diameter in px
+  legend?: "list" | "compact" | "none";
+  title: string; // accessible name of the chart
+}
+
+const {
+  slices,
+  center,
+  centerLabel = "",
+  size = 240,
+  legend = "list",
+  title,
+} = Astro.props;
+
+// Geometry in a fixed 100x100 viewBox; the ring is a thick stroke so slices
+// can be separated by a 2px gap of the page surface (stroke-linejoin does the
+// rest).
+const R = 34; // ring radius (midline of the stroke)
+const W = 26; // ring thickness
+const C = 2 * Math.PI * R;
+const gapPx = 2; // visual gap between slices, in viewBox units
+// The hero number must fit the hole (42 units across): shrink it for long values.
+const centerSize = Math.min(11.5, 56 / center.length);
+let offset = 0;
+const arcs = slices.map((s) => {
+  const len = (s.pct / 100) * C;
+  const arc = { ...s, dash: Math.max(len - gapPx, 0.1), start: offset };
+  offset += len;
+  return arc;
+});
+---
+
+<figure class="pie" role="group" aria-label={title}>
+  <svg
+    class="pie__chart"
+    viewBox="0 0 100 100"
+    width={size}
+    height={size}
+    role="img"
+    aria-label={`${title}: ${slices.map((s) => `${s.label} ${s.pct.toFixed(1)}%`).join(", ")}`}
+  >
+    {arcs.map((a) => (
+      <circle
+        class="pie__slice"
+        cx="50"
+        cy="50"
+        r={R}
+        fill="none"
+        stroke={a.color}
+        stroke-width={W}
+        stroke-dasharray={`${a.dash} ${C - a.dash}`}
+        stroke-dashoffset={-a.start + C / 4}
+        pathLength={C}
+      >
+        <title>{a.label}: {a.pct.toFixed(1)}%{a.detail ? ` · ${a.detail}` : ""}</title>
+      </circle>
+    ))}
+    <text
+      class="pie__center"
+      x="50"
+      y={centerLabel ? 50.5 : 50 + centerSize * 0.35}
+      text-anchor="middle"
+      style={`font-size:${centerSize}px`}
+    >{center}</text>
+    {centerLabel && (
+      <text class="pie__center-label" x="50" y="58" text-anchor="middle">{centerLabel}</text>
+    )}
+  </svg>
+  {legend !== "none" && (
+    <ul class:list={["pie__legend", { "pie__legend--compact": legend === "compact" }]}>
+      {slices.map((s) => (
+        <li>
+          <span class="pie__swatch" style={`background:${s.color}`} aria-hidden="true"></span>
+          <span class="pie__name">{s.label}</span>
+          {s.detail && legend === "list" && <span class="pie__detail">{s.detail}</span>}
+          <span class="pie__pct">{s.pct.toFixed(1)}%</span>
+        </li>
+      ))}
+    </ul>
+  )}
+</figure>
+
+<style>
+  .pie {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 20px 32px;
+    margin: 0;
+  }
+  .pie__chart {
+    flex: 0 0 auto;
+    display: block;
+  }
+  .pie__slice {
+    transition: opacity 120ms ease;
+  }
+  .pie:hover .pie__slice:not(:hover) { opacity: 0.55; }
+  .pie__center {
+    font-size: 12px;
+    font-weight: 700;
+    fill: var(--text);
+  }
+  .pie__center-label {
+    font-size: 4.6px;
+    fill: var(--text-muted);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .pie__legend {
+    flex: 1 1 260px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-size: var(--type-small);
+    line-height: 1.4;
+  }
+  .pie__legend li {
+    display: grid;
+    grid-template-columns: 12px minmax(0, 1fr) auto auto;
+    align-items: baseline;
+    gap: 0 10px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .pie__legend li:last-child { border-bottom: 0; }
+  .pie__swatch {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    align-self: center;
+  }
+  .pie__name { color: var(--text); font-weight: 600; }
+  .pie__detail { color: var(--text-muted); white-space: nowrap; }
+  .pie__pct { color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .pie__legend--compact {
+    flex-basis: 170px;
+    font-size: var(--type-small);
+  }
+  .pie__legend--compact li {
+    grid-template-columns: 10px minmax(0, 1fr) auto;
+    padding: 2px 0;
+    border-bottom: 0;
+  }
+  .pie__legend--compact .pie__swatch { width: 10px; height: 10px; }
+  .pie__legend--compact .pie__name { font-weight: 500; }
+</style>

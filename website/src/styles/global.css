@@ -12,7 +12,7 @@
   /* Typography scale */
   --type-body: 1rem;
   --type-subtitle: 1.125rem;
-  --type-section-heading: clamp(2rem, 4vw, 3.2rem);
+  --type-section-heading: clamp(1.625rem, 2.8vw, 2.25rem);
   --type-subsection-heading: 1.5rem;
 
   /* Color palette */

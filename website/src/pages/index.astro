@@ -3,10 +3,45 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 import { withBase } from "../lib/url";
 
 const resources = [
+  { label: "Technical report", href: withBase("assets/rho.pdf") },
   { label: "Code", href: "https://github.com/microsoft/rhobotics" },
   { label: "Models", href: "https://huggingface.co/collections/microsoft/rho" },
   { label: "BusyBox dataset", href: "https://huggingface.co/datasets/microsoft/BusyBox" },
 ];
+
+// Author list as in the tech report (alphabetical); one inner array per printed line.
+const leadRoles: Record<string, string> = {
+  "♠": "Project lead",
+  "∗": "Data lead",
+  "§": "Training lead",
+  "‡": "Engineering lead",
+  "†": "VLM lead",
+};
+
+const authorLines: { name: string; marks?: string }[][] = [
+  [
+    { name: "Simran Bagaria" },
+    { name: "Daphne Chen" },
+    { name: "Dean Fortier" },
+    { name: "Jianlong Fu" },
+  ],
+  [
+    { name: "Michael Harrison" },
+    { name: "Tess Hellebrekers" },
+    { name: "Neel Joshi", marks: "†" },
+    { name: "Andrey Kolobov", marks: "♠∗" },
+    { name: "Dalton Moore" },
+  ],
+  [
+    { name: "Galen Mullins", marks: "‡" },
+    { name: "Michael Murray", marks: "§" },
+    { name: "Eduardo Salinas" },
+    { name: "Reuben Tan" },
+  ],
+];
+
+const describeMarks = (marks: string) =>
+  [...marks].map((mark) => leadRoles[mark]).join(", ");
 
 const modelCitations: Record<string, string> = {
   "OpenVLA": "https://openvla.github.io/",
@@ -53,7 +88,7 @@ const adaptationStages = [
     subtitle: "Multi-embodiment VLA",
     description:
       "Adds the flow-matching action expert and jointly trains the backbone and action modules on a balanced mixture spanning more than a dozen physical and simulated robot embodiments. The full run uses 48 B200 GPUs and one pass over the robot corpus.",
-    data: "3,219+ robot hours",
+    data: "3,200+ robot hours",
     mix: "90% robot data · 10% vision-language",
     output: "General-purpose VLA",
   },
@@ -152,13 +187,46 @@ const embodiments = [
 ---
 
 <BaseLayout
-  title="Rho: Robotic Manipulation Models With Adaptation In Mind"
+  title="Rho: A Foundation for Efficiently Adaptable VLA Models"
   description="Rho is a family of open-weight, 5B-parameter physical AI models for bimanual robotic manipulation and efficient adaptation."
 >
   <section class="hero">
     <div class="container container--wide">
       <h1>Rho</h1>
-      <p class="hero__title-expansion">Robotic Manipulation Models With Adaptation In Mind</p>
+      <p class="hero__title-expansion">A Foundation for Efficiently Adaptable VLA Models</p>
+      <div class="authors">
+        <p class="authors__team">Rho team<sup><a href="#author-note" aria-label="Author order note">1</a></sup></p>
+        <p class="authors__names">
+          {authorLines.map((line, lineIndex) => (
+            <span class="authors__line">
+              {line.map((author, i) => (
+                <Fragment>
+                  <span class="authors__name">
+                    {author.name}
+                    {author.marks && (
+                      <sup title={describeMarks(author.marks)}>
+                        <span aria-hidden="true">{author.marks}</span>
+                        <span class="visually-hidden">({describeMarks(author.marks)})</span>
+                      </sup>
+                    )}
+                    {(i < line.length - 1 || lineIndex < authorLines.length - 1) && ","}
+                  </span>{" "}
+                </Fragment>
+              ))}
+            </span>
+          ))}
+        </p>
+        <p class="authors__affiliation">Microsoft Research</p>
+        <p class="authors__legend">
+          <span>Area leads:</span>
+          <span><sup>∗</sup>Data</span>
+          <span><sup>§</sup>Training</span>
+          <span><sup>‡</sup>Engineering</span>
+          <span><sup>†</sup>VLM</span>
+          <span class="authors__legend-break"><sup>♠</sup>Project lead</span>
+        </p>
+        <p class="authors__note" id="author-note"><sup>1</sup>Authors are listed alphabetically.</p>
+      </div>
       <p class="hero__dek">
         Rho is a family of open-weight, 5B-parameter physical AI models that
         combines a physically grounded Phi-family vision-language backbone with a
@@ -173,18 +241,12 @@ const embodiments = [
             {resource.label}<span aria-hidden="true">↗</span>
           </a>
         ))}
-        <span class="button button--soon" role="link" aria-disabled="true" title="Technical report coming soon">
-          Tech Report — coming soon
-        </span>
       </div>
       <dl class="hero__stats">
         <div><dt>Model size</dt><dd>5B params</dd></div>
         <div><dt>Action expert</dt><dd>542M params</dd></div>
-        <div><dt>Pretraining data</dt><dd>3,219+ hours</dd></div>
+        <div><dt>Pretraining data</dt><dd>3,200+ hours</dd></div>
       </dl>
-      <p class="hero__stats-note">
-        FR3 Duo task success vs π0.5 46.7% · GR00T&nbsp;N1.7 50.0% — 30 rollouts per task, per model.
-      </p>
       <div class="hero__media hero__media--sizzle" role="group" aria-label="Rho manipulation examples">
         <figure>
           <img
@@ -1125,7 +1187,7 @@ const embodiments = [
     text-transform: uppercase;
   }
   .hero h1 {
-    font-size: clamp(3.5rem, 9vw, 6.5rem);
+    font-size: clamp(3rem, 7vw, 5rem);
     line-height: 0.9;
     letter-spacing: -0.06em;
   }
@@ -1139,9 +1201,85 @@ const embodiments = [
   .hero__title-expansion {
     margin: 18px auto 0;
     color: var(--text);
-    font-size: var(--type-subtitle);
+    font-size: clamp(1.375rem, 2.6vw, 1.75rem);
     font-weight: 650;
+    line-height: 1.25;
     letter-spacing: -0.02em;
+  }
+  .authors {
+    margin: 26px auto 0;
+    max-width: 780px;
+    color: var(--text);
+  }
+  .authors p {
+    margin: 0;
+  }
+  .authors sup {
+    font-size: 0.75em;
+    line-height: 0;
+    margin-left: 1px;
+  }
+  .authors sup a {
+    color: inherit;
+    text-decoration: none;
+  }
+  .authors__team {
+    font-size: var(--type-subtitle);
+    font-weight: 600;
+  }
+  .authors__names {
+    margin-top: 6px !important;
+    font-size: var(--type-body);
+    line-height: 1.6;
+  }
+  .authors__line {
+    display: block;
+  }
+  .authors__name {
+    white-space: nowrap;
+  }
+  .authors__affiliation {
+    margin-top: 8px !important;
+    color: var(--text);
+    font-size: var(--type-subtitle);
+    font-weight: 700;
+    letter-spacing: 0.01em;
+  }
+  .authors__legend {
+    margin-top: 12px !important;
+    color: var(--text-muted);
+    font-size: 0.9375rem;
+    line-height: 1.6;
+  }
+  .authors__legend sup,
+  .authors__note sup {
+    font-size: 0.85em;
+    margin-right: 1px;
+  }
+  .authors__legend span:not(:first-child) {
+    margin-left: 1em;
+  }
+  .authors__legend-break {
+    display: block;
+    margin-left: 0 !important;
+  }
+  .authors__note {
+    margin-top: 2px !important;
+    color: var(--text-muted);
+    font-size: 0.9375rem;
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  @media (max-width: 720px) {
+    .authors__line {
+      display: inline;
+    }
   }
   .hero__links {
     display: flex;
@@ -1228,15 +1366,18 @@ const embodiments = [
     border-block: 1px solid var(--rule);
     backdrop-filter: blur(10px);
   }
+  /* Links spread across the same column as the page text; on narrow screens,
+     where they no longer fit, the row scrolls sideways instead. */
   .section-nav .container {
     display: flex;
+    justify-content: space-between;
     gap: 24px;
     overflow-x: auto;
-    padding-block: 12px;
+    padding-block: 14px;
   }
   .section-nav a {
     color: var(--text);
-    font-size: 0.86rem;
+    font-size: var(--type-body);
     font-weight: 600;
     white-space: nowrap;
   }
@@ -1584,21 +1725,6 @@ const embodiments = [
     border-radius: 8px;
   }
   summary { cursor: pointer; font-weight: 650; }
-  .button--soon {
-    background: transparent;
-    color: var(--text-muted);
-    border: 1px dashed var(--rule);
-    cursor: default;
-  }
-  .button--soon:hover,
-  .button--soon:focus { background: transparent; color: var(--text-muted); }
-  .hero__stats-note {
-    max-width: 900px;
-    margin: 12px auto 0;
-    color: var(--text-muted);
-    font-size: 0.82rem;
-    text-align: center;
-  }
   .badge {
     display: inline-block;
     margin-bottom: 8px;

@@ -260,8 +260,9 @@ const embodiments = [
     name: "YAM Box",
     maker: "I²RT",
     image: "assets/yam_box.jpg",
-    spec: "2 × 6-DoF YAM arms · parallel-jaw grippers · 3 RealSense cameras · 30 Hz",
-    role: "Portable bimanual platform common in research labs.",
+    reel: "assets/yambox-sizzle.mp4",
+    spec: "2 × 6-DoF YAM arms · parallel-jaw grippers · 3 RealSense cameras",
+    role: "Portable platform common in research labs.",
     checkpoint: checkpoints.yam,
     slug: "rho-yam-box",
   },
@@ -269,8 +270,9 @@ const embodiments = [
     name: "UR AI Trainer",
     maker: "Universal Robots",
     image: "assets/ur_ai_trainer.jpg",
-    spec: "2 × UR5e arms · Robotiq 2F-85 grippers · 3 Orbbec cameras · 18 Hz",
-    role: "An emerging standard for industrial bimanual manipulation.",
+    reel: "assets/ur5e-sizzle.mp4",
+    spec: "2 × UR5e arms · Robotiq 2F-85 grippers · 3 Orbbec cameras",
+    role: "Emerging industrial dual-arm standard.",
     checkpoint: checkpoints.ur,
     slug: "rho-ur-ai-trainer",
   },
@@ -278,22 +280,25 @@ const embodiments = [
     name: "FR3 Duo",
     maker: "Franka",
     image: "assets/fr3_duo.jpg",
-    spec: "2 × 7-DoF FR3 arms · Robotiq grippers · ZED + 2 RealSense cameras · 30 Hz",
+    reel: "assets/fr3-duo-sizzle.mp4",
+    spec: "2 × 7-DoF FR3 arms · Robotiq grippers · ZED + 2 RealSense cameras",
     role: "Straddles research and industry use.",
     checkpoint: checkpoints.fr3,
     slug: "rho-fr3-duo",
   },
 ];
 
-// Result charts (report Figures 5 and 7-10). Series colours follow the report's
-// figures, adjusted where neighbouring bars were hard to tell apart (validated
-// with the dataviz palette checker). A colour always means the same model.
+
+// Result charts (report Figures 5 and 7-10). Rho keeps the report's red; the
+// other series use colours chosen so that EVERY pair of bars in a chart stays
+// distinguishable under red-green and blue-yellow colour-vision deficiency
+// (dataviz palette checker, --pairs all). A colour always means the same model.
 const chartColors = {
   rho: "#D1495B",
-  pi: "#4577B0",
-  groot: "#59A14F",
-  molmo: "#8A63B0",
-  pretrainedOnly: "#2A9D8F",
+  pi: "#2F6FB0",
+  groot: "#E0A11B",
+  molmo: "#5BB8E8",
+  pretrainedOnly: "#7A6BD1",
 };
 
 const robotwinSeries = [
@@ -467,35 +472,27 @@ const efficiencyRows = [
         <div><dt>Pretraining data</dt><dd>3,200+ hours</dd></div>
       </dl>
     </div>
-    <div class="container hero__variants" role="group" aria-labelledby="variants-title">
-      <div class="hero__variants-frame">
-        <p class="hero__variants-title" id="variants-title">Midtrained Rho variants for…</p>
-        <div class="hero__media hero__media--sizzle">
-          <figure>
+  </section>
+
+  <section class="variants-band" aria-labelledby="variants-title">
+    <div class="container hero__variants">
+      <p class="section-kicker variants-band__title" id="variants-title">Midtrained Rho variants for…</p>
+      <div class="hero__media hero__media--sizzle">
+        {embodiments.map((robot) => (
+          <article class="variant-card">
             <video
-              src={withBase("assets/fr3-duo-sizzle.mp4")}
-              aria-label="FR3 Duo highlight reel"
+              src={withBase(robot.reel)}
+              aria-label={`${robot.name} highlight reel`}
               controls autoplay muted loop playsinline preload="metadata"
             ></video>
-            <figcaption>FR3 Duo</figcaption>
-          </figure>
-          <figure>
-            <video
-              src={withBase("assets/ur5e-sizzle.mp4")}
-              aria-label="UR AI Trainer highlight reel"
-              controls autoplay muted loop playsinline preload="metadata"
-            ></video>
-            <figcaption>UR AI Trainer</figcaption>
-          </figure>
-          <figure>
-            <video
-              src={withBase("assets/yambox-sizzle.mp4")}
-              aria-label="YAM Box highlight reel"
-              controls autoplay muted loop playsinline preload="metadata"
-            ></video>
-            <figcaption>YAM Box</figcaption>
-          </figure>
-        </div>
+            <div class="variant-card__body">
+              <span class="badge">{robot.maker}</span>
+              <h3>{robot.name}</h3>
+              <p>{robot.role}</p>
+              <a href={robot.checkpoint}>Get {robot.slug} ↗</a>
+            </div>
+          </article>
+        ))}
       </div>
     </div>
   </section>
@@ -505,9 +502,9 @@ const efficiencyRows = [
       <a href="#overview">Overview</a>
       <a href="#recipe">Recipe</a>
       <a href="#architecture">Architecture</a>
+      <a href="#simulation">Simulation</a>
       <a href="#midtraining">Midtraining</a>
       <a href="#robots">Robots</a>
-      <a href="#simulation">Simulation</a>
       <a href="#online-adaptation">Online adaptation</a>
       <a href="#release">Release</a>
     </div>
@@ -731,7 +728,7 @@ const efficiencyRows = [
         <article class="result-block">
           <div class="result-block__header">
             <div>
-              <h3>Why this shape: what the ablations chose</h3>
+              <h3>Architecture ablations</h3>
               <p>
                 Design choices were selected on RoboEval, where each candidate was
                 pretrained on a 15% subset of Rho-Tomyum and then adapted for 40k
@@ -812,100 +809,229 @@ const efficiencyRows = [
     </section>
 
     <!-- ================================================================ -->
-    <section id="midtraining" class="section container container--wide">
-      <p class="section-kicker">Embodiment midtraining</p>
-      <h2>Midtraining halves the task data a robot needs</h2>
+    <section id="simulation" class="section container container--wide">
+      <p class="section-kicker">Simulation benchmarks</p>
+      <h2>Rho-base on LIBERO and RoboEval</h2>
       <p class="section-intro">
-        Two controlled experiments isolate what the midtraining stage buys. The
-        first varies the amount of task data and holds compute fixed; the second
-        holds the task data fixed and varies the amount of midtraining.
+        The simulation comparisons start from Rho-base rather than a midtrained
+        variant and follow each benchmark's standard protocol, finetuning on the
+        benchmark's own data. Rho's policies are adapted for 40k steps at batch
+        size 128; success is averaged over three evaluation seeds or passes.
       </p>
 
       <article class="result-block">
         <div class="result-block__header">
           <div>
-            <h3>Data efficiency: same success with half the demonstrations</h3>
+            <h3><a href="https://libero-project.github.io/main.html">LIBERO</a></h3>
             <p>
-              In <a href="https://arxiv.org/abs/2506.18088">RoboTwin 2.0</a>, the 50
-              dual-arm UR5e tasks are split into 45 for midtraining and 5 held out
-              for finetuning. Rho-base and the midtrained Rho-RoboTwin are then
-              finetuned on nested subsets holding 12.5%, 25%, 50%, and 100% of the
-              held-out demonstrations, each for the same 40k steps. Until
-              performance saturates, the midtrained model matches Rho-base trained
-              on <strong>twice</strong> the data: midtrained at 25% ≈ pretrained at
-              50%. In the lowest-data regime it is about 30% better in relative
-              terms — <strong>28.1% → 40.6%</strong> on the Easy protocol and{" "}
-              <strong>30.9% → 38.9%</strong> on Hard, which adds distractor objects.
+              One policy finetuned on all 40 tasks of the four LIBERO suites.
+              Rho-base reaches <strong>97.9% average success</strong>, the strongest
+              aggregate among the compared models. The margin comes almost entirely
+              from LIBERO-Long, the hardest suite, where it leads the next-best
+              model by 2.7 points; on the three shorter-horizon suites it is
+              within 0.5 points of the best reported value.
             </p>
           </div>
+          <a class="text-link" href={checkpoints.libero}>Download rho-libero ↗</a>
         </div>
-        <div class="chart-block">
-          <ChartLegend series={robotwinSeries} />
-          <div class="chart-pair">
-            <BarChart
-              title="RoboTwin Easy: success by finetuning data budget"
-              heading="RoboTwin / Easy"
-              yLabel="Success rate (%)"
-              xLabel="Share of the finetuning dataset used"
-              series={robotwinSeries}
-              groups={robotwinEasy}
-              height={250}
-            />
-            <BarChart
-              title="RoboTwin Hard: success by finetuning data budget"
-              heading="RoboTwin / Hard"
-              yLabel="Success rate (%)"
-              xLabel="Share of the finetuning dataset used"
-              series={robotwinSeries}
-              groups={robotwinHard}
-              height={250}
-            />
-          </div>
-          <p class="chart-caption">
-            Success on the five held-out RoboTwin tasks (50 episodes per task)
-            after 40k finetuning steps. Bars are means over seeds and whiskers
-            show ± one standard deviation; the midtraining advantage is largest
-            with little data and shrinks as the finetuning set grows.
-          </p>
+        <div class="table-wrap">
+          <table class="results-table">
+            <thead>
+              <tr><th>Model</th><th>Spatial</th><th>Object</th><th>Goal</th><th>Long</th><th>Average</th></tr>
+            </thead>
+            <tbody>
+              {liberoRows.map((row) => (
+                <tr class:list={{ highlight: row[0] === "Rho" }}>
+                  {row.map((value, index) => index === 0 ? <th scope="row">{modelCitations[value] ? <a href={modelCitations[value]}>{value}</a> : value}</th> : <td>{value}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
+        <p class="note">
+          Success rates in percent. Baseline values are taken from each model's
+          report or official release, so adaptation and evaluation protocols may
+          differ; Rho is the mean over three seeds.
+        </p>
       </article>
 
       <article class="result-block">
         <div class="result-block__header">
           <div>
-            <h3>Midtraining compute: more epochs, better task policies</h3>
+            <h3><a href="https://arxiv.org/abs/2507.00435">RoboEval</a></h3>
             <p>
-              On a physical FR3 Duo, the same ~150 plug-insertion demonstrations and
-              the same 50k-step finetuning budget were applied to Rho-base directly
-              and to Rho-base after one or two epochs of FR3 Duo midtraining. Success
-              over 30 trials rises with midtraining exposure. Most of the gain
-              appears on plug positions near the edge of the finetuning
-              distribution: broad midtraining seems to give the policy a better model
-              of the robot's reach and motion geometry than any single task's
-              demonstrations can.
+              Eight bimanual tasks — lifting, packing, picking, valve rotation,
+              stacking, shelving, and handover — evaluated in three passes of 100
+              rollouts per task, with π0.5 and GR00T N1.7 finetuned and evaluated
+              in the same harness. Rho-base reaches <strong>73% overall success</strong>{" "}
+              versus 67% for π0.5 and 61% for GR00T N1.7 and MolmoAct2. It wins
+              outright on Pick Book, Stack Book on Shelf, and Rotate Valve and
+              matches the best baseline on the other five; since a different
+              baseline is best on each task, π0.5 keeps up with Rho on only four
+              of the eight.
             </p>
           </div>
+          <strong class="metric">73% overall</strong>
         </div>
-        <div class="diagnostic-grid" role="group" aria-label="Plug-insertion success versus midtraining epochs on FR3 Duo">
-          {fr3Epochs.map((item) => (
-            <div class="diagnostic-card">
-              <span class="diagnostic-card__val">{item.val}</span>
-              <span class="diagnostic-card__lbl">{item.lbl}</span>
-              <span class="diagnostic-card__sub">{item.sub}</span>
+        <div class="chart-block">
+          <ChartLegend series={roboevalSeries} />
+          <BarChart
+            title="RoboEval success rate by task"
+            yLabel="Success rate (%)"
+            series={roboevalSeries}
+            groups={roboevalSuccess}
+            height={280}
+            showValues={false}
+          />
+          <p class="chart-caption">
+            RoboEval task-level and overall success for Rho-base,{" "}
+            <a href={modelCitations["π0.5"]}>π0.5</a>,{" "}
+            <a href={modelCitations["GR00T N1.7"]}>GR00T N1.7</a>, and{" "}
+            <a href={modelCitations["MolmoAct2"]}>MolmoAct2</a>. Whiskers show
+            ± one standard deviation over three evaluation passes; hover a bar
+            for its value.
+          </p>
+          <details>
+            <summary>RoboEval success rates as a table</summary>
+            <div class="table-wrap">
+              <table class="results-table">
+                <thead>
+                  <tr><th>Task</th>{roboevalSeries.map((s) => <th>{s.name}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {roboevalSuccess.map((g) => (
+                    <tr class:list={{ highlight: g.summary }}>
+                      <th scope="row">{g.label}</th>
+                      {g.values.map((v, i) => <td>{v.toFixed(1)} ± {g.errors[i].toFixed(1)}</td>)}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          ))}
+          </details>
+        </div>
+        <div class="diagnostic-grid" role="group" aria-label="RoboEval behavioral metrics">
+          <div class="diagnostic-card">
+            <span class="diagnostic-card__val">0.85</span>
+            <span class="diagnostic-card__lbl">Task progression</span>
+            <span class="diagnostic-card__sub">Highest of the compared models</span>
+          </div>
+          <div class="diagnostic-card">
+            <span class="diagnostic-card__val">1.41 m</span>
+            <span class="diagnostic-card__lbl">Cartesian path length</span>
+            <span class="diagnostic-card__sub">Shortest of the compared models</span>
+          </div>
+          <div class="diagnostic-card">
+            <span class="diagnostic-card__val">7.70 / 4.69 rad</span>
+            <span class="diagnostic-card__lbl">Joint / orientation path length</span>
+            <span class="diagnostic-card__sub">Shortest of the compared models</span>
+          </div>
         </div>
         <p class="note">
-          Bimanual plug insertion on FR3 Duo, success over 30 trials, identical
-          task data and finetuning budget in every condition.
+          Beyond success, RoboEval reports behavioral metrics. Rho leads on five
+          of nine; π0.5 has the fewest environment collisions, and MolmoAct2 the
+          lowest gripper-height difference, self-collision count, and slip count.
         </p>
       </article>
     </section>
 
     <!-- ================================================================ -->
+    <section id="midtraining" class="section section--tint">
+      <div class="container container--wide">
+        <p class="section-kicker">Embodiment midtraining</p>
+        <h2>Midtraining halves the task data a robot needs</h2>
+        <p class="section-intro">
+          Two controlled experiments isolate what the midtraining stage buys. The
+          first varies the amount of task data and holds compute fixed; the second
+          holds the task data fixed and varies the amount of midtraining.
+        </p>
+
+        <article class="result-block">
+          <div class="result-block__header">
+            <div>
+              <h3>Data efficiency: same success with half the demonstrations</h3>
+              <p>
+                In <a href="https://arxiv.org/abs/2506.18088">RoboTwin 2.0</a>, the 50
+                dual-arm UR5e tasks are split into 45 for midtraining and 5 held out
+                for finetuning. Rho-base and the midtrained Rho-RoboTwin are then
+                finetuned on nested subsets holding 12.5%, 25%, 50%, and 100% of the
+                held-out demonstrations, each for the same 40k steps. Until
+                performance saturates, the midtrained model matches Rho-base trained
+                on <strong>twice</strong> the data: midtrained at 25% ≈ pretrained at
+                50%. In the lowest-data regime it is about 30% better in relative
+                terms — <strong>28.1% → 40.6%</strong> on the Easy protocol and{" "}
+                <strong>30.9% → 38.9%</strong> on Hard, which adds distractor objects.
+              </p>
+            </div>
+          </div>
+          <div class="chart-block">
+            <ChartLegend series={robotwinSeries} />
+            <div class="chart-pair">
+              <BarChart
+                title="RoboTwin Easy: success by finetuning data budget"
+                heading="RoboTwin / Easy"
+                yLabel="Success rate (%)"
+                xLabel="Share of the finetuning dataset used"
+                series={robotwinSeries}
+                groups={robotwinEasy}
+                height={250}
+              />
+              <BarChart
+                title="RoboTwin Hard: success by finetuning data budget"
+                heading="RoboTwin / Hard"
+                yLabel="Success rate (%)"
+                xLabel="Share of the finetuning dataset used"
+                series={robotwinSeries}
+                groups={robotwinHard}
+                height={250}
+              />
+            </div>
+            <p class="chart-caption">
+              Success on the five held-out RoboTwin tasks (50 episodes per task)
+              after 40k finetuning steps. Bars are means over seeds and whiskers
+              show ± one standard deviation; the midtraining advantage is largest
+              with little data and shrinks as the finetuning set grows.
+            </p>
+          </div>
+        </article>
+
+        <article class="result-block">
+          <div class="result-block__header">
+            <div>
+              <h3>Midtraining compute: more epochs, better task policies</h3>
+              <p>
+                On a physical FR3 Duo, the same ~150 plug-insertion demonstrations and
+                the same 50k-step finetuning budget were applied to Rho-base directly
+                and to Rho-base after one or two epochs of FR3 Duo midtraining. Success
+                over 30 trials rises with midtraining exposure. Most of the gain
+                appears on plug positions near the edge of the finetuning
+                distribution: broad midtraining seems to give the policy a better model
+                of the robot's reach and motion geometry than any single task's
+                demonstrations can.
+              </p>
+            </div>
+          </div>
+          <div class="diagnostic-grid" role="group" aria-label="Plug-insertion success versus midtraining epochs on FR3 Duo">
+            {fr3Epochs.map((item) => (
+              <div class="diagnostic-card">
+                <span class="diagnostic-card__val">{item.val}</span>
+                <span class="diagnostic-card__lbl">{item.lbl}</span>
+                <span class="diagnostic-card__sub">{item.sub}</span>
+              </div>
+            ))}
+          </div>
+          <p class="note">
+            Bimanual plug insertion on FR3 Duo, success over 30 trials, identical
+            task data and finetuning budget in every condition.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <!-- ================================================================ -->
     <section id="robots" class="section section--dark">
       <div class="container container--wide">
-        <p class="section-kicker">Physical robots</p>
+        <p class="section-kicker">Experiments on physical robots</p>
         <h2>Finetuned Rho variants vs. π0.5, GR00T N1.7, and MolmoAct2</h2>
         <p class="section-intro">
           The central experiments of the report finetune each midtrained Rho variant
@@ -924,8 +1050,7 @@ const efficiencyRows = [
               <div>
                 <span class="badge">{embodiment.maker}</span>
                 <h3>{embodiment.name}</h3>
-                <p>{embodiment.role} {embodiment.spec}.</p>
-                <a href={embodiment.checkpoint}>{embodiment.slug} ↗</a>
+                <p>{embodiment.spec}.</p>
               </div>
             </article>
           ))}
@@ -1148,135 +1273,6 @@ const efficiencyRows = [
             <figcaption>Test-tube unracking</figcaption>
           </figure>
         </div>
-      </div>
-    </section>
-
-    <!-- ================================================================ -->
-    <section id="simulation" class="section section--tint">
-      <div class="container container--wide">
-        <p class="section-kicker">Simulation benchmarks</p>
-        <h2>Rho-base on LIBERO and RoboEval</h2>
-        <p class="section-intro">
-          The simulation comparisons start from Rho-base rather than a midtrained
-          variant and follow each benchmark's standard protocol, finetuning on the
-          benchmark's own data. Rho's policies are adapted for 40k steps at batch
-          size 128; success is averaged over three evaluation seeds or passes.
-        </p>
-
-        <article class="result-block">
-          <div class="result-block__header">
-            <div>
-              <h3><a href="https://libero-project.github.io/main.html">LIBERO</a></h3>
-              <p>
-                One policy finetuned on all 40 tasks of the four LIBERO suites.
-                Rho-base reaches <strong>97.9% average success</strong>, the strongest
-                aggregate among the compared models. The margin comes almost entirely
-                from LIBERO-Long, the hardest suite, where it leads the next-best
-                model by 2.7 points; on the three shorter-horizon suites it is
-                within 0.5 points of the best reported value.
-              </p>
-            </div>
-            <a class="text-link" href={checkpoints.libero}>Download rho-libero ↗</a>
-          </div>
-          <div class="table-wrap">
-            <table class="results-table">
-              <thead>
-                <tr><th>Model</th><th>Spatial</th><th>Object</th><th>Goal</th><th>Long</th><th>Average</th></tr>
-              </thead>
-              <tbody>
-                {liberoRows.map((row) => (
-                  <tr class:list={{ highlight: row[0] === "Rho" }}>
-                    {row.map((value, index) => index === 0 ? <th scope="row">{modelCitations[value] ? <a href={modelCitations[value]}>{value}</a> : value}</th> : <td>{value}</td>)}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p class="note">
-            Success rates in percent. Baseline values are taken from each model's
-            report or official release, so adaptation and evaluation protocols may
-            differ; Rho is the mean over three seeds.
-          </p>
-        </article>
-
-        <article class="result-block">
-          <div class="result-block__header">
-            <div>
-              <h3><a href="https://arxiv.org/abs/2507.00435">RoboEval</a></h3>
-              <p>
-                Eight bimanual tasks — lifting, packing, picking, valve rotation,
-                stacking, shelving, and handover — evaluated in three passes of 100
-                rollouts per task, with π0.5 and GR00T N1.7 finetuned and evaluated
-                in the same harness. Rho-base reaches <strong>73% overall success</strong>{" "}
-                versus 67% for π0.5 and 61% for GR00T N1.7 and MolmoAct2. It wins
-                outright on Pick Book, Stack Book on Shelf, and Rotate Valve and
-                matches the best baseline on the other five; since a different
-                baseline is best on each task, π0.5 keeps up with Rho on only four
-                of the eight.
-              </p>
-            </div>
-            <strong class="metric">73% overall</strong>
-          </div>
-          <div class="chart-block">
-            <ChartLegend series={roboevalSeries} />
-            <BarChart
-              title="RoboEval success rate by task"
-              yLabel="Success rate (%)"
-              series={roboevalSeries}
-              groups={roboevalSuccess}
-              height={280}
-              showValues={false}
-            />
-            <p class="chart-caption">
-              RoboEval task-level and overall success for Rho-base,{" "}
-              <a href={modelCitations["π0.5"]}>π0.5</a>,{" "}
-              <a href={modelCitations["GR00T N1.7"]}>GR00T N1.7</a>, and{" "}
-              <a href={modelCitations["MolmoAct2"]}>MolmoAct2</a>. Whiskers show
-              ± one standard deviation over three evaluation passes; hover a bar
-              for its value.
-            </p>
-            <details>
-              <summary>RoboEval success rates as a table</summary>
-              <div class="table-wrap">
-                <table class="results-table">
-                  <thead>
-                    <tr><th>Task</th>{roboevalSeries.map((s) => <th>{s.name}</th>)}</tr>
-                  </thead>
-                  <tbody>
-                    {roboevalSuccess.map((g) => (
-                      <tr class:list={{ highlight: g.summary }}>
-                        <th scope="row">{g.label}</th>
-                        {g.values.map((v, i) => <td>{v.toFixed(1)} ± {g.errors[i].toFixed(1)}</td>)}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </details>
-          </div>
-          <div class="diagnostic-grid" role="group" aria-label="RoboEval behavioral metrics">
-            <div class="diagnostic-card">
-              <span class="diagnostic-card__val">0.85</span>
-              <span class="diagnostic-card__lbl">Task progression</span>
-              <span class="diagnostic-card__sub">Highest of the compared models</span>
-            </div>
-            <div class="diagnostic-card">
-              <span class="diagnostic-card__val">1.41 m</span>
-              <span class="diagnostic-card__lbl">Cartesian path length</span>
-              <span class="diagnostic-card__sub">Shortest of the compared models</span>
-            </div>
-            <div class="diagnostic-card">
-              <span class="diagnostic-card__val">7.70 / 4.69 rad</span>
-              <span class="diagnostic-card__lbl">Joint / orientation path length</span>
-              <span class="diagnostic-card__sub">Shortest of the compared models</span>
-            </div>
-          </div>
-          <p class="note">
-            Beyond success, RoboEval reports behavioral metrics. Rho leads on five
-            of nine; π0.5 has the fewest environment collisions, and MolmoAct2 the
-            lowest gripper-height difference, self-collision count, and slip count.
-          </p>
-        </article>
       </div>
     </section>
 
@@ -2340,9 +2336,72 @@ const efficiencyRows = [
   .hardware-result--reverse > figure { order: initial; }
   .hardware-result__chart {
     width: 100%;
-    max-width: 1080px;
     margin-inline: auto;
   }
+  /* Explanatory text that follows a table, a row of tiles, or a chart keeps a
+     clear gap from it. */
+  .spec-grid + .note,
+  .diagnostic-grid + .note,
+  .mixture-grid + .note,
+  .table-wrap + .note,
+  .online-results-grid + .note,
+  .mixture-block__body + .note,
+  .spec-grid + .table-subhead,
+  .note + .table-subhead {
+    margin-top: 26px;
+  }
+  /* Dark band under the title block: highlight reel, what the robot is, and
+     the link to its midtrained model. */
+  .variants-band {
+    padding: 40px 0 52px;
+    background: #102234;
+    color: #fff;
+  }
+  .variants-band .hero__variants { margin-top: 0; }
+  .variants-band__title {
+    margin: 0 0 22px;
+    color: #78c7ff;
+    text-align: center;
+  }
+  .variants-band .hero__media { gap: 20px; }
+  .variant-card {
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.06);
+    text-align: left;
+  }
+  .variants-band .hero__media .variant-card video {
+    border-radius: 0;
+    box-shadow: none;
+  }
+  /* Cards in a row share a height; the model link sits at the bottom of each,
+     however long the description above it is. */
+  .variant-card {
+    display: flex;
+    flex-direction: column;
+  }
+  .variant-card__body {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 18px 16px 20px;
+  }
+  .variant-card__body a { margin-top: auto; }
+  .variant-card h3 {
+    margin: 0 0 6px;
+    color: #fff;
+    font-size: 1.55rem;
+    font-weight: 700;
+  }
+  .variant-card p {
+    margin: 0 0 12px;
+    color: #d4e0e8;
+    font-size: var(--type-small);
+  }
+  .variant-card a { color: #78c7ff; font-weight: 600; }
+  .embodiment-card p { margin-bottom: 0; }
   /* Breathing room between the resources grid and the closing note. */
   .release-note { margin-top: 44px; }
   /* Live charts in the robot results. */

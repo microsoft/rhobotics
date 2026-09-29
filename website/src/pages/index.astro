@@ -390,6 +390,7 @@ const liberoRows = [
 ];
 
 // --- Website-only systems measurements (not part of the report) -----------
+// Used by the "Systems measurements" block, which is currently commented out.
 
 const efficiencyRows = [
   ["OpenPI π0.5", "Full fine-tuning", "3.0B", "On", "71.7 GB", "1.70 s"],
@@ -578,8 +579,8 @@ const efficiencyRows = [
         <p class="section-kicker">Training recipe</p>
         <h2>Regularized progressive adaptation, stage by stage</h2>
         <p class="section-intro">
-          Every Rho task policy is produced by the same recipe: four offline stages
-          and an optional fifth that runs after deployment. Each stage adds a
+          Rho task policies are produced by a recipe consisting of four offline
+          stages and an optional fifth that runs after deployment. Each stage adds a
           capability — physical understanding, continuous control, one robot's
           conventions, one task, then corrections from use — while taking care not
           to erase what the previous stages built: vision-language batches stay in
@@ -941,7 +942,7 @@ const efficiencyRows = [
       <div class="hardware-result">
         <div>
           <p class="section-kicker">YAM Box · high-data regime</p>
-          <h2>BusyBox: on par with π0.5 with far less YAM data</h2>
+          <h2>BusyBox: strong performance with plentiful data</h2>
           <p>
             Rho-YAM-Box, π0.5, GR00T N1.7, and MolmoAct2 were each finetuned on
             about 2,000 demonstrations spanning the six task categories of the{" "}
@@ -950,14 +951,18 @@ const efficiencyRows = [
             knob, pulling wires, and rotating or sliding the whole box — and
             evaluated over 60 rollouts with varied instructions and box poses.
             Rho-YAM-Box reaches <strong>90% overall success</strong>, tied with
-            π0.5 and well ahead of GR00T N1.7 (53%) and MolmoAct2 (43%).
+            π0.5 and ahead of GR00T N1.7 (53%) and MolmoAct2 (43%).
           </p>
           <p class="note">
-            The result shows that Rho scales well when finetuning data is
-            plentiful, and that its recipe is data-efficient: MolmoAct2 and π0.5
-            were post-trained on hundreds to thousands of hours from YAM-like
-            robots, more than Rho saw of YAM Box in pretraining and midtraining
-            combined. The finetuning dataset is released as{" "}
+            This result validates an important point: when finetuning data is
+            copious, Rho's architecture and training recipe enable adaptation
+            that is at least as robust as that of the strongest open-weights
+            VLAs. π0.5 and MolmoAct2 are already familiar with YAM-Box-like
+            robots from training on large amounts of Aloha-style and dual-YAM
+            demonstrations; even so, finetuned Rho-YAM-Box is on par with π0.5
+            and ahead of MolmoAct2. Put differently, nothing in Rho's recipe
+            prevents its finetuned policies from reaching high success rates when
+            the dataset affords it. The finetuning dataset is released as{" "}
             <a href={checkpoints.busybox}>microsoft/BusyBox</a>.
           </p>
           <a class="text-link" href={checkpoints.yam}>Download rho-yam-box ↗</a>
@@ -1075,23 +1080,28 @@ const efficiencyRows = [
           <p class="section-kicker">FR3 Duo · precision and coordination</p>
           <h2>Five contact-rich task variants, 80% success</h2>
           <p>
-            Three finetuning datasets yield five evaluation variants: <strong>plug
-            insertion</strong> (~150 demonstrations; one arm steadies a power strip
-            while the other removes, reorients, and inserts the adapter into a second
-            strip), <strong>tumbler stacking and unstacking</strong> (~100), and{" "}
-            <strong>test-tube racking and unracking</strong> (~300; cork
-            manipulation plus constrained insertion into a rack). Rho-FR3-Duo
-            achieves <strong>80.0% success and 88.7% task progress</strong> across
-            the five, against 50.0% / 71.3% for GR00T N1.7 and 46.7% / 64.5% for
-            π0.5, and leads on every variant.
+            Three finetuning datasets yield five evaluation variants:{" "}
+            <strong>plug insertion</strong> (~150 demonstrations),{" "}
+            <strong>tumbler stacking and unstacking</strong> (~100), and{" "}
+            <strong>test-tube racking and unracking</strong> (~300). Rho-FR3-Duo
+            achieves <strong>80.0% success and 88.7% task progress</strong>{" "}
+            overall, against 50.0% / 71.3% for GR00T N1.7 and 46.7% / 64.5% for
+            π0.5, and leads on every variant. A likely explanation: a task's
+            finetuning demonstration set covers only a narrow slice of the robot's
+            workspace, so
+            a model finetuned from a general checkpoint must infer the robot's
+            reach and motion geometry from that slice while learning the task.
+            Midtraining has already shown Rho-FR3-Duo a far broader range of poses
+            and motions, which gives it a stronger start when, at deployment time,
+            objects sit near the edge of, or outside, the configurations in the
+            finetuning data.
           </p>
           <p class="note">
-            The forward tasks — stacking and racking — are harder than their
-            reverses for every model, because they require establishing and holding
-            precise alignment under contact. Rho's largest margins are exactly
-            there: +33.3 points on tumbler stacking and +30.0 on racking over the
-            best baseline, plus +20.0 on plug insertion, where the two arms play
-            distinct roles over a long sequence.
+            Stacking and racking are harder than their reverses for every model,
+            because they require holding precise alignment under contact. Rho's
+            largest margins are exactly there: +33.3 points on tumbler stacking
+            and +30.0 on racking over the best baseline, plus +20.0 on plug
+            insertion.
           </p>
           <a class="text-link" href={checkpoints.fr3}>Download rho-fr3-duo ↗</a>
         </div>
@@ -1374,6 +1384,7 @@ const efficiencyRows = [
         <a href={withBase("assets/rho.pdf")}><strong>Technical report</strong><span>Full recipe, protocols, and ablations (PDF)</span></a>
       </div>
 
+      {/* Open questions: hidden for now; remove this comment wrapper to show them again.
       <div class="feature-grid">
         <article>
           <span class="feature-number">Open question 1</span>
@@ -1391,8 +1402,9 @@ const efficiencyRows = [
           <p>Rho is vision-only. With tactile datasets and simulated tactile data becoming available, extending it to touch could improve robustness on contact-rich tasks.</p>
         </article>
       </div>
+      */}
 
-      <p class="note">
+      <p class="note release-note">
         <strong>Scope and responsible use.</strong> The strongest-model claims hold
         for the baselines, budgets, and protocols in the report; results on three
         platforms and a handful of benchmarks do not establish universal
@@ -1402,6 +1414,7 @@ const efficiencyRows = [
         gates before deployment.
       </p>
 
+      {/* Systems measurements: hidden for now; remove this comment wrapper to show them again.
       <details class="systems-details">
         <summary>Systems measurements (website supplement, not part of the report)</summary>
         <p class="note">
@@ -1448,6 +1461,7 @@ const efficiencyRows = [
           sustains a &gt;10 Hz replanning loop on a single 24 GB GPU.
         </p>
       </details>
+      */}
     </section>
   </div>
 </BaseLayout>
@@ -1685,8 +1699,8 @@ const efficiencyRows = [
     padding-block: 14px;
   }
   .section-nav a {
-    color: var(--text);
-    font-size: 1.125rem;
+    color: var(--link);
+    font-size: 1.25rem;
     font-weight: 600;
     white-space: nowrap;
   }
@@ -2326,6 +2340,8 @@ const efficiencyRows = [
     max-width: 1080px;
     margin-inline: auto;
   }
+  /* Breathing room between the resources grid and the closing note. */
+  .release-note { margin-top: 44px; }
   /* Live charts in the robot results. */
   .chart-block { display: grid; gap: 22px; }
   .chart-block .chart-legend { margin-bottom: 0; }

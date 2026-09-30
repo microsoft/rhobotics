@@ -6,7 +6,7 @@ import ChartLegend from "../components/ChartLegend.astro";
 import { withBase } from "../lib/url";
 
 const resources = [
-  { label: "Technical report", href: withBase("assets/rho.pdf") },
+  { label: "Technical report", href: "https://arxiv.org/abs/2609.38164" },
   { label: "Code", href: "https://github.com/microsoft/rhobotics" },
   { label: "Models", href: "https://huggingface.co/collections/microsoft/rho" },
   { label: "Data", href: "https://huggingface.co/collections/microsoft/rho" },
@@ -562,9 +562,10 @@ const efficiencyRows = [
           <h3>Keeps learning after deployment</h3>
           <p>
             A lightweight latent policy inside every Rho model learns from
-            corrective feedback while the rest stays frozen. Fifteen corrected
-            episodes lifted test-tube assembly on FR3 Duo from 30% to 70%
-            success on the hardest configurations.
+            corrective feedback while the rest stays frozen. Online adaptation
+            with <a href="https://microsoft.github.io/FlowDAgger/">FlowDAgger</a>{" "}
+            on just 15 episode corrections lifted test-tube assembly on FR3 Duo
+            from 30% to 70% success on the hardest task configurations.
           </p>
         </article>
       </div>
@@ -1293,7 +1294,8 @@ const efficiencyRows = [
           stored and served inside the same checkpoint.
         </p>
         <p class="section-intro">
-          Training data comes from corrective takeovers (the FlowDAgger recipe):
+          Training data comes from corrective takeovers (the{" "}
+          <a href="https://microsoft.github.io/FlowDAgger/">FlowDAgger</a> recipe):
           when a human — or, in simulation, a scripted expert — takes over, the
           actions actually executed are assembled into a chunk, inverted through
           the frozen flow to recover the latent that would have produced them, and
@@ -1360,7 +1362,7 @@ const efficiencyRows = [
 
     <!-- ================================================================ -->
     <section id="release" class="section container container--wide">
-      <p class="section-kicker">Open weights</p>
+      <p class="section-kicker">Release</p>
       <h2>Models, data, and code</h2>
       <p class="section-intro">
         We release Rho-base together with the three embodiment-midtrained
@@ -1377,7 +1379,7 @@ const efficiencyRows = [
         <a href={checkpoints.libero}><strong>rho-libero</strong><span>Rho-base finetuned on LIBERO</span></a>
         <a href={checkpoints.busybox}><strong>BusyBox dataset</strong><span>~2,000 YAM Box demonstrations, six task categories</span></a>
         <a href="https://github.com/microsoft/rhobotics"><strong>rhobotics</strong><span>Finetuning, online adaptation, and evaluation code</span></a>
-        <a href={withBase("assets/rho.pdf")}><strong>Technical report</strong><span>Full recipe, protocols, and ablations (PDF)</span></a>
+        <a href="https://arxiv.org/abs/2609.38164"><strong>Technical report</strong><span>Full recipe, protocols, and ablations (arXiv)</span></a>
       </div>
 
       {/* Open questions: hidden for now; remove this comment wrapper to show them again.
@@ -1399,6 +1401,18 @@ const efficiencyRows = [
         </article>
       </div>
       */}
+
+      <div class="citation">
+        <h3>Citation</h3>
+        <p>If you use Rho in your research, please cite the technical report:</p>
+        <pre class="citation__bibtex"><code>{`@article{rhoteam2026rhofoundationefficientlyadaptable,
+      title={Rho: A Foundation for Efficiently Adaptable VLA Models},
+      author={Rho Team and Simran Bagaria and Daphne Chen and Dean Fortier and Jianlong Fu and Michael Harrison and Tess Hellebrekers and Neel Joshi and Andrey Kolobov and Dalton Moore and Galen Mullins and Michael Murray and Eduardo Salinas and Reuben Tan},
+      year={2026},
+      journal={arXiv preprint arXiv:2609.38164},
+      url={https://arxiv.org/abs/2609.38164}
+}`}</code></pre>
+      </div>
 
       <p class="note release-note">
         <strong>Scope and responsible use.</strong> The strongest-model claims hold
@@ -2402,6 +2416,23 @@ const efficiencyRows = [
   }
   .variant-card a { color: #78c7ff; font-weight: 600; }
   .embodiment-card p { margin-bottom: 0; }
+  /* BibTeX block in the release section. */
+  .citation { margin-top: 54px; }
+  .citation h3 { margin: 0 0 8px; font-size: var(--type-subsection-heading); }
+  .citation p { margin: 0 0 14px; }
+  .citation__bibtex {
+    margin: 0;
+    padding: 18px 20px;
+    overflow-x: auto;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: #f6f8fa;
+    font-size: 0.9375rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .citation__bibtex code { font-size: inherit; }
   /* Breathing room between the resources grid and the closing note. */
   .release-note { margin-top: 44px; }
   /* Live charts in the robot results. */

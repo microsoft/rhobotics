@@ -656,7 +656,7 @@ const efficiencyRows = [
           </div>
           <p class="note">
             Each mixture averages no more than ~15 hours per task family — not
-            enough to master any high-precision task, but enough to cover a robot's
+            enough to master a high-precision task, but enough to cover a robot's
             motions, workspace, and camera views. Instruction counts include task
             and subtask descriptions; the vision-language share is the same
             RoboPoint and RefSpatial data as in pretraining, 5% each.
@@ -1276,7 +1276,7 @@ const efficiencyRows = [
             <span class="diagnostic-card__sub">Shortest of the compared models</span>
           </div>
         </div>
-        <p class="note">
+        <p class="chart-caption chart-caption--tiles">
           Beyond success, RoboEval reports behavioral metrics. Rho leads on five
           of nine; π0.5 has the fewest environment collisions, and MolmoAct2 the
           lowest gripper-height difference, self-collision count, and slip count.
@@ -1302,7 +1302,7 @@ const efficiencyRows = [
           of action space and the velocity field must be resolved finely around
           it.
         </p>
-        <div class="spec-grid">
+        <div class="spec-grid spec-grid--results" data-sync-tables>
           <div>
             <p class="table-subhead"><strong>Shape sweep</strong> (RoboEval success after 40k adaptation steps)</p>
             <div class="table-wrap">
@@ -1325,7 +1325,7 @@ const efficiencyRows = [
             <div class="table-wrap">
               <table class="results-table">
                 <thead>
-                  <tr><th>Variant</th><th>Q / KV heads</th><th>Blocks</th><th>Params</th><th>Success</th></tr>
+                  <tr><th>Variant</th><th class="th--nowrap">Q / KV heads</th><th>Blocks</th><th>Params</th><th>Success</th></tr>
                 </thead>
                 <tbody>
                   {compressionRows.map((row, index) => (
@@ -1345,7 +1345,15 @@ const efficiencyRows = [
           different backbone layers was also tried and was worse (60.5% vs
           67.3%), so every block reads decoder block 14.
         </p>
-        <p class="table-subhead"><strong>Pretraining recipe</strong> (RoboEval success after 40k adaptation steps, same 15% subset)</p>
+        <p class="table-subhead"><strong>Pretraining recipe</strong></p>
+        <p class="note">
+          Keeping vision-language batches in the pretraining mix helps most on
+          tasks with semantic and temporal structure: on LIBERO at 20k adaptation
+          steps it lifts the Goal suite from 94.7% to 97.7% and the Long suite from
+          92.7% to 96.0% relative to robot-only pretraining. A learning-rate sweep
+          for the action expert selected 10⁻⁴; the choice affects the quality of
+          the transferred initialization, not just early adaptation speed.
+        </p>
         <div class="diagnostic-grid" role="group" aria-label="Effect of the pretraining mixture on downstream adaptation">
           {pretrainingAblation.map((item) => (
             <div class="diagnostic-card">
@@ -1355,13 +1363,11 @@ const efficiencyRows = [
             </div>
           ))}
         </div>
-        <p class="note">
-          Keeping vision-language batches in the pretraining mix helps most on
-          tasks with semantic and temporal structure: on LIBERO at 20k adaptation
-          steps it lifts the Goal suite from 94.7% to 97.7% and the Long suite from
-          92.7% to 96.0% relative to robot-only pretraining. A learning-rate sweep
-          for the action expert selected 10⁻⁴; the choice affects the quality of
-          the transferred initialization, not just early adaptation speed.
+        <p class="chart-caption chart-caption--tiles">
+          RoboEval success rate after 40k adaptation steps; the pretrained
+          variants use the same 15% subset as the ablations above. Pretraining on
+          robot data lifts success by about four points over a fresh action
+          expert, and keeping vision-language batches in the mix adds two more.
         </p>
       </div>
     </section>
@@ -2309,6 +2315,37 @@ const efficiencyRows = [
   @media (max-width: 900px) {
     .spec-grid { grid-template-columns: minmax(0, 1fr); }
   }
+  /* Shape sweep + Compression: the second table is the wider one, so give it
+     exactly the width its columns need and leave the rest to the first, whose
+     subhead then fits on one line. Stack the two once the wide column can no
+     longer hold both without a horizontal scrollbar. */
+  .spec-grid--results {
+    grid-template-columns: minmax(0, 1fr) minmax(0, max-content);
+    grid-template-rows: auto auto;
+    row-gap: 0; /* the tables' own 12px top margin separates them from the subheads */
+  }
+  /* Each column is a subgrid of the two rows above, so both subheads share
+     row 1 and both tables share row 2: the tables start level even when only
+     one subhead wraps onto a second line. */
+  .spec-grid--results > * {
+    display: grid;
+    grid-template-rows: subgrid;
+    grid-row: span 2;
+  }
+  /* ...but don't stretch the shorter table's frame down to the taller one. */
+  .spec-grid--results .table-wrap { align-self: start; }
+  .spec-grid--results th,
+  .spec-grid--results td { padding-inline: 10px; }
+  @media (max-width: 1200px) {
+    .spec-grid--results {
+      grid-template-columns: minmax(0, 1fr);
+      row-gap: 22px;
+    }
+    .spec-grid--results > * {
+      display: block;
+      grid-row: auto;
+    }
+  }
   @media (max-width: 720px) {
     .mixture-grid { grid-template-columns: 1fr; }
   }
@@ -2406,6 +2443,8 @@ const efficiencyRows = [
     white-space: normal;
     vertical-align: bottom;
   }
+  /* ...except headers that read badly when split, e.g. "Q / KV heads". */
+  thead th.th--nowrap { white-space: nowrap; }
   /* Mixture charts under the recipe cards. */
   .mixture-block { margin-top: 44px; }
   .mixture-block h3 {
@@ -2447,6 +2486,8 @@ const efficiencyRows = [
   .note + .table-subhead {
     margin-top: 26px;
   }
+  /* A subhead used as a heading for a paragraph rather than a table. */
+  .table-subhead + .note { margin-top: 8px; }
   /* Dark band under the title block: highlight reel, what the robot is, and
      the link to its midtrained model. */
   .variants-band {
@@ -2676,3 +2717,33 @@ const efficiencyRows = [
   }
   .spec-grid table:not(.results-table) th { width: 38%; vertical-align: top; }
 </style>
+
+<script>
+  // Tables that sit side by side in a `[data-sync-tables]` grid keep their
+  // header rows at equal heights, so if one table's column headers wrap onto
+  // two lines, the other's header row grows to match. (The subheads above the
+  // tables are aligned by CSS subgrid; table rows can't be, hence the script.)
+  // No-op when the grid has collapsed to a single column.
+  const syncHeights = (grid: HTMLElement) => {
+    const rows = Array.from(grid.querySelectorAll<HTMLTableRowElement>("thead tr"));
+    if (rows.length < 2) return;
+    rows.forEach((row) => (row.style.height = ""));
+    const sideBySide = getComputedStyle(grid).gridTemplateColumns.trim().split(/\s+/).length > 1;
+    if (!sideBySide) return;
+    const tallest = Math.max(...rows.map((row) => row.getBoundingClientRect().height));
+    rows.forEach((row) => (row.style.height = `${tallest}px`)); // height acts as a minimum on table rows
+  };
+
+  document.querySelectorAll<HTMLElement>("[data-sync-tables]").forEach((grid) => {
+    let lastWidth = -1;
+    const update = () => {
+      const width = grid.getBoundingClientRect().width;
+      if (width === lastWidth) return; // our own height changes re-trigger the observer
+      lastWidth = width;
+      syncHeights(grid);
+    };
+    new ResizeObserver(update).observe(grid);
+    update();
+    document.fonts?.ready.then(() => { lastWidth = -1; update(); });
+  });
+</script>

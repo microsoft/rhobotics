@@ -371,7 +371,7 @@ class PolicyInterface:
                 if values.ndim == feature_rank + 2:
                     # (batch, seq_len, *feature_shape): append each timestep,
                     # oldest first so the latest ends up at the end of the queue.
-                    frames = [values[:, t : t + 1] for t in reversed(range(values.shape[1]))]
+                    frames = [values[:, t : t + 1] for t in range(values.shape[1])]
                 else:
                     # (batch, *feature_shape) with no temporal axis (or an
                     # unexpected rank): treat as a single current frame and add

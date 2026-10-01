@@ -553,6 +553,30 @@ class TestProcessObsQueue:
         result = pi.process_obs_queue({"observation.image.0": img})
         assert result["observation.image.0"].shape == (1, 2, 3, 4, 4)
 
+    def test_multi_step_state_with_temporal_axis_preserves_order(self, identity_transforms):
+        """Explicit temporal inputs should be appended oldest to newest."""
+        config = _MockPolicyConfig(
+            delta_indices_dict={
+                "observation.state": [-2, -1, 0],
+                "action": [0],
+            }
+        )
+        policy = _MockPolicy(config=config)
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=identity_transforms,
+            output_transforms=identity_transforms,
+        )
+        pi = PolicyInterface(cfg)
+
+        state = torch.tensor([[[1.0], [2.0], [3.0]]])
+        result = pi.process_obs_queue({"observation.state": state})
+
+        assert result["observation.state"].shape == (1, 3, 1)
+        assert result["observation.state"][0, :, 0].tolist() == [1.0, 2.0, 3.0]
+        assert result["observation.state_is_pad"][0].tolist() == [False, False, False]
+
     def test_multi_step_state_without_temporal_axis(self, identity_transforms):
         """UR5-style states arrive as (B, dim) with no temporal axis."""
         config = _MockPolicyConfig(

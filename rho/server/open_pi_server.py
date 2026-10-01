@@ -7,14 +7,49 @@ import http
 import logging
 import time
 import traceback
+from typing import Any, Protocol, cast
 
 import websockets.asyncio.server as _server
 import websockets.frames
-
-from rho.eval.policy_interface import PolicyInterface
 from rho_client.msgpack_numpy import Packer, unpackb
 
+from rho.eval.policy_interface import PolicyInterface
+
 logger = logging.getLogger(__name__)
+
+
+class ServingAdapter(Protocol):
+    """Interface required by WebSocket policy serving."""
+
+    policy_action_type: Any
+
+    def process_input(self, input: Any) -> dict:
+        """Convert a client request into a policy observation."""
+        ...
+
+    def process_output(self, actions: Any) -> Any:
+        """Convert policy actions into the client response format."""
+        ...
+
+
+def validate_serving_adapter(env: Any) -> ServingAdapter:
+    """Validate the serving contract before opening a socket."""
+    missing = []
+    if not hasattr(env, "policy_action_type"):
+        missing.append("policy_action_type")
+    for method_name in ("process_input", "process_output"):
+        if not callable(getattr(env, method_name, None)):
+            missing.append(f"{method_name}()")
+
+    if missing:
+        members = ", ".join(missing)
+        raise TypeError(
+            f"{type(env).__name__} is not a valid WebSocket serving adapter; "
+            f"missing required member(s): {members}. "
+            "Implement rho.server.serve_policy.Server or provide the same interface."
+        )
+
+    return cast(ServingAdapter, env)
 
 
 class WebsocketPolicyServer:
@@ -22,13 +57,19 @@ class WebsocketPolicyServer:
     Currently only implements the `load` and `infer` methods.
     """  # noqa: E501
 
-    def __init__(self, policy_interface: PolicyInterface, env, host, port) -> None:
+    def __init__(
+        self,
+        policy_interface: PolicyInterface,
+        env: ServingAdapter,
+        host,
+        port,
+    ) -> None:
         self.policy_interface = policy_interface
-        self.env = env
+        self.env = validate_serving_adapter(env)
         self._host = host
         self._port = port
         self._metadata = {
-            "action_type": env.policy_action_type,
+            "action_type": self.env.policy_action_type,
             "execution_horizon": policy_interface.execution_horizon,
         }
         logging.getLogger("websockets.server").setLevel(logging.INFO)

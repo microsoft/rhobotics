@@ -85,6 +85,11 @@ robot-specific. The example assumes RGB images and matching policy/client
 action representations. Add explicit validation and safety limits before
 connecting physical hardware.
 
+The WebSocket server validates the adapter contract at startup. A serving
+adapter must provide `policy_action_type`, `process_input()`, and
+`process_output()`; incompatible registered environments are rejected before a
+socket is opened.
+
 ## Register the adapter
 
 Create `environments/my_robot/serve.py`:

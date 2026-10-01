@@ -630,3 +630,34 @@ class TestLoadConfigsFromTrainConfig:
         _, dataset = load_configs_from_train_config(config_path, dataset_root_dir=str(dir_b))
         assert dataset is not None
         assert dataset.batch_size == 32
+
+
+def test_server_settings_default_to_loopback(monkeypatch):
+    from rho.server.open_pi_server import DEFAULT_MAX_MESSAGE_SIZE
+    from rho.server.serve_policy import _server_settings
+
+    monkeypatch.delenv("RHO_SERVER_HOST", raising=False)
+    monkeypatch.delenv("RHO_SERVER_API_KEY", raising=False)
+    monkeypatch.delenv("RHO_SERVER_MAX_MESSAGE_SIZE", raising=False)
+
+    assert _server_settings() == ("127.0.0.1", None, DEFAULT_MAX_MESSAGE_SIZE)
+
+
+def test_server_settings_can_enable_remote_authenticated_serving(monkeypatch):
+    from rho.server.serve_policy import _server_settings
+
+    monkeypatch.setenv("RHO_SERVER_HOST", "0.0.0.0")
+    monkeypatch.setenv("RHO_SERVER_API_KEY", "secret")
+    monkeypatch.setenv("RHO_SERVER_MAX_MESSAGE_SIZE", "1048576")
+
+    assert _server_settings() == ("0.0.0.0", "secret", 1048576)
+
+
+@pytest.mark.parametrize("value", ["not-an-integer", "0", "-1"])
+def test_server_settings_reject_invalid_message_size(monkeypatch, value):
+    from rho.server.serve_policy import _server_settings
+
+    monkeypatch.setenv("RHO_SERVER_MAX_MESSAGE_SIZE", value)
+
+    with pytest.raises(ValueError, match="RHO_SERVER_MAX_MESSAGE_SIZE"):
+        _server_settings()

@@ -150,12 +150,28 @@ guidance_schedule: "paper"
 
 ## Start the server
 
+The server binds to `127.0.0.1` by default and limits each incoming WebSocket
+message to 64 MiB. Local-only serving requires no additional configuration:
+
 ```bash
 python environments/my_robot/serve.py \
   --config_path=environments/my_robot/server.yaml
 ```
 
-The WebSocket server listens on `environment.port`. Its health endpoint is:
+For a robot or client on another machine, explicitly expose the bind address
+and configure an API key:
+
+```bash
+export RHO_SERVER_HOST=0.0.0.0
+export RHO_SERVER_API_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+python environments/my_robot/serve.py \
+  --config_path=environments/my_robot/server.yaml
+```
+
+Pass the same secret to the client through its `api_key` argument. The optional
+`RHO_SERVER_MAX_MESSAGE_SIZE` environment variable sets the byte limit for an
+incoming WebSocket message. The unauthenticated health endpoint remains
+available for liveness checks:
 
 ```bash
 curl http://localhost:7000/healthz
@@ -164,12 +180,18 @@ curl http://localhost:7000/healthz
 ## Query the server
 
 ```python
+import os
+
 import numpy as np
 
 from rho_client.websocket_client_policy import WebsocketClientPolicy
 
 
-client = WebsocketClientPolicy(host="localhost", port=7000)
+client = WebsocketClientPolicy(
+    host="localhost",
+    port=7000,
+    api_key=os.environ.get("RHO_SERVER_API_KEY"),
+)
 metadata = client.get_server_metadata()
 
 observation = {

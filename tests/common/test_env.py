@@ -684,6 +684,69 @@ def test_evaluate_policy_with_dummy_env():
     assert 0 <= results["mean_success_rt"] <= 1
 
 
+@pytest.mark.parametrize(
+    "num_episodes,num_envs,expected_rewards",
+    [
+        (3, 2, [0.0, 1.0, 10.0]),
+        (5, 4, [0.0, 1.0, 2.0, 3.0, 10.0]),
+        (1, 8, [0.0]),
+    ],
+)
+def test_evaluate_policy_vectorized_records_only_requested_episodes(
+    num_episodes, num_envs, expected_rewards
+):
+    from rho.environment.env import evaluate_policy
+
+    class OneStepVectorEnvironment:
+        is_vectorized = True
+
+        def __init__(self):
+            self.num_envs = num_envs
+            self.batch_index = -1
+
+        def next_episode(self, seed=None):
+            self.batch_index += 1
+            return self._obs(), {}
+
+        def _obs(self):
+            return {
+                "observation.state": torch.zeros(self.num_envs, 1, 1),
+                "task": [f"task-{self.batch_index}-{i}" for i in range(self.num_envs)],
+            }
+
+        def step(self, action):
+            rewards = self.batch_index * 10 + np.arange(self.num_envs, dtype=np.float64)
+            done = np.ones(self.num_envs, dtype=bool)
+            info = {"is_success": done.copy()}
+            return self._obs(), rewards, done, np.zeros(self.num_envs, dtype=bool), info
+
+        def render(self):
+            return None
+
+    class VectorPolicy:
+        execution_horizon = 1
+
+        def reset(self):
+            pass
+
+        def get_action_chunk(self, obs):
+            return torch.zeros(num_envs, 1, 1)
+
+    results = evaluate_policy(
+        env=OneStepVectorEnvironment(),
+        policy_interface=VectorPolicy(),
+        num_episodes=num_episodes,
+        max_steps=1,
+        record_video=False,
+    )
+
+    assert results["num_episodes"] == num_episodes
+    assert results["episode_rewards"] == expected_rewards
+    assert len(results["episode_steps"]) == num_episodes
+    assert len(results["episode_successes"]) == num_episodes
+    assert len(results["episode_tasks"]) == num_episodes
+
+
 def test_evaluate_policy_uses_independent_policy_seed():
     """Policy sampling can vary without changing the environment seed."""
     from rho.environment.env import DummyEnvironment, DummyEnvironmentConfig, evaluate_policy

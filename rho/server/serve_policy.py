@@ -7,7 +7,7 @@ and evaluates the policy in the cfg.environment using the EnvironmentWrapper
 """
 
 import logging
-import socket
+import os
 
 import draccus
 import numpy as np
@@ -21,6 +21,25 @@ from rho.policies import make_policy
 from rho.utils import init_logging
 
 logger = logging.getLogger(__name__)
+
+
+def _server_settings() -> tuple[str, str | None, int]:
+    """Read deployment-sensitive WebSocket settings from the environment."""
+    host = os.environ.get("RHO_SERVER_HOST", "127.0.0.1")
+    api_key = os.environ.get("RHO_SERVER_API_KEY") or None
+
+    raw_max_size = os.environ.get(
+        "RHO_SERVER_MAX_MESSAGE_SIZE",
+        str(open_pi_server.DEFAULT_MAX_MESSAGE_SIZE),
+    )
+    try:
+        max_message_size = int(raw_max_size)
+    except ValueError as exc:
+        raise ValueError("RHO_SERVER_MAX_MESSAGE_SIZE must be an integer") from exc
+    if max_message_size <= 0:
+        raise ValueError("RHO_SERVER_MAX_MESSAGE_SIZE must be positive")
+
+    return host, api_key, max_message_size
 
 
 class Server:
@@ -119,15 +138,18 @@ def eval(cfg: EvalConfig) -> None:
     logger.info(f"Environment initialized: {type(env).__name__}")
 
     # 2. Start serving model
-    hostname = socket.gethostname()
-    local_ip = socket.gethostbyname(hostname)
-    logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
+    host, api_key, max_message_size = _server_settings()
+    if host in {"0.0.0.0", "::"} and api_key is None:
+        logger.warning("WebSocket server is exposed on all interfaces without API-key authentication")
+    logger.info("Creating server (bind host: %s, port: %s)", host, cfg.environment.port)
 
     server = open_pi_server.WebsocketPolicyServer(
         policy_interface=policy_interface,
         env=env,
-        host="0.0.0.0",  # nosec B104
+        host=host,
         port=cfg.environment.port,
+        api_key=api_key,
+        max_message_size=max_message_size,
     )
 
     server.serve_forever()

@@ -25,9 +25,15 @@ from rho.environment import EnvironmentConfig, EnvironmentWrapper, register_envi
 logger = logging.getLogger(__name__)
 
 
-def initial_state_indices(state_offset: int, n_envs: int, num_states: int) -> np.ndarray:
+def initial_state_indices(
+    state_offset: int,
+    n_envs: int,
+    num_states: int,
+    *,
+    init_state_id: int = 0,
+) -> np.ndarray:
     """Return the next contiguous vectorized batch of LIBERO initial states."""
-    return (state_offset + np.arange(n_envs)) % num_states
+    return (init_state_id + state_offset + np.arange(n_envs)) % num_states
 
 
 def _quat2axisangle(quat):
@@ -224,7 +230,12 @@ class LiberoEnvWrapper(EnvironmentWrapper):
             state_offset = getattr(self, "_episodes_completed_for_current_task", 0)
             if self.is_vectorized:
                 # Advance through every prebuilt state exactly once per task.
-                indices = initial_state_indices(state_offset, self.n_envs, len(self.initial_states))
+                indices = initial_state_indices(
+                    state_offset,
+                    self.n_envs,
+                    len(self.initial_states),
+                    init_state_id=self.config.init_state_id,
+                )
                 init_states_batch = [self.initial_states[i] for i in indices]
                 raw_obs = self.env.set_init_state(init_states_batch)
             else:

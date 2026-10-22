@@ -91,6 +91,7 @@ class WebsocketPolicyServer:
     async def _handler(self, websocket: _server.ServerConnection):
         logger.info(f"Connection from {websocket.remote_address} opened")
         packer = Packer()
+        policy_interface = self.policy_interface.clone_with_fresh_episode_state()
 
         await websocket.send(packer.pack(self._metadata))
 
@@ -101,7 +102,7 @@ class WebsocketPolicyServer:
                 obs = self.env.process_input(input)
 
                 infer_time = time.monotonic()
-                action = self.policy_interface.get_action_chunk(obs)
+                action = policy_interface.get_action_chunk(obs)
                 infer_time = time.monotonic() - infer_time
 
                 action = self.env.process_output(action)

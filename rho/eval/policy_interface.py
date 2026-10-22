@@ -1,3 +1,4 @@
+import copy
 import logging
 from collections import deque
 from dataclasses import dataclass, field  # noqa: I001
@@ -301,6 +302,20 @@ class PolicyInterface:
         # Drop the stored RTC action chunk so remaining-action blending does not
         # leak across episode boundaries.
         self.prev_action_chunk = None
+
+    def clone_with_fresh_episode_state(self) -> "PolicyInterface":
+        """Create a lightweight interface copy with independent episode state.
+
+        The policy, transforms, and configuration are shared. Observation history
+        and the RTC action cache are recreated so separate serving sessions cannot
+        affect one another.
+        """
+        session = copy.copy(self)
+        session.obs_queue = {
+            key: deque(maxlen=queue.maxlen) for key, queue in self.obs_queue.items()
+        }
+        session.prev_action_chunk = None
+        return session
 
     def remap_observation(self, obs: dict[str, torch.Tensor | str]) -> dict[str, Any]:
         """Remap observation keys based on observation_mapping.

@@ -723,6 +723,59 @@ class TestGetActionChunk:
         action = policy_interface.get_action_chunk(obs)
         assert isinstance(action, torch.Tensor)
 
+    @pytest.mark.parametrize(
+        ("history_deltas", "requests", "expected_histories", "expected_pad_masks"),
+        [
+            pytest.param(
+                [0],
+                [[1, 2, 3]],
+                [[3]],
+                [[False]],
+                id="single-step-history-multiframe-request",
+            ),
+            pytest.param(
+                [-2, -1, 0],
+                [[1, 2], [3, 4]],
+                [[1, 1, 2], [2, 3, 4]],
+                [[True, False, False], [False, False, False]],
+                id="three-step-history-consecutive-multiframe-requests",
+            ),
+        ],
+    )
+    def test_model_sees_ordered_multiframe_history(
+        self, history_deltas, requests, expected_histories, expected_pad_masks
+    ):
+        """The policy must see chronological history across incoming requests."""
+        config = _MockPolicyConfig(
+            delta_indices_dict={"observation.state": history_deltas, "action": [0]}
+        )
+        policy = _MockPolicy(config=config)
+        policy.sample_actions = MagicMock(
+            return_value={"actions": torch.zeros(1, config.chunk_size, config.action_dim)}
+        )
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=_identity_transform,
+            output_transforms=_identity_transform,
+        )
+        pi = PolicyInterface(cfg)
+
+        for frames in requests:
+            state = torch.tensor(frames, dtype=torch.float32).reshape(1, -1, 1)
+            pi.get_action_chunk({"observation.state": state})
+
+        observed = [
+            call.args[0]["observation.state"][0, :, 0].tolist()
+            for call in policy.sample_actions.call_args_list
+        ]
+        pad_masks = [
+            call.args[0]["observation.state_is_pad"][0].tolist()
+            for call in policy.sample_actions.call_args_list
+        ]
+        assert observed == expected_histories
+        assert pad_masks == expected_pad_masks
+
     def test_rtc_forwards_explicit_noise(self):
         """RTC should forward caller-supplied noise to the policy."""
         config = _MockPolicyConfig(chunk_size=4, n_action_steps=2, action_dim=2)

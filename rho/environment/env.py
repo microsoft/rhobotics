@@ -165,20 +165,34 @@ class EvalMetrics:
         """Check if all environments in the current batch are done."""
         return np.all(self._current_done)
 
-    def append(self, batch_metrics: "EvalMetrics") -> None:
+    def append(self, batch_metrics: "EvalMetrics", num_episodes: int | None = None) -> None:
         """
         Append results from a batch evaluation to this metrics tracker.
 
         Args:
             batch_metrics: EvalMetrics from a single episode batch
+            num_episodes: Number of leading environments to include. Defaults to
+                the full batch. This lets vectorized evaluation discard surplus
+                lanes from a partially needed final batch.
         """
-        self.episode_rewards.extend(batch_metrics._current_reward.tolist())
-        self.episode_steps.extend(batch_metrics._current_step_count.tolist())
-        self.episode_successes.extend(batch_metrics._current_successes.tolist())
-        self.episode_tasks.extend(batch_metrics._current_tasks)
-        self.episode_subtask_progress.extend(batch_metrics._current_subtask_progress.tolist())
-        self.completed_episodes += batch_metrics.num_envs
-        self.global_step += batch_metrics.global_step
+        if num_episodes is None:
+            num_episodes = batch_metrics.num_envs
+        if not 0 <= num_episodes <= batch_metrics.num_envs:
+            raise ValueError(
+                f"num_episodes must be between 0 and {batch_metrics.num_envs}, got {num_episodes}"
+            )
+
+        selection = slice(0, num_episodes)
+        self.episode_rewards.extend(batch_metrics._current_reward[selection].tolist())
+        self.episode_steps.extend(batch_metrics._current_step_count[selection].tolist())
+        self.episode_successes.extend(batch_metrics._current_successes[selection].tolist())
+        self.episode_tasks.extend(batch_metrics._current_tasks[selection])
+        self.episode_subtask_progress.extend(batch_metrics._current_subtask_progress[selection].tolist())
+        self.completed_episodes += num_episodes
+        if num_episodes == batch_metrics.num_envs:
+            self.global_step += batch_metrics.global_step
+        else:
+            self.global_step += int(batch_metrics._current_step_count[selection].sum())
 
     @property
     def current_avg_success(self) -> float:
@@ -576,6 +590,8 @@ def evaluate_policy(
     total_steps_completed = 0
 
     for episode in range(num_episodes_batch):
+        episodes_in_batch = min(env.num_envs, num_episodes - eval_metrics.completed_episodes)
+
         # Reset environment - returns obs as tensors (batch, seq_len, **feature_size)
         # Use next_episode() which allows environments to cycle through tasks
         obs, info = env.next_episode(seed=seed + episode)
@@ -682,21 +698,33 @@ def evaluate_policy(
 
             obs, reward, terminated, truncated, info = env.step(action)
 
-            # Store metrics (pass task descriptions for tracking)
+            # Store metrics (pass task descriptions for tracking). Count only
+            # requested lanes that were still active before this environment step.
+            requested_active = int(
+                np.count_nonzero(~batch_metrics._current_done[:episodes_in_batch])
+            )
             tasks = obs.get("task", None)
             batch_metrics.store(step, reward, terminated, truncated, info, tasks)
 
-            # Update progress bar with steps completed this iteration
-            steps_this_iter = env.num_envs  # Each env takes a step
+            # Update progress only for requested episodes. The final vectorized
+            # batch may execute extra lanes that should not count toward results.
+            steps_this_iter = requested_active
             total_steps_completed += steps_this_iter
             progress_bar.update(steps_this_iter)
 
-            # Combine aggregate metrics with in-progress batch for display
-            all_successes = eval_metrics.episode_successes + batch_metrics._current_successes.tolist()
-            all_rewards = eval_metrics.episode_rewards + batch_metrics._current_reward.tolist()
+            # Combine aggregate metrics with the requested portion of the
+            # in-progress batch for display.
+            all_successes = (
+                eval_metrics.episode_successes
+                + batch_metrics._current_successes[:episodes_in_batch].tolist()
+            )
+            all_rewards = (
+                eval_metrics.episode_rewards
+                + batch_metrics._current_reward[:episodes_in_batch].tolist()
+            )
             progress_bar.set_postfix(
                 {
-                    "episode": f"{eval_metrics.completed_episodes + env.num_envs}/{num_episodes}",
+                    "episode": f"{eval_metrics.completed_episodes + episodes_in_batch}/{num_episodes}",
                     "avg_success": f"{np.mean(all_successes):.3f}" if all_successes else "0.000",
                     "avg_reward": f"{np.mean(all_rewards):.2f}" if all_rewards else "0.00",
                 }
@@ -716,7 +744,7 @@ def evaluate_policy(
             video_path = batch_metrics.save_video(episode)
 
         # Append batch results to aggregate metrics
-        eval_metrics.append(batch_metrics)
+        eval_metrics.append(batch_metrics, num_episodes=episodes_in_batch)
 
     # Close progress bar
     progress_bar.close()

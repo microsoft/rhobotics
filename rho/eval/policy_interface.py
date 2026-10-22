@@ -1,3 +1,4 @@
+import copy
 import logging
 from collections import deque
 from dataclasses import dataclass, field  # noqa: I001
@@ -302,6 +303,20 @@ class PolicyInterface:
         # leak across episode boundaries.
         self.prev_action_chunk = None
 
+    def clone_with_fresh_episode_state(self) -> "PolicyInterface":
+        """Create a lightweight interface copy with independent episode state.
+
+        The policy, transforms, and configuration are shared. Observation history
+        and the RTC action cache are recreated so separate serving sessions cannot
+        affect one another.
+        """
+        session = copy.copy(self)
+        session.obs_queue = {
+            key: deque(maxlen=queue.maxlen) for key, queue in self.obs_queue.items()
+        }
+        session.prev_action_chunk = None
+        return session
+
     def remap_observation(self, obs: dict[str, torch.Tensor | str]) -> dict[str, Any]:
         """Remap observation keys based on observation_mapping.
 
@@ -371,7 +386,7 @@ class PolicyInterface:
                 if values.ndim == feature_rank + 2:
                     # (batch, seq_len, *feature_shape): append each timestep,
                     # oldest first so the latest ends up at the end of the queue.
-                    frames = [values[:, t : t + 1] for t in reversed(range(values.shape[1]))]
+                    frames = [values[:, t : t + 1] for t in range(values.shape[1])]
                 else:
                     # (batch, *feature_shape) with no temporal axis (or an
                     # unexpected rank): treat as a single current frame and add

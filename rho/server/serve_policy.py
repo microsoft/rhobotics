@@ -8,6 +8,7 @@ and evaluates the policy in the cfg.environment using the EnvironmentWrapper
 
 import logging
 import os
+from abc import ABC, abstractmethod
 
 import draccus
 import numpy as np
@@ -42,7 +43,7 @@ def _server_settings() -> tuple[str, str | None, int]:
     return host, api_key, max_message_size
 
 
-class Server:
+class Server(ABC):
     """Base server class for real-time robot policy serving.
 
     This class defines the interface for processing observations from a robot client,
@@ -57,6 +58,7 @@ class Server:
         self.config = config
         self.policy_action_type = config.policy_action_type
 
+    @abstractmethod
     def process_input(self, input) -> dict:
         """Process raw input from client into policy-ready observation format.
 
@@ -75,6 +77,7 @@ class Server:
         """
         raise NotImplementedError
 
+    @abstractmethod
     def process_output(self, actions):
         """Convert policy output actions to client-expected format.
 

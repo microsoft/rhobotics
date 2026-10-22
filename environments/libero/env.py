@@ -36,6 +36,30 @@ def initial_state_indices(
     return (init_state_id + state_offset + np.arange(n_envs)) % num_states
 
 
+def validate_episodes_per_task(episodes_per_task: int, n_envs: int) -> None:
+    """Reject per-task episode counts that vectorized evaluation cannot honor exactly.
+
+    Each vectorized batch runs ``n_envs`` episodes of the current task, and the
+    wrapper switches tasks only between batches. If ``episodes_per_task`` is not
+    a multiple of ``n_envs``, every task overshoots its budget, reuses initial
+    states, and the extra episodes consume the evaluation budget meant for the
+    remaining tasks of the suite, which are then silently skipped.
+    """
+    if episodes_per_task < 1:
+        raise ValueError(f"episodes_per_task must be at least 1, got {episodes_per_task}.")
+    if n_envs < 1:
+        raise ValueError(f"n_envs must be at least 1, got {n_envs}.")
+    if episodes_per_task % n_envs != 0:
+        valid_n_envs = [n for n in range(1, episodes_per_task + 1) if episodes_per_task % n == 0]
+        raise ValueError(
+            f"episodes_per_task ({episodes_per_task}) must be a multiple of n_envs ({n_envs}). "
+            "Vectorized LIBERO evaluation switches tasks only between batches of n_envs episodes, "
+            "so other combinations run extra episodes per task and skip later tasks. "
+            f"Valid n_envs values for episodes_per_task={episodes_per_task}: "
+            f"{', '.join(map(str, valid_n_envs))}."
+        )
+
+
 def _quat2axisangle(quat):
     # clip quaternion
     if quat[3] > 1.0:
@@ -93,6 +117,10 @@ class LiberoEnvConfig(EnvironmentConfig):
 
     # Libero-specific observation mapping
     observation_mapping: dict[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        # Fail while parsing the config, before the policy or simulator is loaded.
+        validate_episodes_per_task(self.episodes_per_task, self.n_envs)
 
 
 @register_environment("libero")
@@ -439,6 +467,9 @@ class LiberoEnvWrapper(EnvironmentWrapper):
         """
         # Initialize tracking on first call
         if not hasattr(self, "_current_task_id"):
+            # episodes_per_task may be overridden on the wrapper after the config
+            # was validated, so check the value that will actually be used.
+            validate_episodes_per_task(getattr(self, "episodes_per_task", 1), self.num_envs)
             self._current_task_id = 0
             self._episodes_completed_for_current_task = 0
             # First call - setup initial task (don't re-setup if already on task 0)

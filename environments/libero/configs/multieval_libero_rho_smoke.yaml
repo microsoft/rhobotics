@@ -18,7 +18,7 @@ eval_configs:
       type: "libero"
       episodes_per_task: 1
       task_suite_name: "libero_spatial"
-      n_envs: 10
+      n_envs: 1
       max_episode_steps: 220
   - <<: !include eval_libero_rho.yaml
     execution_horizon: null
@@ -29,7 +29,7 @@ eval_configs:
       type: "libero"
       episodes_per_task: 1
       task_suite_name: "libero_object"
-      n_envs: 10
+      n_envs: 1
       max_episode_steps: 280
   - <<: !include eval_libero_rho.yaml
     execution_horizon: null
@@ -40,7 +40,7 @@ eval_configs:
       type: "libero"
       episodes_per_task: 1
       task_suite_name: "libero_goal"
-      n_envs: 10
+      n_envs: 1
       max_episode_steps: 300
   - <<: !include eval_libero_rho.yaml
     execution_horizon: null
@@ -51,5 +51,5 @@ eval_configs:
       type: "libero"
       task_suite_name: "libero_10"
       episodes_per_task: 1
-      n_envs: 10
+      n_envs: 1
       max_episode_steps: 520

@@ -54,10 +54,81 @@ def test_server_base_exposes_action_type_for_websocket_metadata():
     class AdapterConfig(EnvironmentConfig):
         policy_action_type: ActionType = ActionType.POSITION
 
-    adapter = Server(AdapterConfig())
+    class Adapter(Server):
+        def process_input(self, input) -> dict:
+            return input
+
+        def process_output(self, actions):
+            return actions
+
+        def convert_observation_state_type_to_policy_type(self, obs):
+            return obs
+
+        def convert_policy_action_type_to_client_type(self, actions):
+            return actions
+
+    adapter = Adapter(AdapterConfig())
     server = WebsocketPolicyServer(SimpleNamespace(execution_horizon=8), adapter, host="127.0.0.1", port=7000)
     assert server._metadata["action_type"] == ActionType.POSITION
     assert server._metadata["execution_horizon"] == 8
+
+
+def test_server_base_rejects_incomplete_adapter_subclass():
+    from rho.common.types import ActionType
+    from rho.environment.env import EnvironmentConfig
+    from rho.server.serve_policy import Server
+
+    @dataclass
+    class AdapterConfig(EnvironmentConfig):
+        policy_action_type: ActionType = ActionType.POSITION
+
+    class IncompleteAdapter(Server):
+        pass
+
+    with pytest.raises(TypeError, match="abstract"):
+        IncompleteAdapter(AdapterConfig())
+
+
+@pytest.mark.parametrize(
+    "missing_member",
+    ["policy_action_type", "process_input", "process_output"],
+)
+def test_websocket_server_rejects_incompatible_adapter_at_startup(missing_member):
+    from rho.server.open_pi_server import WebsocketPolicyServer
+
+    adapter_members = {
+        "policy_action_type": "POSITION",
+        "process_input": lambda obs: obs,
+        "process_output": lambda actions: actions,
+    }
+    adapter_members.pop(missing_member)
+    adapter = SimpleNamespace(**adapter_members)
+
+    with pytest.raises(TypeError, match=missing_member):
+        WebsocketPolicyServer(
+            SimpleNamespace(execution_horizon=8),
+            adapter,
+            host="127.0.0.1",
+            port=7000,
+        )
+
+
+def test_websocket_server_rejects_evaluation_only_environment_wrapper():
+    from rho.server.open_pi_server import WebsocketPolicyServer
+
+    environment = SimpleNamespace(
+        policy_action_type="POSITION",
+        _process_input=lambda obs: obs,
+        _process_output=lambda actions: actions,
+    )
+
+    with pytest.raises(TypeError, match=r"process_input\(\).*process_output\(\)"):
+        WebsocketPolicyServer(
+            SimpleNamespace(execution_horizon=8),
+            environment,
+            host="127.0.0.1",
+            port=7000,
+        )
 
 
 @pytest.mark.parametrize("failed_tasks", [(), ("a",), ("a", "b")])

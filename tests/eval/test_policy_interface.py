@@ -553,6 +553,30 @@ class TestProcessObsQueue:
         result = pi.process_obs_queue({"observation.image.0": img})
         assert result["observation.image.0"].shape == (1, 2, 3, 4, 4)
 
+    def test_multi_step_state_with_temporal_axis_preserves_order(self, identity_transforms):
+        """Explicit temporal inputs should be appended oldest to newest."""
+        config = _MockPolicyConfig(
+            delta_indices_dict={
+                "observation.state": [-2, -1, 0],
+                "action": [0],
+            }
+        )
+        policy = _MockPolicy(config=config)
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=identity_transforms,
+            output_transforms=identity_transforms,
+        )
+        pi = PolicyInterface(cfg)
+
+        state = torch.tensor([[[1.0], [2.0], [3.0]]])
+        result = pi.process_obs_queue({"observation.state": state})
+
+        assert result["observation.state"].shape == (1, 3, 1)
+        assert result["observation.state"][0, :, 0].tolist() == [1.0, 2.0, 3.0]
+        assert result["observation.state_is_pad"][0].tolist() == [False, False, False]
+
     def test_multi_step_state_without_temporal_axis(self, identity_transforms):
         """UR5-style states arrive as (B, dim) with no temporal axis."""
         config = _MockPolicyConfig(
@@ -698,6 +722,59 @@ class TestGetActionChunk:
         }
         action = policy_interface.get_action_chunk(obs)
         assert isinstance(action, torch.Tensor)
+
+    @pytest.mark.parametrize(
+        ("history_deltas", "requests", "expected_histories", "expected_pad_masks"),
+        [
+            pytest.param(
+                [0],
+                [[1, 2, 3]],
+                [[3]],
+                [[False]],
+                id="single-step-history-multiframe-request",
+            ),
+            pytest.param(
+                [-2, -1, 0],
+                [[1, 2], [3, 4]],
+                [[1, 1, 2], [2, 3, 4]],
+                [[True, False, False], [False, False, False]],
+                id="three-step-history-consecutive-multiframe-requests",
+            ),
+        ],
+    )
+    def test_model_sees_ordered_multiframe_history(
+        self, history_deltas, requests, expected_histories, expected_pad_masks
+    ):
+        """The policy must see chronological history across incoming requests."""
+        config = _MockPolicyConfig(
+            delta_indices_dict={"observation.state": history_deltas, "action": [0]}
+        )
+        policy = _MockPolicy(config=config)
+        policy.sample_actions = MagicMock(
+            return_value={"actions": torch.zeros(1, config.chunk_size, config.action_dim)}
+        )
+        cfg = _make_pi_config(
+            policy=policy,
+            device="cpu",
+            input_transforms=_identity_transform,
+            output_transforms=_identity_transform,
+        )
+        pi = PolicyInterface(cfg)
+
+        for frames in requests:
+            state = torch.tensor(frames, dtype=torch.float32).reshape(1, -1, 1)
+            pi.get_action_chunk({"observation.state": state})
+
+        observed = [
+            call.args[0]["observation.state"][0, :, 0].tolist()
+            for call in policy.sample_actions.call_args_list
+        ]
+        pad_masks = [
+            call.args[0]["observation.state_is_pad"][0].tolist()
+            for call in policy.sample_actions.call_args_list
+        ]
+        assert observed == expected_histories
+        assert pad_masks == expected_pad_masks
 
     def test_rtc_forwards_explicit_noise(self):
         """RTC should forward caller-supplied noise to the policy."""

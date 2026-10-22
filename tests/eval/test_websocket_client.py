@@ -233,6 +233,33 @@ def test_websocket_server_rejects_missing_or_invalid_api_key(api_key):
     asyncio.run(run_round_trip())
 
 
+@pytest.mark.parametrize(
+    ("server_key", "authorization", "expected_authorized"),
+    [
+        ("secret", "Api-Key café", False),
+        ("café", "Api-Key secret", False),
+        ("café", "Api-Key café", True),
+        ("🔑", "Api-Key 🔒", False),
+        ("🔑", "Api-Key 🔑", True),
+    ],
+)
+def test_websocket_server_handles_non_ascii_api_keys(server_key, authorization, expected_authorized):
+    import http
+
+    server = _make_simple_websocket_server(api_key=server_key)
+    connection = MagicMock()
+    request = SimpleNamespace(path="/", headers={"Authorization": authorization})
+
+    response = server._process_request(connection, request)
+
+    if expected_authorized:
+        assert response is None
+        connection.respond.assert_not_called()
+    else:
+        assert response is connection.respond.return_value
+        connection.respond.assert_called_once_with(http.HTTPStatus.UNAUTHORIZED, "Unauthorized\n")
+
+
 def test_websocket_server_accepts_valid_api_key():
     from websockets.asyncio.server import serve
 

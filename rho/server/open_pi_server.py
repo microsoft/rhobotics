@@ -119,7 +119,9 @@ class WebsocketPolicyServer:
 
         authorization = request.headers.get("Authorization")
         expected = f"Api-Key {self._api_key}"
-        if authorization is None or not hmac.compare_digest(authorization, expected):
+        if authorization is None or not hmac.compare_digest(
+            authorization.encode("utf-8"), expected.encode("utf-8")
+        ):
             return connection.respond(http.HTTPStatus.UNAUTHORIZED, "Unauthorized\n")
         return None
 

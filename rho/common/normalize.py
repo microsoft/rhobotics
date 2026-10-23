@@ -316,14 +316,14 @@ def create_stats_buffers(
 
             elif isinstance(stats[key]["mean"], list):
                 if norm_mode is NormalizationMode.MEAN_STD:
-                    buffer["mean"].data = torch.tensor(stats[key]["mean"]).to(dtype=torch.float32)[0]
-                    buffer["std"].data = torch.tensor(stats[key]["std"]).to(dtype=torch.float32)[0]
+                    buffer["mean"].data = torch.tensor(stats[key]["mean"]).to(dtype=torch.float32)
+                    buffer["std"].data = torch.tensor(stats[key]["std"]).to(dtype=torch.float32)
                 elif norm_mode is NormalizationMode.MIN_MAX:
-                    buffer["min"].data = torch.tensor(stats[key]["min"]).to(dtype=torch.float32)[0]
-                    buffer["max"].data = torch.tensor(stats[key]["max"]).to(dtype=torch.float32)[0]
+                    buffer["min"].data = torch.tensor(stats[key]["min"]).to(dtype=torch.float32)
+                    buffer["max"].data = torch.tensor(stats[key]["max"]).to(dtype=torch.float32)
                 elif norm_mode is NormalizationMode.QUANTILE:
-                    buffer["q01"].data = torch.tensor(stats[key]["q01"]).to(dtype=torch.float32)[0]
-                    buffer["q99"].data = torch.tensor(stats[key]["q99"]).to(dtype=torch.float32)[0]
+                    buffer["q01"].data = torch.tensor(stats[key]["q01"]).to(dtype=torch.float32)
+                    buffer["q99"].data = torch.tensor(stats[key]["q99"]).to(dtype=torch.float32)
                 elif norm_mode is NormalizationMode.ACTIONCHUNK_MEAN_STD:
                     buffer[f"mean_chunk{chunk_size}"].data = torch.tensor(
                         stats[key][f"mean_chunk{stats_chunked_size}"]

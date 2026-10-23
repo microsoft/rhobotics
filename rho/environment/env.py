@@ -120,8 +120,9 @@ class EvalMetrics:
         terminated = np.atleast_1d(terminated)
         truncated = np.atleast_1d(truncated)
 
-        # Update cumulative reward (only for non-done environments)
-        not_done_mask = 1 - self._current_done.astype(int)
+        # Capture active episodes before updating done status so their terminal
+        # step still counts, but later steps from completed lanes do not.
+        not_done_mask = ~self._current_done
         self._current_reward += reward * not_done_mask
 
         # Update done status
@@ -135,11 +136,15 @@ class EvalMetrics:
         # Also check info dict for explicit success flag
         is_success = info.get("is_success", terminated) if isinstance(info, dict) else terminated
         is_success = np.atleast_1d(is_success)
-        self._current_successes = self._current_successes | is_success
+        self._current_successes = self._current_successes | (is_success & not_done_mask)
 
         if info.get("subtask_progress") is not None:
             subtask_progress = np.atleast_1d(info["subtask_progress"])
-            self._current_subtask_progress = np.maximum(self._current_subtask_progress, subtask_progress)
+            self._current_subtask_progress = np.where(
+                not_done_mask,
+                np.maximum(self._current_subtask_progress, subtask_progress),
+                self._current_subtask_progress,
+            )
 
         # Store task descriptions (only on first step or when not set)
         if tasks is not None and step == 0:

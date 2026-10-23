@@ -317,6 +317,110 @@ def test_eval_metrics_store_and_summary():
     assert summary["episode_successes"][0] is True
 
 
+@pytest.mark.parametrize("terminal_kind", ["terminated", "truncated"])
+@pytest.mark.parametrize("outcome", ["success", "subtask_progress"])
+def test_eval_metrics_freeze_outcomes_after_done(terminal_kind, outcome):
+    from rho.environment.env import EvalMetrics
+
+    metrics = EvalMetrics(num_envs=2)
+    metrics.store(
+        step=0,
+        reward=np.array([1.0, 2.0]),
+        terminated=np.array([terminal_kind == "terminated", False]),
+        truncated=np.array([terminal_kind == "truncated", False]),
+        info={"is_success": np.array([False, False]), "subtask_progress": np.array([0.25, 0.1])},
+    )
+    metrics.store(
+        step=1,
+        reward=np.array([99.0, 3.0]),
+        terminated=np.array([True, True]),
+        truncated=np.array([False, False]),
+        info={"is_success": np.array([True, True]), "subtask_progress": np.array([1.0, 0.75])},
+    )
+
+    if outcome == "success":
+        assert metrics._current_successes.tolist() == [False, True]
+    else:
+        np.testing.assert_allclose(metrics._current_subtask_progress, [0.25, 0.75])
+    np.testing.assert_allclose(metrics._current_reward, [1.0, 5.0])
+    np.testing.assert_allclose(metrics._current_step_count, [1.0, 2.0])
+    assert metrics.all_episodes_done()
+
+
+@pytest.mark.parametrize("terminal_kind", ["terminated", "truncated"])
+@pytest.mark.parametrize("vectorized", [False, True])
+def test_eval_metrics_count_terminal_step_outcomes(terminal_kind, vectorized):
+    from rho.environment.env import EvalMetrics
+
+    def value(item):
+        return np.full(2, item) if vectorized else item
+
+    metrics = EvalMetrics(num_envs=2 if vectorized else 1)
+    metrics.store(
+        step=0,
+        reward=value(1.0),
+        terminated=value(False),
+        truncated=value(False),
+        info={"is_success": value(False), "subtask_progress": value(0.25)},
+    )
+    metrics.store(
+        step=1,
+        reward=value(2.0),
+        terminated=value(terminal_kind == "terminated"),
+        truncated=value(terminal_kind == "truncated"),
+        info={"is_success": value(True), "subtask_progress": value(0.75)},
+    )
+    # Later reset-like data must neither erase success nor lower peak progress.
+    metrics.store(
+        step=2,
+        reward=value(99.0),
+        terminated=value(False),
+        truncated=value(False),
+        info={"is_success": value(False), "subtask_progress": value(0.0)},
+    )
+
+    assert metrics._current_successes.all()
+    np.testing.assert_allclose(metrics._current_subtask_progress, 0.75)
+    np.testing.assert_allclose(metrics._current_reward, 3.0)
+    np.testing.assert_allclose(metrics._current_step_count, 2.0)
+
+    # Starting a new evaluation batch must allow outcomes to accumulate again.
+    metrics.reset_episode()
+    metrics.store(
+        step=0,
+        reward=value(4.0),
+        terminated=value(True),
+        truncated=value(False),
+        info={"is_success": value(True), "subtask_progress": value(1.0)},
+    )
+    assert metrics._current_successes.all()
+    np.testing.assert_allclose(metrics._current_subtask_progress, 1.0)
+    np.testing.assert_allclose(metrics._current_reward, 4.0)
+    np.testing.assert_allclose(metrics._current_step_count, 1.0)
+
+
+def test_eval_metrics_mask_termination_fallback_after_truncation():
+    from rho.environment.env import EvalMetrics
+
+    metrics = EvalMetrics(num_envs=2)
+    metrics.store(
+        step=0,
+        reward=0.0,
+        terminated=np.array([False, False]),
+        truncated=np.array([True, False]),
+        info={},
+    )
+    metrics.store(
+        step=1,
+        reward=0.0,
+        terminated=np.array([True, True]),
+        truncated=np.array([False, False]),
+        info={},
+    )
+
+    assert metrics._current_successes.tolist() == [False, True]
+
+
 def test_eval_metrics_all_episodes_done():
     """Test EvalMetrics all_episodes_done check."""
     from rho.environment.env import EvalMetrics
@@ -745,6 +849,88 @@ def test_evaluate_policy_vectorized_records_only_requested_episodes(
     assert len(results["episode_steps"]) == num_episodes
     assert len(results["episode_successes"]) == num_episodes
     assert len(results["episode_tasks"]) == num_episodes
+
+
+@pytest.mark.parametrize("terminal_kind", ["terminated", "truncated"])
+@pytest.mark.parametrize("slow_success", [False, True])
+def test_evaluate_policy_keeps_original_outcomes_after_vector_autoreset(
+    monkeypatch, terminal_kind, slow_success
+):
+    import gymnasium as gym
+
+    from rho.environment.env import GymEnvironmentConfig, evaluate_policy
+
+    class StaggeredOutcomeEnv(gym.Env):
+        def __init__(self, fast):
+            self.fast = fast
+            self.episode = -1
+            self.steps = 0
+            self.outcomes = []
+            self.observation_space = gym.spaces.Dict(
+                {"state": gym.spaces.Box(-1.0, 1.0, (1,), dtype=np.float32)}
+            )
+            self.action_space = gym.spaces.Box(-1.0, 1.0, (1,), dtype=np.float32)
+
+        def reset(self, *, seed=None, options=None):
+            super().reset(seed=seed)
+            self.episode = 0 if seed is not None else self.episode + 1
+            self.steps = 0
+            return {"state": np.zeros(1, dtype=np.float32)}, {}
+
+        def step(self, action):
+            self.steps += 1
+            done = self.steps >= (1 if self.fast else 4)
+            success = done and (self.episode > 0 if self.fast else slow_success)
+            if done:
+                self.outcomes.append(success)
+            progress = 1.0 if success else (0.25 if self.fast else 0.5)
+            terminated = done and (not self.fast or terminal_kind == "terminated")
+            truncated = done and self.fast and terminal_kind == "truncated"
+            return (
+                {"state": np.zeros(1, dtype=np.float32)},
+                1.0,
+                terminated,
+                truncated,
+                {"is_success": success, "subtask_progress": progress},
+            )
+
+    fast_env = StaggeredOutcomeEnv(fast=True)
+    slow_env = StaggeredOutcomeEnv(fast=False)
+    environments = iter([fast_env, slow_env])
+    # Keep the real GymEnvironment and SyncVectorEnv; replace only gym.make.
+    monkeypatch.setattr(gym, "make", lambda *args, **kwargs: next(environments))
+    env = GymEnvironment(
+        GymEnvironmentConfig(
+            env_name="test/StaggeredOutcomes-v0",
+            n_envs=2,
+            max_episode_steps=4,
+            observation_mapping={"state": "observation.state"},
+        )
+    )
+    try:
+        assert env.env.autoreset_mode == gym.vector.AutoresetMode.NEXT_STEP
+        results = evaluate_policy(
+            env=env,
+            policy_interface=MockPolicyInterface(action_dim=1, chunk_size=1),
+            num_episodes=2,
+            max_steps=4,
+            seed=42,
+            record_video=False,
+        )
+    finally:
+        env.close()
+
+    # The fast lane really failed, auto-reset, then succeeded while the slow
+    # lane was still running its first episode. Only original episodes count.
+    assert fast_env.outcomes == [False, True]
+    assert slow_env.outcomes == [slow_success]
+    assert results["num_episodes"] == 2
+    assert results["episode_successes"] == [False, slow_success]
+    assert results["mean_success_rt"] == (0.5 if slow_success else 0.0)
+    assert results["episode_steps"] == [1.0, 4.0]
+    assert results["episode_rewards"] == [1.0, 4.0]
+    assert results["episode_subtask_progress"] == [0.25, 1.0 if slow_success else 0.5]
+    assert results["mean_failure_subtask_progress"] == (0.25 if slow_success else 0.375)
 
 
 def test_evaluate_policy_uses_independent_policy_seed():

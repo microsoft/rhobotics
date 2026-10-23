@@ -23,7 +23,8 @@ docker_args=(
   --env "HF_TOKEN=${HF_TOKEN:-}"
   --env "WANDB_API_KEY=${WANDB_API_KEY:-}"
   --env "WANDB_BASE_URL=${WANDB_BASE_URL:-}"
-  --publish "$SERVER_PORT:$SERVER_PORT"
+  --env "RHO_SERVER_HOST=0.0.0.0"
+  --publish "127.0.0.1:$SERVER_PORT:$SERVER_PORT"
   --name "$CONTAINER_NAME"
   --detach
 )

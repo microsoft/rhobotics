@@ -119,6 +119,13 @@ Start an interactive container from the repository root:
 ./docker/training/interactive.sh
 ```
 
+The launcher publishes `RHO_SERVER_PORT` (default `9999`) only on the
+host's `127.0.0.1`, while setting `RHO_SERVER_HOST=0.0.0.0` inside the
+container so Docker's port forwarding can reach the server. When serving
+from the container, configure the policy server's `environment.port` to
+match `RHO_SERVER_PORT`. Host clients can then use `localhost:<port>`;
+other machines cannot reach that published port by default.
+
 The launcher mounts the repository at `/workspace`. Set `RHO_DATA_DIR` to mount
 a host dataset directory at `/data`:
 

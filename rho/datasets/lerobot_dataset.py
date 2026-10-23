@@ -232,6 +232,39 @@ def resolve_action_delta_indices_for_dataset(
     return list(range(real_chunk))
 
 
+def _resolve_split_episodes(
+    metadata: LeRobotDatasetMetadata,
+    split_name: str,
+    episodes: list[int] | None = None,
+) -> list[int] | None:
+    """Resolve LeRobot's half-open episode ranges, never falling back to another split."""
+    total = metadata.total_episodes
+    splits = metadata.info.get("splits") or {"train": f"0:{total}"}
+    if split_name not in splits:
+        raise ValueError(f"Unknown dataset split {split_name!r}. Available splits: {sorted(splits)}")
+
+    interval = splits[split_name]
+    try:
+        start, stop = (int(bound) for bound in interval.split(":"))
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError(
+            f"Dataset split {split_name!r} must be an episode range 'start:stop', got {interval!r}"
+        ) from None
+    if not 0 <= start < stop <= total:
+        raise ValueError(
+            f"Dataset split {split_name!r} has invalid episode range {interval!r}; "
+            f"expected 0 <= start < stop <= {total}"
+        )
+
+    if episodes is not None:
+        selected = sorted({episode for episode in episodes if start <= episode < stop})
+        if not selected:
+            raise ValueError(f"No episodes remain in dataset split {split_name!r} after episode selection")
+        return selected
+    # Preserve the native all-episodes path for ordinary train-only datasets.
+    return None if start == 0 and stop == total else list(range(start, stop))
+
+
 class TransformedLeRobotDataset(LeRobotDataset):
     """
     A transformed version of the LeRobotDataset that applies a transformation to each sample.
@@ -241,7 +274,8 @@ class TransformedLeRobotDataset(LeRobotDataset):
         data_transforms: Optional callable to apply transformations to the data.
             The data_transforms callable includes both the normalization and any additional transforms.
             In most cases it is populated using DataConfig.get_transforms().
-        split_name: The name of the dataset split to use (e.g., "train",
+        split_name: Named episode range in meta/info.json (e.g., "train").
+            An explicit episodes list is intersected with this range.
     """
 
     def __init__(
@@ -259,6 +293,14 @@ class TransformedLeRobotDataset(LeRobotDataset):
         self.padding_transform = padding_transform or (lambda x: x)
         self.observation_blacklist = observation_blacklist
         self.training_mode = training_mode
+        # Select episodes before LeRobot builds its reader and temporal index map.
+        metadata = LeRobotDatasetMetadata(
+            repo_id,
+            root=kwargs.get("root"),
+            revision=kwargs.get("revision"),
+            force_cache_sync=kwargs.get("force_cache_sync", False),
+        )
+        kwargs["episodes"] = _resolve_split_episodes(metadata, split_name, kwargs.get("episodes"))
         super().__init__(repo_id=repo_id, **kwargs)
 
     def _check_cached_episodes_sufficient(self) -> bool:
@@ -429,6 +471,7 @@ class TransformedStreamingLeRobotDataset(StreamingLeRobotDataset):
         self.training_mode = training_mode
 
         super().__init__(repo_id=repo_id, **kwargs)
+        self.episodes = _resolve_split_episodes(self.meta, split_name, self.episodes)
 
         if self.observation_blacklist is not None:
             for key in self.observation_blacklist:
@@ -447,6 +490,25 @@ class TransformedStreamingLeRobotDataset(StreamingLeRobotDataset):
                 revision=self.revision,
                 features=features,
             )
+
+        # The upstream streaming reader does not apply its episodes argument.
+        # Filter after any blacklist reload, before sharding and temporal queries.
+        if self.episodes is not None:
+            selected_episodes = frozenset(self.episodes)
+            self.hf_dataset = self.hf_dataset.filter(
+                lambda sample: sample["episode_index"] in selected_episodes
+            )
+
+    @property
+    def num_frames(self):
+        if self.episodes is None:
+            return self.meta.total_frames
+        lengths = self.meta.episodes["length"]
+        return sum(lengths[episode] for episode in self.episodes)
+
+    @property
+    def num_episodes(self):
+        return self.meta.total_episodes if self.episodes is None else len(self.episodes)
 
     def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
         for sample in super().__iter__():
@@ -483,12 +545,12 @@ class LeRobotDatasetConfig(RobotDataConfig):
     # Data preprocessing options
     use_imagenet_stats: bool = False
 
-    split_name: str = "train"  # Default split name to use
+    split_name: str = "train"  # Named episode range in meta/info.json
 
     prefetch_factor: int = 2  # Number of batches to prefetch
 
     # If set, only the first `max_episodes` episodes are sampled from. Episode
-    # indices 0..max_episodes-1 are used; later episodes are ignored. Used for
+    # positions 0..max_episodes-1 within the selected split are used. Used for
     # data-scaling curves where we want to train on a subset of demonstrations
     # without duplicating the dataset on PVC.
     max_episodes: int | None = None
@@ -686,10 +748,22 @@ class LeRobotDatasetConfig(RobotDataConfig):
                     f"Capping training to first {self.max_episodes} episodes (out of "
                     f"{len(dataset.meta.episodes['dataset_from_index'])} available)."
                 )
+            from_indices = dataset.meta.episodes["dataset_from_index"]
+            to_indices = dataset.meta.episodes["dataset_to_index"]
+            if dataset.episodes is not None:
+                # Filtered readers use contiguous row indices, not the original
+                # absolute frame offsets recorded in the dataset metadata.
+                lengths = [to_indices[ep] - from_indices[ep] for ep in sorted(dataset.episodes)]
+                from_indices, to_indices = [], []
+                offset = 0
+                for length in lengths:
+                    from_indices.append(offset)
+                    offset += length
+                    to_indices.append(offset)
             # create dataloader for offline training
             sampler = EpisodeAwareSampler(
-                dataset.meta.episodes["dataset_from_index"],
-                dataset.meta.episodes["dataset_to_index"],
+                from_indices,
+                to_indices,
                 episode_indices_to_use=episode_indices_to_use,
                 shuffle=True,
                 seed=self.seed,

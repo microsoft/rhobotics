@@ -136,6 +136,32 @@ While it is possible to load a dataset with only `repo_id` and `root_dir` define
 - **`normalization_mapping`** — Defines the type of normalization applied to each feature type. We support all the same normalizations as a standard LeRobot dataset. There are also special normalizations for `ACTION` type features that use the `ACTIONCHUNK_` prefix — these are used in conjunction with state-relative delta actions and require custom stats computed via the script in section 1b.
 
 
+### Training and validation splits
+
+Set `dataset.split_name` and `validation_dataset.split_name` to named episode
+ranges in the dataset's `meta/info.json`. For example, a four-episode dataset
+can declare:
+
+```json
+"splits": {"train": "0:2", "validation": "2:4"}
+```
+
+`split_name: train` then loads episodes 0 and 1, while
+`split_name: validation` loads episodes 2 and 3. Ranges are half-open episode
+indices, not frame indices or Hugging Face Parquet split names. Both map-style
+and streaming loaders enforce them, including when episodes share a Parquet
+file. Unknown names and invalid or empty selections raise an error instead of
+loading all episodes.
+
+An explicit `episodes` list passed to a dataset constructor further restricts
+the named split by intersection. For map-style datasets, `max_episodes` caps
+the first episodes of the selected split. Train-only datasets retain their
+existing behavior; when no split metadata is present, only `train` defaults
+to the entire dataset. No validation split is inferred automatically.
+
+Split selection does not recompute normalization statistics. Use statistics
+computed from training episodes for held-out evaluation.
+
 ### Additional dataset parameters
 
 There are three additional parameters that we use for our hardware demonstrations:

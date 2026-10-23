@@ -17,11 +17,17 @@ RUN apt-get update && \
 # --solver=classic: the solver bundled with this installer deadlocks its sharded-repodata
 # SQLite cache on overlayfs. The update itself upgrades conda-libmamba-solver, so every
 # later conda call can use the default solver.
+# The Terms of Service are accepted again after the update: when `conda update --all`
+# upgrades conda-anaconda-tos, the old version's pre-unlink script runs
+# `conda tos clean --all`, which deletes the recorded acceptances
+# (https://github.com/anaconda/conda-anaconda-tos/issues/250).
 RUN wget -qO /tmp/miniconda.sh https://repo.anaconda.com/miniconda/Miniconda3-${MINICONDA_VERSION}-Linux-x86_64.sh && \
         bash /tmp/miniconda.sh -bf -p /opt/miniconda && \
         conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
         conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && \
         conda update --all -c conda-forge -y --solver=classic && \
+        conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+        conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && \
         conda install -n base -c conda-forge "cryptography>=50.0.0" -y --solver=classic && \
         conda clean -ay && \
         rm -rf /opt/miniconda/pkgs && \

@@ -162,6 +162,26 @@ to the entire dataset. No validation split is inferred automatically.
 Split selection does not recompute normalization statistics. Use statistics
 computed from training episodes for held-out evaluation.
 
+### Excluding observations from loading
+
+`observation_blacklist` takes raw dataset keys, before observation remapping.
+For map-style loading, excluded columns are removed before image decoding and
+excluded cameras are removed from the reader's video and temporal queries.
+For example:
+
+```yaml
+observation_blacklist:
+  - observation.images.head
+```
+
+The map-style cache check verifies that the requested episodes are present in
+Parquet, without checking every episode's video paths at startup. A missing
+retained video therefore fails when its sample is decoded, with the video
+path, rather than triggering a Hub download during construction. Missing
+Parquet data and explicit `force_cache_sync=True` still use LeRobot's download
+path. Only use this deferred validation with local video assets available to
+the data-loader workers. Explicit model feature padding remains unchanged.
+
 ### Additional dataset parameters
 
 There are three additional parameters that we use for our hardware demonstrations:

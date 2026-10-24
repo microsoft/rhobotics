@@ -6,10 +6,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import datasets
+import pyarrow.dataset as pa_ds
 import torch
 from datasets import load_dataset
+from lerobot.datasets.dataset_reader import DatasetReader
 from lerobot.datasets.factory import IMAGENET_STATS
 from lerobot.datasets.feature_utils import get_hf_features_from_features
+from lerobot.datasets.io_utils import hf_transform_to_torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.datasets.streaming_dataset import StreamingLeRobotDataset
 from lerobot.utils.feature_utils import dataset_to_policy_features
@@ -265,6 +268,41 @@ def _resolve_split_episodes(
     return None if start == 0 and stop == total else list(range(start, stop))
 
 
+class _RhoDatasetReader(DatasetReader):
+    """Map-style reader with column projection and deferred video validation."""
+
+    def _load_hf_dataset(self) -> datasets.Dataset:
+        paths = sorted((self.root / "data").glob("*/*.parquet"))
+        if not paths:
+            raise FileNotFoundError(f"No Parquet files found under {self.root / 'data'}")
+        features = get_hf_features_from_features(self._meta.features)
+        filters = pa_ds.field("episode_index").isin(self.episodes) if self.episodes is not None else None
+        # Project at read time: dropping decoded samples would still decode
+        # excluded images, and a reduced schema alone cannot cast extra columns.
+        dataset = datasets.Dataset.from_parquet(
+            [str(path) for path in paths], features=features, columns=list(features), filters=filters
+        )
+        dataset.set_transform(hf_transform_to_torch)
+        return dataset
+
+    def _check_cached_episodes_sufficient(self) -> bool:
+        """Check Parquet coverage; defer missing-video errors to sample decoding.
+
+        Avoid one filesystem lookup per episode/camera on large local datasets.
+        Missing Parquet data still uses LeRobot's normal download path.
+        """
+        if self.hf_dataset is None or len(self.hf_dataset) == 0:
+            return False
+        available_episodes = {
+            ep_idx.item() if isinstance(ep_idx, torch.Tensor) else ep_idx
+            for ep_idx in self.hf_dataset.unique("episode_index")
+        }
+        requested_episodes = (
+            set(range(self._meta.total_episodes)) if self.episodes is None else set(self.episodes)
+        )
+        return requested_episodes.issubset(available_episodes)
+
+
 class TransformedLeRobotDataset(LeRobotDataset):
     """
     A transformed version of the LeRobotDataset that applies a transformation to each sample.
@@ -301,42 +339,43 @@ class TransformedLeRobotDataset(LeRobotDataset):
             force_cache_sync=kwargs.get("force_cache_sync", False),
         )
         kwargs["episodes"] = _resolve_split_episodes(metadata, split_name, kwargs.get("episodes"))
+        if self.observation_blacklist and kwargs.get("delta_timestamps") is not None:
+            # Filter before the parent validates timestamps; do not mutate the
+            # caller's schedule, which may also be used by another dataset.
+            kwargs["delta_timestamps"] = {
+                key: values
+                for key, values in kwargs["delta_timestamps"].items()
+                if key not in self.observation_blacklist
+            }
         super().__init__(repo_id=repo_id, **kwargs)
 
-    def _check_cached_episodes_sufficient(self) -> bool:
-        """Avoid an exhaustive local video existence scan at dataset init.
+    @property
+    def reader(self) -> DatasetReader | None:
+        return self._reader
 
-        Upstream LeRobot checks every expected video file for every episode
-        after loading parquet data. Large local robot datasets can have tens
-        of thousands of episodes, making startup perform hundreds of thousands
-        of NFS stat calls per rank before training begins. We still verify the
-        parquet episode coverage here; missing videos will surface at sample
-        decode time with the concrete path.
-        """
-        if self.hf_dataset is None or len(self.hf_dataset) == 0:
-            return False
-
-        available_episodes = {
-            ep_idx.item() if isinstance(ep_idx, torch.Tensor) else ep_idx
-            for ep_idx in self.hf_dataset.unique("episode_index")
-        }
-        requested_episodes = (
-            set(range(self.meta.total_episodes)) if self.episodes is None else set(self.episodes)
-        )
-        return requested_episodes.issubset(available_episodes)
-
-    def load_hf_dataset(self) -> datasets.Dataset:
-        if self.observation_blacklist is not None:
-            for key in self.observation_blacklist:
-                logger.debug(f"Removing blacklisted observation key: {key}")
-                if key in self.features:
-                    del self.features[key]
-                if self.delta_indices is not None and key in self.delta_indices:
-                    del self.delta_indices[key]
-                if self.delta_timestamps is not None and key in self.delta_timestamps:
-                    del self.delta_timestamps[key]
-
-        return super().load_hf_dataset()
+    @reader.setter
+    def reader(self, reader: DatasetReader | None) -> None:
+        # The pinned LeRobot constructs DatasetReader directly, without a factory
+        # hook. Adapt the instance on assignment, before try_load/load_and_activate,
+        # rather than patching the upstream class or duplicating its constructor.
+        # This also covers the lazy-reader path and leaves other datasets untouched.
+        if reader is not None and not isinstance(reader, _RhoDatasetReader):
+            blacklist = getattr(self, "observation_blacklist", None) or ()
+            if blacklist:
+                self.meta.info.features = {
+                    key: feature for key, feature in self.meta.features.items() if key not in blacklist
+                }
+            reader = _RhoDatasetReader(
+                meta=self.meta,
+                root=reader.root,
+                episodes=reader.episodes,
+                tolerance_s=self.tolerance_s,
+                video_backend=self._video_backend,
+                delta_timestamps=self.delta_timestamps,
+                image_transforms=self.image_transforms,
+                return_uint8=self._return_uint8,
+            )
+        self._reader = reader
 
     def __getitem__(self, index):
         sample = super().__getitem__(index)

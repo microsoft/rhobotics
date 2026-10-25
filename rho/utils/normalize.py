@@ -16,6 +16,28 @@ class NormStats:
     q99: np.ndarray | None = None  # 99th percentile
 
 
+def _merge_batch_moments(
+    batch: np.ndarray,
+    count: int,
+    mean: np.ndarray | None,
+    m2: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Merge float64 means and centered sums of squares along the sample axis."""
+    # Promote before subtracting or squaring, including for integer inputs.
+    values = np.asarray(batch, dtype=np.float64)
+    batch_mean = np.mean(values, axis=0)
+    centered = values - batch_mean
+    batch_m2 = np.sum(centered * centered, axis=0)
+    if count == 0:
+        return batch_mean, batch_m2
+
+    assert mean is not None and m2 is not None
+    # Chan's parallel variance update includes the between-batch contribution.
+    weight = values.shape[0] / (count + values.shape[0])
+    delta = batch_mean - mean
+    return mean + delta * weight, m2 + batch_m2 + delta**2 * count * weight
+
+
 class RunningStats:
     """Compute running statistics of a batch of vectors.
 
@@ -46,7 +68,7 @@ class RunningStats:
         """
         self._count = 0
         self._mean = None
-        self._mean_of_squares = None
+        self._m2 = None
         self._min = known_min
         self._max = known_max
         self._num_quantile_bins = num_quantile_bins
@@ -85,9 +107,6 @@ class RunningStats:
         num_elements, vector_length = batch.shape
 
         if self._count == 0:
-            self._mean = np.mean(batch, axis=0)
-            self._mean_of_squares = np.mean(batch**2, axis=0)
-
             if not self._fixed_bounds:
                 self._min = np.min(batch, axis=0)
                 self._max = np.max(batch, axis=0)
@@ -110,16 +129,8 @@ class RunningStats:
             # Store data for percentile computation
             self._accumulated_data.append(batch.copy())
 
+        self._mean, self._m2 = _merge_batch_moments(batch, self._count, self._mean, self._m2)
         self._count += num_elements
-
-        batch_mean = np.mean(batch, axis=0)
-        batch_mean_of_squares = np.mean(batch**2, axis=0)
-
-        # Update running mean and mean of squares.
-        self._mean += (batch_mean - self._mean) * (num_elements / self._count)
-        self._mean_of_squares += (batch_mean_of_squares - self._mean_of_squares) * (
-            num_elements / self._count
-        )
 
     def get_statistics(self) -> NormStats:
         """
@@ -131,7 +142,8 @@ class RunningStats:
         if self._count < 2:
             raise ValueError("Cannot compute statistics for less than 2 vectors.")
 
-        variance = self._mean_of_squares - self._mean**2
+        # Preserve population variance (ddof=0) without subtracting raw moments.
+        variance = self._m2 / self._count
         stddev = np.sqrt(np.maximum(0, variance))
 
         if self._no_quantile:
@@ -222,7 +234,7 @@ class RunningStatsChunked:
 
         self._count = 0
         self._mean = None
-        self._mean_of_squares = None
+        self._m2 = None
         self._min = known_min
         self._max = known_max
         self._num_quantile_bins = num_quantile_bins
@@ -273,10 +285,6 @@ class RunningStatsChunked:
         batch_size, chunk_len, dims = batch.shape
 
         if self._count == 0:
-            # Initialize with first batch
-            self._mean = np.mean(batch, axis=0)  # Shape: (chunk_len, dims)
-            self._mean_of_squares = np.mean(batch**2, axis=0)
-
             if not self._fixed_bounds:
                 self._min = np.min(batch, axis=0)
                 self._max = np.max(batch, axis=0)
@@ -299,14 +307,8 @@ class RunningStatsChunked:
             # Store data for percentile computation
             self._accumulated_data.append(batch)
 
+        self._mean, self._m2 = _merge_batch_moments(batch, self._count, self._mean, self._m2)
         self._count += batch_size
-
-        # Update running mean and mean of squares
-        batch_mean = np.mean(batch, axis=0)
-        batch_mean_of_squares = np.mean(batch**2, axis=0)
-
-        self._mean += (batch_mean - self._mean) * (batch_size / self._count)
-        self._mean_of_squares += (batch_mean_of_squares - self._mean_of_squares) * (batch_size / self._count)
 
     def get_statistics(self) -> dict[str, np.ndarray]:
         """Compute and return statistics.
@@ -318,7 +320,8 @@ class RunningStatsChunked:
         if self._count < 2:
             raise ValueError("Cannot compute statistics for less than 2 samples.")
 
-        variance = self._mean_of_squares - self._mean**2
+        # Preserve population variance (ddof=0) without subtracting raw moments.
+        variance = self._m2 / self._count
         stddev = np.sqrt(np.maximum(0, variance))
 
         chunk_len, dims = self._mean.shape

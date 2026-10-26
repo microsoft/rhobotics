@@ -3,6 +3,7 @@ from collections import deque
 from contextlib import nullcontext
 from dataclasses import dataclass, field, fields
 from datetime import datetime
+from numbers import Real
 from pathlib import Path
 
 import draccus
@@ -348,15 +349,29 @@ def train_policy_step(
 def validate_policy(
     policy, validation_dataloader, device, eval_batch_size=32, eval_num_episodes=4, max_batches=None
 ):
-    """Validate the policy on the validation dataset"""
+    """Average batch-mean losses over the samples actually evaluated.
+
+    Numeric auxiliary metrics are sample-weighted means of their batch summaries,
+    using only batches that report each key. This does not recompute population
+    statistics from nonlinear summaries such as batch standard deviations.
+    Nonnumeric diagnostics retain their latest reported value.
+    """
     policy.eval()
 
     total_loss = 0.0
-    total_steps = 0
+    total_samples = 0
+    metric_totals = {}
+    metric_samples = {}
+    validation_dict = {}
     with torch.no_grad():
-        for batch in validation_dataloader:
-            if max_batches is not None and total_steps >= max_batches:
+        for batch_index, batch in enumerate(validation_dataloader):
+            if max_batches is not None and batch_index >= max_batches:
                 break
+            # The nominal loader/config size can differ from a short final batch
+            # or a pre-collated batch. Rho's loss is a mean over its action samples.
+            batch_size = batch["action"].shape[0]
+            if batch_size == 0:
+                continue
             for key in batch:
                 if isinstance(batch[key], torch.Tensor):
                     batch[key] = batch[key].to(device, non_blocking=True)
@@ -364,15 +379,19 @@ def validate_policy(
                 loss, loss_dict = policy.module.compute_loss(batch)
             else:
                 loss, loss_dict = policy.compute_loss(batch)
-            total_loss += loss.item()
-            total_steps += 1
+            total_loss += loss.item() * batch_size
+            total_samples += batch_size
+            for key, value in (loss_dict or {}).items():
+                if isinstance(value, torch.Tensor) and value.numel() == 1:
+                    value = value.item()
+                if isinstance(value, Real):
+                    metric_totals[key] = metric_totals.get(key, 0.0) + float(value) * batch_size
+                    metric_samples[key] = metric_samples.get(key, 0) + batch_size
+                else:
+                    validation_dict[key] = value
 
-    avg_loss = total_loss / total_steps if total_steps > 0 else 0.0
-    validation_dict = {
-        "validation_loss": avg_loss,
-    }
-    if loss_dict:
-        validation_dict.update(loss_dict)
+    validation_dict.update({key: total / metric_samples[key] for key, total in metric_totals.items()})
+    validation_dict["validation_loss"] = total_loss / total_samples if total_samples else 0.0
     return validation_dict
 
 

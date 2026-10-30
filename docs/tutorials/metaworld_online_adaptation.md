@@ -85,6 +85,28 @@ an action chunk, and the scripted expert takes over at a randomly drawn step. Ev
 actually executed over a query period — expert or policy — is inverted back into noise space,
 and those noise targets train the noise policy.
 
+### Observation history during adaptation
+
+Call `adapter.reset()` at each episode boundary, then call
+`adapter.prepare_observation(obs)` once per policy query. Reuse the returned
+snapshot for `embed_for_buffer`, `propose_noise`, `act`, and `invert`:
+
+```python
+adapter.reset()
+query = adapter.prepare_observation(obs)
+embedding = adapter.embed_for_buffer(query)
+noise = adapter.propose_noise(query)
+actions = adapter.act(query, noise)
+# After collecting the physical actions actually executed for this query:
+noise_target, diagnostics = adapter.invert(query, executed_actions)
+```
+
+The snapshot retains both the selected raw history and transformed inputs.
+Embedding, action sampling, and later inversion therefore use the same temporal
+context and padding masks without inserting the observation again. Prepare a
+new snapshot for every new query, even when the environment reuses a dictionary
+or returns unchanged values. The MetaWorld rollout handles these steps itself.
+
 The run prints two diagnostic lines after the seed episodes:
 
 ```

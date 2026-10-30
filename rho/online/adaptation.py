@@ -31,6 +31,7 @@ The loop is environment-agnostic: callers supply an env and an expert
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections import deque
 from dataclasses import dataclass, field
@@ -147,6 +148,22 @@ def summarize_inversions(diags: list[dict]) -> dict:
     }
 
 
+def _copy_observation(obs: dict) -> dict:
+    """Keep transforms and reused environment buffers out of query snapshots."""
+    return {
+        key: value.clone() if isinstance(value, torch.Tensor) else copy.deepcopy(value)
+        for key, value in obs.items()
+    }
+
+
+@dataclass(frozen=True)
+class AdaptationObservation:
+    """One query's raw history and transformed inputs, reused until inversion."""
+
+    history: dict
+    processed: dict
+
+
 class OnlineAdapter:
     """Frozen policy + the noise policy being trained over it."""
 
@@ -176,11 +193,32 @@ class OnlineAdapter:
 
     # -- observation plumbing -------------------------------------------------
 
-    def _prepare(self, obs: dict, action=None):
-        o = {k: (v.to(self.device) if isinstance(v, torch.Tensor) else v) for k, v in obs.items()}
+    def reset(self) -> None:
+        """Clear temporal state at the start of an adaptation/evaluation episode."""
+        self.pi.reset()
+
+    @torch.no_grad()
+    def prepare_observation(self, obs: dict) -> AdaptationObservation:
+        """Ingest an observation exactly once and retain its query conditioning.
+
+        Pass the returned snapshot to embedding, noise proposal, action sampling,
+        and inversion. Raw history is kept separately so executed physical actions
+        can be transformed against the same state later without advancing queues.
+        """
+        raw = _copy_observation(obs)
+        raw = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in raw.items()}
+        history = self.pi.process_obs_queue(self.pi.remap_observation(raw))
+        processed = self.pi.transform_observation(_copy_observation(history))
+        return AdaptationObservation(history, processed)
+
+    def _prepare(self, obs: AdaptationObservation, action=None):
+        o = _copy_observation(obs.processed)
         if action is not None:
-            o["action"] = torch.as_tensor(action, dtype=torch.float32, device=self.device).unsqueeze(0)
-        o = self.pi.process_observation(o, process_action=action is not None)
+            raw = _copy_observation(obs.history)
+            raw["action"] = torch.as_tensor(action, dtype=torch.float32, device=self.device).unsqueeze(0)
+            # Only the executed actions need transforming. Conditioning stays at
+            # the original query, even if later queries have advanced the history.
+            o["action"] = self.pi.transform_observation(raw, process_action=True)["action"]
         b = self.policy.consolidate_images(o)
         image, _ = self.policy.prepare_image(b)
         return (
@@ -191,7 +229,7 @@ class OnlineAdapter:
         )
 
     @torch.no_grad()
-    def embed(self, obs: dict):
+    def embed(self, obs: AdaptationObservation):
         """Return ``(prefix, mask, state)`` -- the conditioning the noise policy consumes.
 
         This is the policy's OWN prefix forward, the same one the sampler would run, so the
@@ -202,7 +240,7 @@ class OnlineAdapter:
         return embed, mask, state
 
     @torch.no_grad()
-    def embed_for_buffer(self, obs: dict) -> np.ndarray:
+    def embed_for_buffer(self, obs: AdaptationObservation) -> np.ndarray:
         """Pooled conditioning stored as the BC input: ``[masked_mean(prefix), state]``.
 
         Pooling here rather than storing the full prefix keeps the buffer small, and is
@@ -216,18 +254,20 @@ class OnlineAdapter:
         return torch.cat([pooled.float(), s], dim=-1).cpu().numpy()[0]
 
     @torch.no_grad()
-    def propose_noise(self, obs: dict) -> np.ndarray:
+    def propose_noise(self, obs: AdaptationObservation) -> np.ndarray:
         embed, mask, state = self.embed(obs)
         shape = (state.shape[0], self.chunk, self.noise_dim)
         return self.noise_policy(embed, mask, state, shape).float().cpu().numpy()[0]
 
     @torch.no_grad()
-    def act(self, obs: dict, noise: np.ndarray) -> np.ndarray:
-        o = {k: (v.to(self.device) if isinstance(v, torch.Tensor) else v) for k, v in obs.items()}
-        return self.pi.get_action_chunk(o, noise=noise[None]).float().cpu().numpy()[0]
+    def act(self, obs: AdaptationObservation, noise: np.ndarray) -> np.ndarray:
+        action = self.pi.get_action_chunk_from_processed_observation(
+            _copy_observation(obs.processed), noise=noise[None]
+        )
+        return action.float().cpu().numpy()[0]
 
     @torch.no_grad()
-    def invert(self, obs: dict, executed: np.ndarray):
+    def invert(self, obs: AdaptationObservation, executed: np.ndarray):
         """Executed action chunk -> noise target, with health diagnostics."""
         image, prompt, state, a_target = self._prepare(obs, action=executed)
         precomputed = self.flow_model.get_image_text_hidden_state(image, prompt, image_mask=None)

@@ -6,6 +6,8 @@ import random
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from enum import Enum
+from itertools import accumulate
+from numbers import Integral
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -519,10 +521,39 @@ class TrainingModeOverrideIterableWrapper(torch.utils.data.IterableDataset):
             yield sample
 
 
+def _normalized_sample_weights(weights: list[float]) -> np.ndarray:
+    values = np.asarray(weights, dtype=np.float64)
+    if (
+        values.ndim != 1
+        or values.size == 0
+        or not np.isfinite(values).all()
+        or (values < 0).any()
+        or not (values > 0).any()
+    ):
+        raise ValueError("Sample weights must be finite, nonnegative, and include a positive weight")
+    # Scaling first also handles finite weights whose sum would overflow.
+    values = values / values.max()
+    return values / values.sum()
+
+
+def _allocate_sample_sizes(lengths: list[int], weights: np.ndarray) -> list[int]:
+    """Preserve the existing rounded per-cycle quotas, ignoring disabled children."""
+    active = weights > 0
+    eligible = np.asarray(lengths)
+    if (eligible[active] <= 0).any():
+        raise ValueError("Every positive-weight dataset must have at least one eligible sample")
+    data_pool_size = int(round(np.min(eligible[active] / weights[active])))
+    return [int(round(weight * data_pool_size)) for weight in weights]
+
+
 class MultiDatasetWeightedSampler:
     """
-    Hold several EpisodeAwareSampler objects and on every __iter__ step
-    pick one according to sample_weights, then yield one index from it.
+    Repeatedly draw child indices according to weighted per-cycle quotas.
+
+    ``dataset_lengths`` gives the full concatenated child lengths, independently
+    of how many samples each child sampler selects. The default assumes full,
+    unrestricted child samplers for compatibility with direct callers.
+    ``len(sampler)`` is one allocation cycle; iteration continues across cycles.
     """
 
     def __init__(
@@ -531,6 +562,8 @@ class MultiDatasetWeightedSampler:
         sample_weights: list[float] | None = None,
         shuffle_type: ShuffleType = ShuffleType.FRAME,
         seed: int | None = None,
+        *,
+        dataset_lengths: list[int] | None = None,
     ):
         if shuffle_type == ShuffleType.EPISODE:
             raise NotImplementedError("EPISODE shuffle type is not currently supported")
@@ -543,16 +576,19 @@ class MultiDatasetWeightedSampler:
         if len(sample_weights) != len(samplers):
             raise ValueError("samplers and sample_weights must have the same length")
 
-        w = np.asarray(sample_weights, dtype=np.float64)
-        self.sample_weights_normalized = w / w.sum()
+        self.sample_weights_normalized = _normalized_sample_weights(sample_weights)
 
         self.allocated_sample_sizes = self.get_allocated_sample_sizes()
         logger.info(f"Allocated sample sizes per dataset: {self.allocated_sample_sizes}")
         self.yielded = [0] * len(self.samplers)
 
-        self.cumulative_episode_indices = [
-            sum(len(sampler) for sampler in self.samplers[:i]) for i in range(len(self.samplers) + 1)
-        ]
+        if dataset_lengths is None:
+            dataset_lengths = [len(sampler) for sampler in samplers]
+        if len(dataset_lengths) != len(samplers) or any(
+            not isinstance(length, Integral) or length < 0 for length in dataset_lengths
+        ):
+            raise ValueError("dataset_lengths must contain one nonnegative integer per sampler")
+        self.cumulative_episode_indices = list(accumulate(dataset_lengths, initial=0))
 
         self._rng = np.random.default_rng(seed)
         self._epoch = 0
@@ -561,12 +597,9 @@ class MultiDatasetWeightedSampler:
         """
         Allocate sample sizes for each sampler based on the normalized weights.
         """
-        sample_lengths = [len(sampler) for sampler in self.samplers]
-
-        # get the upper bound on the overall data pool size
-        data_pool_size = int(round(min(sample_lengths / self.sample_weights_normalized)))
-        allocated_sizes = [int(round(weight * data_pool_size)) for weight in self.sample_weights_normalized]
-        return allocated_sizes
+        return _allocate_sample_sizes(
+            [len(sampler) for sampler in self.samplers], self.sample_weights_normalized
+        )
 
     def __len__(self) -> int:
         """
@@ -617,9 +650,10 @@ class MultiDatasetWeightedSampler:
                     active.remove(chosen_dataset_idx)
                 yield sample_idx
 
-            # reset iterators and yielded counts for the next pass
+            # Reset quotas, but retain partially consumed child iterators. A
+            # smaller quota must not replay the same prefix on every cycle.
+            # Exhausted children restart through the StopIteration path above.
             self.yielded = [0] * len(self.samplers)
-            iters = [iter(sampler) for sampler in self.samplers]
             self._epoch += 1
             logger.info("All samplers have hit their allocation.")
 
@@ -755,8 +789,7 @@ class MultiDatasetConfig(DataConfig):
                         # this iterated d.dataset.datasets (shallow), which
                         # produced len(weights) < len(dataset_cfgs) whenever
                         # any inner Multi was itself nested.
-                        inner_weights = np.array(d.dataset.weights, dtype=np.float64)
-                        normalized_weights = inner_weights / inner_weights.sum()
+                        normalized_weights = _normalized_sample_weights(d.dataset.weights)
                         self.weights.extend([d.weight * w for w in normalized_weights])
                     else:
                         self.weights.append(d.weight)
@@ -767,6 +800,7 @@ class MultiDatasetConfig(DataConfig):
             raise ValueError("dataset_cfgs and weights must have the same length")
         if len(self.dataset_cfgs) == 0:
             raise ValueError("At least one dataset must be provided")
+        _normalized_sample_weights(self.weights)
 
         # Normalize training_mode_override: draccus on a `TrainingMode | None`
         # union sometimes leaves the YAML value as a raw string ("VQA") or
@@ -977,12 +1011,12 @@ class MultiDatasetConfig(DataConfig):
 
     def make_dataset(self, policy_cfg: PolicyConfig = None) -> CombinedDataset:
         """Build a combined map-style dataset from the configured children."""
+        self._sampling_lengths = None
         children = [cfg.make_dataset(policy_cfg) for cfg in self.dataset_cfgs]
         if any(isinstance(child, torch.utils.data.IterableDataset) for child in children):
             raise TypeError("Public MultiDatasetConfig requires map-style child datasets")
         training_modes = [
-            self.training_mode_override
-            or getattr(cfg, "training_mode", TrainingMode.ROBOT_FLOWMATCH)
+            self.training_mode_override or getattr(cfg, "training_mode", TrainingMode.ROBOT_FLOWMATCH)
             for cfg in self.dataset_cfgs
         ]
         return CombinedDataset(children, training_modes=training_modes, features=self.features)
@@ -1001,39 +1035,47 @@ class MultiDatasetConfig(DataConfig):
             "Expected dataset to be CombinedDataset or WeightedIterableMixDataset for MultiDatasetConfig"
         )
         samplers = []
-        for dataset_cfg, individual_dataset in zip(self.dataset_cfgs, dataset.datasets, strict=False):
+        for dataset_cfg, individual_dataset in zip(self.dataset_cfgs, dataset.datasets, strict=True):
             new_sampler = dataset_cfg.make_sampler(individual_dataset, policy_cfg)
-            if new_sampler is not None:
-                samplers.append(new_sampler)
-        if len(samplers) == 0:
-            return None
+            if new_sampler is None:
+                # A single dataset needs no custom sampler when unrestricted,
+                # but every child needs one to participate in a weighted mix.
+                new_sampler = EpisodeAwareSampler(
+                    [0],
+                    [len(individual_dataset)],
+                    shuffle=self.shuffle_type == ShuffleType.FRAME,
+                    seed=getattr(dataset_cfg, "seed", self.seed),
+                )
+            samplers.append(new_sampler)
 
-        return MultiDatasetWeightedSampler(
+        sampler = MultiDatasetWeightedSampler(
             samplers=samplers,
             sample_weights=self.weights,
             shuffle_type=self.shuffle_type,
             seed=self.seed,
+            dataset_lengths=[len(child) for child in dataset.datasets],
         )
+        # Runtime-only sizes keep contribution reporting aligned with split and
+        # episode-cap selection. They are not part of the serialized config.
+        self._sampling_lengths = [len(child) for child in samplers]
+        return sampler
 
     def get_contributions(self, parent_weighting=None, parent_prefix=None):
-        contributions = []
-        name = "MultiDataset"
-        length = self.get_length()
-
-        contributions = {"name": name, "length": length, "weighted_length": 0, "child_contributions": []}
-
-        child_lengths = np.array([cfg.get_length() for cfg in self.dataset_cfgs])
-
-        normalized_weights = np.array(self.weights) / np.sum(self.weights)
-        # get the upper bound on the overall data pool size
-        data_pool_size = int(round(min(child_lengths / normalized_weights)))
-        allocated_sizes = [int(round(weight * data_pool_size)) for weight in normalized_weights]
-
+        child_lengths = getattr(self, "_sampling_lengths", None)
+        if child_lengths is None:
+            child_lengths = [cfg.get_length() for cfg in self.dataset_cfgs]
+        allocated_sizes = _allocate_sample_sizes(child_lengths, _normalized_sample_weights(self.weights))
+        contributions = {
+            "name": "MultiDataset",
+            "length": sum(child_lengths),
+            "weighted_length": sum(allocated_sizes),
+            "child_contributions": [],
+        }
         for i, dataset_cfg in enumerate(self.dataset_cfgs):
             ds_contributions = dataset_cfg.get_contributions()
+            ds_contributions["length"] = child_lengths[i]
             ds_contributions["weighted_length"] = allocated_sizes[i]
             contributions["child_contributions"].append(ds_contributions)
-
         return contributions
 
 

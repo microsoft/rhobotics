@@ -355,6 +355,22 @@ dataset:
 
 - **`weight`**: Controls the relative sampling frequency. A dataset with `weight: 2.0` will be sampled twice as often as one with `weight: 1.0`. Weights do not need to sum to 1 — they are normalized internally.
 
+  Map-style mixtures apply weights with or without per-child `max_episodes`.
+  Split selection and episode caps define each child's eligible samples;
+  concatenation offsets always use the full loaded child-dataset lengths.
+  Contribution reporting uses the eligible counts once the sampler is built.
+
+  The sampler retains rounded per-cycle quotas: for normalized weights `p_i`
+  and eligible counts `N_i`, it uses `round(p_i * round(min(N_i / p_i)))` for
+  positive-weight children. Small datasets therefore have integer rounding.
+  A zero weight disables a child; weights must be finite and nonnegative, with
+  at least one positive weight. A positive-weight child must not be empty.
+
+  Iteration continues across allocation cycles for step-based training;
+  `len(sampler)` reports one cycle's sample count. Partially consumed child
+  iterators continue into the next cycle instead of replaying the same prefix.
+  Sampler checkpoints preserve these child positions and the selection RNG.
+
 - **Top-level `features`**: When combining datasets with different state/action dimensions, define a top-level `features` block on the `MultiDatasetConfig` that represents the unified (padded) feature space. Shorter state and action vectors from individual datasets are automatically zero-padded to match `max_state_dim` and `max_action_dim` in the policy config.
 
 - **Per-dataset features and stats**: Each dataset entry can include its own `features`, `normalization_mapping`, and `stats` (via `<<: !include`). These are used for per-dataset normalization before padding to the unified shape.

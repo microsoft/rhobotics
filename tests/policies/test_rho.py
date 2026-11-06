@@ -15,7 +15,6 @@ from rho.policies import POLICY_REGISTRY, make_policy_from_checkpoint
 from rho.policies.base import PolicyConfig
 from rho.policies.rho import RhoConfig, RhoPolicy
 from rho.policies.rho.rho_model import FlowMatchingModel
-from rho.policies.rho.rho_policy import convert_rhoalpha_state_dict
 from rho.policies.rho.rho_processor import RhoProcessor
 
 
@@ -259,46 +258,6 @@ def test_rho_reports_missing_required_state_before_padding():
 
     with pytest.raises(KeyError, match=OBSERVATION_STATE):
         policy._validate_required_observations(batch)
-
-
-def test_rho_keeps_flow_weights_and_drops_cotraining_heads():
-    flow_weight = torch.tensor([1.0])
-    state_dict = {
-        "model.flow_model.action_head.weight": flow_weight,
-        "model.text_output_model.lm_head.weight": torch.tensor([2.0]),
-        "model.fast_model.action_head.weight": torch.tensor([3.0]),
-    }
-
-    converted = convert_rhoalpha_state_dict(state_dict)
-
-    assert converted == {"model.flow_model.action_head.weight": flow_weight}
-
-
-def test_rho_maps_knowledge_insulation_flow_weights():
-    state_dict = {
-        "model.knowledge_insulation_endstate_model.flow_model.action_head.weight": torch.tensor([1.0]),
-        "model.knowledge_insulation_endstate_model.vlm_backbone.weight": torch.tensor([2.0]),
-        "model.text_output_model.lm_head.weight": torch.tensor([3.0]),
-    }
-
-    converted = convert_rhoalpha_state_dict(state_dict)
-
-    assert set(converted) == {"model.flow_model.action_head.weight"}
-
-
-def test_rho_maps_legacy_direct_flow_weights():
-    state_dict = {
-        "model.vlm_backbone.weight": torch.tensor([1.0]),
-        "model.action_head.weight": torch.tensor([2.0]),
-        "model.tactile_projector.weight": torch.tensor([3.0]),
-    }
-
-    converted = convert_rhoalpha_state_dict(state_dict)
-
-    assert set(converted) == {
-        "model.flow_model.vlm_backbone.weight",
-        "model.flow_model.action_head.weight",
-    }
 
 
 def test_rho_remaps_legacy_siglip2_checkpoint_keys_for_transformers_510():

@@ -56,26 +56,6 @@ class _PreparedModelInputs:
     action: Tensor | None = None
 
 
-RHOALPHA_EXTRA_PREFIXES = (
-    "model.fast_model.",
-    "model.knowledge_insulation_fast_model.",
-    "model.knowledge_insulation_endstate_model.",
-    "model.text_output_model.",
-)
-LEGACY_FLOW_COMPONENTS = (
-    "vlm_backbone.",
-    "vlm_projector.",
-    "state_projector.",
-    "action_in_proj.",
-    "action_head.",
-    "action_time_mlp_in.",
-    "action_time_mlp_out.",
-    "time_mlp_in.",
-    "time_mlp_out.",
-    "action_expert.",
-)
-
-
 # ---------------------------------------------------------------------------
 # Private action-padding helper
 # ---------------------------------------------------------------------------
@@ -102,41 +82,6 @@ def _apply_action_padding_masks(
             action_dim_is_pad = action_dim_is_pad[..., :loss_dim]
         action_loss = action_loss * (~action_dim_is_pad).unsqueeze(1)
     return action_loss
-
-
-# ---------------------------------------------------------------------------
-# Checkpoint conversion
-# ---------------------------------------------------------------------------
-def convert_rhoalpha_state_dict(state_dict: dict) -> dict:
-    """Extract Rho flow weights from current or legacy RhoAlpha layouts."""
-    has_flow = any(key.startswith("model.flow_model.") for key in state_dict)
-    ki_prefix = "model.knowledge_insulation_endstate_model.flow_model."
-    has_ki_flow = any(key.startswith(ki_prefix) for key in state_dict)
-
-    if has_flow:
-        converted = {
-            key: value for key, value in state_dict.items() if not key.startswith(RHOALPHA_EXTRA_PREFIXES)
-        }
-    elif has_ki_flow:
-        converted = {
-            f"model.flow_model.{key.removeprefix(ki_prefix)}": value
-            for key, value in state_dict.items()
-            if key.startswith(ki_prefix)
-        }
-    else:
-        converted = {}
-        for key, value in state_dict.items():
-            if not key.startswith("model."):
-                converted[key] = value
-                continue
-            component = key.removeprefix("model.")
-            if component.startswith(LEGACY_FLOW_COMPONENTS):
-                converted[f"model.flow_model.{component}"] = value
-
-    dropped = len(state_dict) - len(converted)
-    if dropped:
-        logger.info("Dropped %d non-Rho keys while converting RhoAlpha weights", dropped)
-    return converted
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +179,6 @@ class RhoPolicy(PreTrainedPolicy):
     # Checkpoint loading
     # ------------------------------------------------------------------
     def _remap_checkpoint_keys(self, state_dict: dict) -> dict:
-        state_dict = convert_rhoalpha_state_dict(state_dict)
         flow_model = getattr(getattr(self, "model", None), "flow_model", None)
         vision_tower = getattr(
             getattr(getattr(flow_model, "vlm_backbone", None), "model", None), "vision_tower", None
@@ -418,7 +362,7 @@ class RhoPolicy(PreTrainedPolicy):
     def forward(self, batch: dict[str, Tensor], noise=None, time=None) -> tuple[Tensor, dict]:
         if self._has_uninitialized_backbone:
             raise RuntimeError(
-                "Phi5 has uninitialized weights. Load a Rho/RhoAlpha checkpoint or "
+                "Phi5 has uninitialized weights. Load a Rho checkpoint or "
                 f"install model weights at {self.config.vlm_backbone_folder}."
             )
 

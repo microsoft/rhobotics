@@ -162,6 +162,19 @@ to the entire dataset. No validation split is inferred automatically.
 Split selection does not recompute normalization statistics. Use statistics
 computed from training episodes for held-out evaluation.
 
+### Distributed validation
+
+The Accelerate trainer aggregates validation loss over every data-parallel
+worker, weighting batch means by their actual sample counts. Samples repeated
+solely to fill Accelerate's final batch are excluded before computing the loss;
+intentional repetitions from a sampler remain part of the evaluation. All
+workers receive the same result and only the main worker logs it.
+
+`max_validation_batches` limits local batches on each worker. Auxiliary numeric
+metrics are sample-weighted averages over batches that report each key; nonlinear
+summaries such as standard deviations are not recomputed population statistics.
+Validation must be called on all workers, including those with no valid samples.
+
 ### Excluding observations from loading
 
 `observation_blacklist` takes raw dataset keys, before observation remapping.

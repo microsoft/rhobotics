@@ -471,6 +471,26 @@ pretrained_checkpoint: null  # Optional override; null uses Rho's hosted default
 - **`pretrained_checkpoint`**: Optional Hugging Face repository ID or local
   checkpoint override. When unset, Rho uses `policy.pretrained_repo_id`.
 
+#### Monitoring during distributed training
+
+In Accelerate training, action-monitor inference, validation-probe plots, and
+logging run only on the main process. Data loading follows two distinct paths:
+
+- `action_monitor_source: lookahead` fetches future batches on every worker.
+  Each worker buffers its own batches and trains on them in the original order.
+  Repeated monitoring reuses buffered batches; epoch-boundary state is replayed
+  with each batch so lookahead does not change gradient-accumulation boundaries.
+- `training_fresh`, `validation`, and validation probes use independent,
+  unprepared main-process loaders. These keep separate sampler positions and
+  shuffle generators. They use zero workers to avoid additional persistent
+  worker pools, but do create separate dataset readers when enabled. The
+  `validation` action source still falls back to training data when no
+  validation loader is configured.
+
+Do not iterate a prepared loader on only one worker: iterator startup and
+batch dispatch can require collectives from all workers. This change does not
+alter the plain Python trainer or the definition of monitoring metrics.
+
 #### Policy Parameters
 - **`policy.type`**: Use `"rho"` for the public Rho policy.
 - **`policy.pretrained_repo_id`**: Hosted checkpoint used when

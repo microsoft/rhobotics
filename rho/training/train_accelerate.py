@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -17,9 +16,9 @@ from rho.common.wandb_logging import WandBLogger
 from rho.environment import make_environment
 from rho.environment.env import evaluate_policy
 from rho.training.action_sampling_monitor import ActionSamplingMonitor
+from rho.training.distributed_monitoring import LookaheadBatchIterator, make_local_monitoring_loader
 from rho.training.train import (
     TrainConfig,
-    collect_lookahead_monitor_batches,
     initialize_checkpoint_folder,
     make_everything,
     resolve_training_checkpoint,
@@ -222,6 +221,25 @@ def train(cfg: TrainConfig) -> None:
         training_metrics_recorder,
     ) = make_everything(cfg, device)
 
+    # Fresh diagnostic loaders must never enter Accelerate's distributed
+    # collectives, or share a stateful sampler with the training iterator.
+    monitor_training_loader = monitor_validation_loader = None
+    wants_probe = (
+        cfg.validation_probe
+        and cfg.validation_probe_interval > 0
+        and cfg.validation_dataset is not None
+        and validation_dataloader is not None
+    )
+    if accelerator.is_main_process:
+        wants_fresh = cfg.action_monitoring and cfg.action_monitor_source != "lookahead"
+        wants_validation = wants_fresh and cfg.action_monitor_source == "validation"
+        if wants_probe or (wants_fresh and (not wants_validation or validation_dataloader is None)):
+            monitor_training_loader = make_local_monitoring_loader(cfg.dataset, cfg.policy, device)
+        if wants_probe or (wants_validation and validation_dataloader is not None):
+            monitor_validation_loader = make_local_monitoring_loader(
+                cfg.validation_dataset, cfg.policy, device
+            )
+
     policy, optimizer, training_dataloader, validation_dataloader = accelerator.prepare(
         policy, optimizer, training_dataloader, validation_dataloader
     )
@@ -231,13 +249,7 @@ def train(cfg: TrainConfig) -> None:
         policy._set_static_graph()
 
     validation_probe = None
-    if (
-        cfg.validation_probe
-        and accelerator.is_main_process
-        and cfg.validation_probe_interval > 0
-        and cfg.validation_dataset is not None
-        and validation_dataloader is not None
-    ):
+    if wants_probe and accelerator.is_main_process:
         try:
             denorm_transform = cfg.validation_dataset.get_action_denormalization()
         except Exception:
@@ -247,14 +259,13 @@ def train(cfg: TrainConfig) -> None:
             )
             denorm_transform = None
         validation_probe = ValidationProbe(
-            validation_dataloader,
+            monitor_validation_loader,
             cfg.validation_probe_batches,
-            training_dataloader,
+            monitor_training_loader,
             denorm_transform=denorm_transform,
         )
 
-    training_iter = cycle(training_dataloader)
-    lookahead_batches = deque()
+    training_iter = LookaheadBatchIterator(cycle(training_dataloader), training_dataloader)
     # Get the unwrapped policy for evaluation (also used by main-process monitors)
     unwrapped_policy = policy.module if hasattr(policy, "module") else policy
 
@@ -298,7 +309,7 @@ def train(cfg: TrainConfig) -> None:
         validation_metrics = None
 
         with training_metrics_recorder.log_time("dataloading_s"):
-            batch = lookahead_batches.popleft() if lookahead_batches else next(training_iter)
+            batch = next(training_iter)
 
         # Apply training transforms and step them
         train_transforms.train()
@@ -349,6 +360,16 @@ def train(cfg: TrainConfig) -> None:
                     cfg.eval_num_episodes,
                     max_batches=cfg.max_validation_batches,
                 )
+
+        monitor_batches = None
+        if (
+            cfg.action_monitoring
+            and step % cfg.action_monitor_interval == 0
+            and cfg.action_monitor_source == "lookahead"
+        ):
+            # Every rank fetches and retains its own future batches. This must
+            # precede main-only inference, including when lookahead crosses an epoch.
+            monitor_batches = training_iter.peek(cfg.action_monitor_samples, accelerator)
 
         if accelerator.is_main_process:
             progress_bar.update(1)
@@ -403,18 +424,11 @@ def train(cfg: TrainConfig) -> None:
 
             if cfg.action_monitoring and step % cfg.action_monitor_interval == 0:
                 if cfg.action_monitor_source == "lookahead":
-                    monitor_batches = collect_lookahead_monitor_batches(
-                        training_iter, lookahead_batches, cfg.action_monitor_samples
-                    )
                     action_sampling_monitor.monitor_batches(monitor_batches, step, wandb_logger)
                 else:
-                    monitor_dataloader = training_dataloader
-                    if cfg.action_monitor_source == "validation":
-                        monitor_dataloader = (
-                            validation_dataloader
-                            if validation_dataloader is not None
-                            else training_dataloader
-                        )
+                    monitor_dataloader = monitor_training_loader
+                    if cfg.action_monitor_source == "validation" and monitor_validation_loader is not None:
+                        monitor_dataloader = monitor_validation_loader
                     action_sampling_monitor.monitor_training_progress(monitor_dataloader, step, wandb_logger)
 
             if step % cfg.save_checkpoint_every == 0:

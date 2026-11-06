@@ -93,7 +93,7 @@ def _get_memory_metrics() -> dict[str, float]:
 def train_policy_step_accumulate(
     policy, batch, optimizer, lr_scheduler, accelerator, step, device, grad_scaler=None, max_grad_norm=None
 ) -> tuple[dict[str, float], bool]:
-    """Performs a single training step on the policy"""
+    """Return metrics and whether a parameter update actually occurred."""
     policy.train()
     for key in batch:
         if isinstance(batch[key], torch.Tensor):
@@ -106,8 +106,8 @@ def train_policy_step_accumulate(
         accelerator.backward(loss)
         # Check gradients BEFORE sync/optimizer step
         grad_norms_per_group: dict[str, float] = {}
-        optimizer_updated = accelerator.sync_gradients
-        if optimizer_updated:
+        optimizer_updated = False
+        if accelerator.sync_gradients:
             # Per-group pre-clip grad norm. Computed before clip_grad_norm_
             # because that call rescales grads in place when total norm exceeds
             # max_grad_norm; this records the unmodified signal magnitude.
@@ -123,8 +123,11 @@ def train_policy_step_accumulate(
             if max_grad_norm is not None:
                 accelerator.clip_grad_norm_(policy.parameters(), max_grad_norm)
             optimizer.step()
+            # Synchronization marks an update attempt; AMP may still skip it.
+            optimizer_updated = not accelerator.optimizer_step_was_skipped
+            # Discard nonfinite gradients as well so the next window can recover.
             optimizer.zero_grad()
-            if lr_scheduler is not None:
+            if lr_scheduler is not None and optimizer_updated:
                 lr_scheduler.step()
     # Log metrics
     last_lrs = lr_scheduler.get_last_lr() if lr_scheduler else [g["lr"] for g in optimizer.param_groups]

@@ -549,6 +549,16 @@ class EvalConfig:
             self.policy = policy_config
         if data_config is not None:
             self.dataset = data_config
+        if type(self.dataset) is DataConfig:
+            raise ValueError(
+                f"Checkpoint {self.pretrained_checkpoint} does not provide a dataset configuration, and none "
+                "was given. Rho normalizes observations and actions with statistics from the robot it runs "
+                "on, so it needs a dataset configuration for that robot. Provide one in the `dataset` "
+                "section of the evaluation or serving config, with statistics from its `stats` file or from "
+                "the LeRobot dataset at its `root_dir`, or use a checkpoint trained for your robot. See "
+                "docs/tutorials/finetuning_custom_datasets.md for configuring a dataset and computing its "
+                "statistics."
+            )
 
         if not isinstance(self.policy, PolicyConfig):
             raise ValueError("Policy must be a PolicyConfig instance or a dict")

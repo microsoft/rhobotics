@@ -44,6 +44,46 @@ def test_checkpoint_loading_preserves_execution_horizon_override(monkeypatch, tm
     assert cfg.policy_interface_cfg.execution_horizon == 8
 
 
+def _save_bundle_without_dataset_config(tmp_path: Path) -> Path:
+    import torch
+
+    from rho.checkpoints import save_state_dict_bundle
+    from rho.policies.rho import RhoConfig
+
+    checkpoint = save_state_dict_bundle(
+        {"weight": torch.zeros(1)},
+        tmp_path / "checkpoint_step_1",
+        step=1,
+        policy_config=RhoConfig(chunk_size=16, n_action_steps=16, feature_dict={}),
+    )
+    manifest = json.loads((checkpoint / "manifest.json").read_text())
+    assert manifest["artifacts"]["data_config"] is None
+    assert manifest["artifacts"]["stats"] is None
+    return checkpoint
+
+
+def test_checkpoint_without_dataset_config_requires_one(tmp_path):
+    checkpoint = _save_bundle_without_dataset_config(tmp_path)
+
+    with pytest.raises(ValueError, match="does not provide a dataset configuration") as error:
+        EvalConfig(pretrained_checkpoint=str(checkpoint))
+
+    assert "statistics" in str(error.value)
+    assert "microsoft/" not in str(error.value)
+
+
+def test_checkpoint_without_dataset_config_uses_provided_dataset(tmp_path):
+    from rho.datasets.data_config import RobotDataConfig
+
+    checkpoint = _save_bundle_without_dataset_config(tmp_path)
+    dataset = RobotDataConfig()
+
+    cfg = EvalConfig(pretrained_checkpoint=str(checkpoint), dataset=dataset)
+
+    assert cfg.dataset is dataset
+    assert cfg.policy_interface_cfg.data_config is dataset
+
+
 def test_server_base_exposes_action_type_for_websocket_metadata():
     from rho.common.types import ActionType
     from rho.environment.env import EnvironmentConfig

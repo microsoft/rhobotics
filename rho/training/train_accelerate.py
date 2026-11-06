@@ -17,12 +17,12 @@ from rho.environment import make_environment
 from rho.environment.env import evaluate_policy
 from rho.training.action_sampling_monitor import ActionSamplingMonitor
 from rho.training.distributed_monitoring import LookaheadBatchIterator, make_local_monitoring_loader
+from rho.training.distributed_validation import validate_policy_distributed as validate_policy
 from rho.training.train import (
     TrainConfig,
     initialize_checkpoint_folder,
     make_everything,
     resolve_training_checkpoint,
-    validate_policy,
 )
 from rho.training.train_utils import make_policy_interface, save_checkpoint, serialize_train_config
 from rho.training.validation_probe import ValidationProbe
@@ -355,9 +355,7 @@ def train(cfg: TrainConfig) -> None:
                 validation_metrics = validate_policy(
                     policy,
                     validation_dataloader,
-                    device,
-                    cfg.eval_batch_size,
-                    cfg.eval_num_episodes,
+                    accelerator,
                     max_batches=cfg.max_validation_batches,
                 )
 

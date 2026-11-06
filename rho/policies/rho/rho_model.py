@@ -2232,7 +2232,7 @@ class FlowMatchingModel(BaseVLMModel):
 
 
 class RhoModel(nn.Module):
-    """Single-head Rho model with a stable RhoAlpha-compatible key layout."""
+    """Single-head Rho model whose checkpoint keys live under ``model.flow_model``."""
 
     def __init__(self, config):
         super().__init__()

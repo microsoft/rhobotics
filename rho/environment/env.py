@@ -619,7 +619,7 @@ def evaluate_policy(
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(episode_policy_seed)
 
-        # Initialize action queue using deque (like Phi4MMPolicy.select_action)
+        # Initialize action queue using deque (like RhoPolicy.select_action)
         # Queue holds tensors of shape (batch, action_dim)
         action_queue: deque[torch.Tensor] = deque()
 

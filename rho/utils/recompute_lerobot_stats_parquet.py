@@ -6,7 +6,7 @@ which avoids loading image/video data and is much faster for computing statistic
 
 Supports computing:
 - Quantile statistics (q01/q99) for all numeric keys
-- Chunked delta action statistics (mean, std, min, max, q01/q99 and q02/q98 by default)
+- Chunked delta action statistics (mean, std, min, max, q01/q99 by default)
 - Both types of statistics
 
 For chunked statistics, create an action mapping for your dataset as described
@@ -694,7 +694,7 @@ def compute_chunked_stats_from_parquet(
     chunk_sizes: list[int] | None = None,
     compute_mode: str = "single_pass",
     output_path: Path | None = None,
-    chunk_quantiles: list[tuple[float, float]] | tuple[float, float] = ((0.01, 0.99), (0.02, 0.98)),
+    chunk_quantiles: list[tuple[float, float]] | tuple[float, float] = ((0.01, 0.99),),
     use_absolute_grippers: bool = DeltaActions.use_absolute_grippers,
     action_to_absolute_idx_mapping: dict[str, list[int] | None] | None = None,
 ) -> dict:
@@ -1175,12 +1175,9 @@ Examples:
         "--chunk_quantiles",
         type=float,
         nargs="+",
-        default=[1.0, 99.0, 2.0, 98.0],
+        default=[1.0, 99.0],
         metavar="PCT",
-        help=(
-            "Lower/upper chunk quantile percentile pairs to compute. "
-            "Default: 1 99 2 98, which emits q01/q99 and keeps q02/q98."
-        ),
+        help="Lower/upper chunk quantile percentile pairs to compute. Default: 1 99, which emits q01/q99.",
     )
     parser.add_argument(
         "--use_absolute_grippers",

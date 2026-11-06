@@ -454,8 +454,16 @@ class PolicyInterface:
                 normalized values and selected temporal indices.
         """
 
-        obs = self.remap_observation(obs)
+        obs = self.process_obs_queue(self.remap_observation(obs))
+        return self.transform_observation(obs, process_action=process_action)
 
+    def transform_observation(self, obs: dict, process_action: bool = False) -> dict:
+        """Transform remapped, history-selected observations without advancing history.
+
+        Callers retaining a query snapshot can use this to normalize executed
+        actions against that query's raw state without inserting another frame.
+        """
+        obs = dict(obs)
         if (self.eval_mode == "rtc" or process_action) and "action" in obs and len(obs["action"]) > 0:
             prev_action = obs["action"]  # (seq_len, action_dim)
             original_prev_action_size = prev_action.shape[-2]  # seq_len
@@ -477,7 +485,6 @@ class PolicyInterface:
         elif "action" in obs:
             obs.pop("action")  # remove prev action if not in RTC mode
 
-        obs = self.process_obs_queue(obs)
         obs = self.input_transforms(obs)
 
         if (self.eval_mode == "rtc" or process_action) and "action" in obs:
@@ -591,7 +598,16 @@ class PolicyInterface:
                 obs[key] = value.to(self.device)
 
         obs = self.process_observation(obs)
+        return self.get_action_chunk_from_processed_observation(obs, noise=noise)
 
+    def get_action_chunk_from_processed_observation(self, obs: dict, noise=None) -> torch.Tensor:
+        """Sample and denormalize actions from an already processed observation.
+
+        Observation remapping, history selection, input transforms, and any RTC
+        previous-action preparation must have been performed by the caller.
+        This method does not advance observation history or handle reset flags.
+        """
+        obs = dict(obs)
         # Convert the initial noise to a device tensor if provided.
         noise_tensor = None
         if noise is not None:
@@ -609,7 +625,7 @@ class PolicyInterface:
         elif self.eval_mode == "rtc":
             # Stored absolute actions, when present, have already been converted
             # into current-frame, normalized policy actions.
-            remaining_actions = obs.get("action", None)
+            remaining_actions = obs.get("action")
 
             action_chunk = self.policy.sample_actions_rtc(
                 obs,

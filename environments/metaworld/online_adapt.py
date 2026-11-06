@@ -59,6 +59,7 @@ def run_episode(adapter, env, expert, schedule, seed, cfg, use_noise_policy):
     part of it.
     """
     obs, _ = env.reset(seed=seed)
+    adapter.reset()
     if schedule is not None:
         schedule.reset()
 
@@ -87,8 +88,7 @@ def run_episode(adapter, env, expert, schedule, seed, cfg, use_noise_policy):
     while t < cfg.max_timesteps:
         if t % cfg.query_freq == 0:
             finalize()
-            chunk_obs = {k: (v.clone() if isinstance(v, torch.Tensor) else v)
-                         for k, v in obs.items()}
+            chunk_obs = adapter.prepare_observation(obs)
             chunk_emb = adapter.embed_for_buffer(chunk_obs)
             if use_noise_policy:
                 noise = adapter.propose_noise(chunk_obs)

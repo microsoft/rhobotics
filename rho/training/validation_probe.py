@@ -18,6 +18,48 @@ from rho.common.constants import (
 logger = logging.getLogger(__name__)
 
 
+def valid_action_elements(batch: dict, action_key: str) -> torch.Tensor:
+    """Select genuine (batch, time, dimension) elements, including per-child padding."""
+    actions = batch[action_key]
+    if actions.ndim != 3:
+        raise ValueError(f"{action_key} must have shape (batch, time, dimension)")
+
+    valid = torch.ones_like(actions, dtype=torch.bool)
+
+    time_padding = batch.get(f"{action_key}_is_pad")
+    if time_padding is not None:
+        time_padding = torch.as_tensor(time_padding, device=actions.device, dtype=torch.bool)
+        if time_padding.ndim == 1:
+            time_padding = time_padding.unsqueeze(0)
+        if time_padding.shape[-1] != actions.shape[1] or time_padding.shape[0] not in (1, actions.shape[0]):
+            raise ValueError(f"{action_key}_is_pad must match the action batch and time dimensions")
+        valid &= ~time_padding.unsqueeze(-1)
+
+    dim_padding = batch.get(f"{action_key}_dim_is_pad")
+    if dim_padding is not None:
+        dim_padding = torch.as_tensor(dim_padding, device=actions.device, dtype=torch.bool)
+        if dim_padding.ndim == 1:
+            dim_padding = dim_padding.unsqueeze(0)
+        if dim_padding.shape[0] not in (1, actions.shape[0]):
+            raise ValueError(f"{action_key}_dim_is_pad must match the action batch dimension")
+        # A mask shorter than the padded action vector cannot mark new dimensions valid.
+        if dim_padding.shape[-1] < actions.shape[-1]:
+            dim_padding = F.pad(dim_padding, (0, actions.shape[-1] - dim_padding.shape[-1]), value=True)
+        else:
+            dim_padding = dim_padding[..., : actions.shape[-1]]
+        valid &= ~dim_padding.unsqueeze(1)
+    return valid
+
+
+def masked_action_mse(predictions: torch.Tensor, targets: torch.Tensor, valid: torch.Tensor) -> float | None:
+    """Mean squared error over valid elements; None if every element is padding."""
+    if predictions.shape != targets.shape or valid.shape != targets.shape:
+        raise ValueError("Predictions, targets, and validity mask must have the same shape")
+    if not valid.any():
+        return None
+    return F.mse_loss(predictions[valid].float(), targets[valid].float()).item()
+
+
 def generate_action_by_episode(policy, episode, device, num_action_steps=8, denorm_transform=None):
     """
     Generate actions for an episode using a policy, processing in chunks.
@@ -231,6 +273,7 @@ class ValidationProbe:
         with torch.no_grad():
             validation_actions = []
             validation_predictions = []
+            validation_action_valid = []
             validation_tactile_actions = []
             validation_tactile_predictions = []
 
@@ -259,6 +302,7 @@ class ValidationProbe:
 
                 validation_actions.append(gt_actions.cpu())
                 validation_predictions.append(pred_actions.cpu())
+                validation_action_valid.append(valid_action_elements(batch, ACTION).cpu())
 
                 if "tactile_action" in output and output["tactile_action"] is not None:
                     validation_tactile_actions.append(batch[ACTION_TACTILE].cpu())
@@ -266,8 +310,11 @@ class ValidationProbe:
 
             validation_actions = torch.cat(validation_actions, dim=0)
             validation_predictions = torch.cat(validation_predictions, dim=0).float()
-            action_mse = F.mse_loss(validation_predictions, validation_actions, reduction="none")
-            validation_metrics["validation_action_mse"] = action_mse.mean().item()
+            action_mse = masked_action_mse(
+                validation_predictions, validation_actions, torch.cat(validation_action_valid, dim=0)
+            )
+            if action_mse is not None:
+                validation_metrics["validation_action_mse"] = action_mse
 
             if len(validation_tactile_actions) > 0:
                 validation_tactile_actions = torch.cat(validation_tactile_actions, dim=0)

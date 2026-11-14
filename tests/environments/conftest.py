@@ -1,17 +1,16 @@
-"""Shared setup for environment tests.
+"""Shared CPU fixtures for the optional LIBERO and RoboEval simulators.
 
-The LIBERO simulator is usually installed only inside the LIBERO container.
-The wrapper's pure-Python logic (config validation, task cycling and
-initial-state selection) does not need the simulator, so when ``libero`` is not
-installed we register minimal stand-in modules that let
-``environments.libero.env`` be imported. The stand-ins raise if anything tries
-to use the simulator, so tests that need it fail loudly instead of passing
-against a fake. When the real package is installed, nothing is stubbed.
+Import-only stand-ins let tests exercise the real wrappers without physics
+dependencies. Constructing an unavailable simulator component raises.
 """
 
 import importlib.util
 import sys
 import types
+from unittest.mock import Mock
+
+import numpy as np
+import pytest
 
 LIBERO_STUBBED = importlib.util.find_spec("libero") is None
 
@@ -43,3 +42,60 @@ if LIBERO_STUBBED:
             "libero.libero.envs": libero_envs,
         }
     )
+
+
+def _missing_roboeval(*args, **kwargs):
+    raise RuntimeError("The RoboEval simulator is not installed.")
+
+
+if importlib.util.find_spec("roboeval") is None:
+    # Only the symbols imported by the wrapper are needed at collection time.
+    for module_name, symbols in {
+        "roboeval": (),
+        "roboeval.action_modes": ("JointPositionActionMode",),
+        "roboeval.demonstrations": (),
+        "roboeval.demonstrations.utils": ("Metadata",),
+        "roboeval.envs": (),
+        "roboeval.envs.lift_pot": ("LiftPotPositionAndOrientation",),
+        "roboeval.envs.lift_tray": ("LiftTrayPositionAndOrientation",),
+        "roboeval.envs.manipulation": (
+            "CubeHandoverPositionAndOrientation",
+            "StackTwoBlocksPositionAndOrientation",
+        ),
+        "roboeval.envs.pack_objects": ("PackBoxPositionAndOrientation",),
+        "roboeval.envs.rotate_utility_objects": ("RotateValvePositionAndOrientation",),
+        "roboeval.envs.stack_books": (
+            "PickSingleBookFromTablePositionAndOrientation",
+            "StackSingleBookShelfPositionAndOrientation",
+        ),
+        "roboeval.robots": (),
+        "roboeval.robots.configs": (),
+        "roboeval.robots.configs.panda": ("BimanualPanda",),
+        "roboeval.utils": (),
+        "roboeval.utils.observation_config": ("CameraConfig", "ObservationConfig"),
+    }.items():
+        module = types.ModuleType(module_name)
+        for symbol in symbols:
+            setattr(module, symbol, _missing_roboeval)
+        sys.modules[module_name] = module
+        if "." in module_name:
+            parent, name = module_name.rsplit(".", 1)
+            setattr(sys.modules[parent], name, module)
+
+
+@pytest.fixture
+def roboeval_wrapper():
+    from environments.roboeval.env import RoboevalEnvConfig, RoboevalWrapper
+
+    config = RoboevalEnvConfig(device="cpu")
+    wrapper = RoboevalWrapper.__new__(RoboevalWrapper)
+    wrapper.config = config
+    wrapper.device = config.device
+    wrapper.action_space = config.action_space
+    wrapper.task_name = config.task_name
+    wrapper.task_description = config.default_task
+    wrapper.sim = Mock()
+    wrapper.done = np.zeros(1, dtype=bool)
+    wrapper.total_reward = np.zeros(1, dtype=np.float64)
+    wrapper.last_frame = None
+    return wrapper

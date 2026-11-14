@@ -451,13 +451,13 @@ class RoboevalWrapper(EnvironmentWrapper):
 
         # Extract reward and done status
         reward = np.array([reward], dtype=np.float64)
-        done = np.array([done], dtype=bool)  # Success if reward > 0
+        done = np.array([done], dtype=bool)
 
         # Update state tracking
         self.total_reward += reward
         self.done = self.done | done
 
-        info.update({"is_success": done})
+        info["is_success"] = np.array([info["task_success"]], dtype=bool)
 
         return obs, reward, done, np.array([False]), info
 

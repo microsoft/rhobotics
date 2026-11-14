@@ -455,11 +455,12 @@ class RoboevalWrapper(EnvironmentWrapper):
 
         # Update state tracking
         self.total_reward += reward
-        self.done = self.done | done
+        truncated = np.array([truncated], dtype=bool)
+        self.done = self.done | done | truncated
 
         info.update({"is_success": done})
 
-        return obs, reward, done, np.array([False]), info
+        return obs, reward, done, truncated, info
 
     def render(self) -> np.ndarray | None:
         """Render the environment.

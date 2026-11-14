@@ -423,7 +423,7 @@ class RoboevalWrapper(EnvironmentWrapper):
         self.total_reward = np.zeros(1, dtype=np.float64)
 
         # Reset environment
-        raw_obs, info = self.sim.reset()
+        raw_obs, info = self.sim.reset(seed=seed)
 
         # Process observations to tensor format
         obs = self._process_input(raw_obs)

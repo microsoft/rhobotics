@@ -8,7 +8,7 @@ RoboEval-specific observation spaces, actions, and rendering.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -210,6 +210,7 @@ class RoboevalEnvConfig(EnvironmentConfig):
     # Default task description for the environment
     # Default to lift_pot, will be overridden in reset()
     default_task: str = TASK_DESCRIPTIONS["lift_pot"]
+    camera_names: list[str] = field(default_factory=lambda: ["head", "left_wrist", "right_wrist"])
 
 
 @register_environment("roboeval")
@@ -256,15 +257,8 @@ class RoboevalWrapper(EnvironmentWrapper):
             robot_cls=BimanualPanda,
             observation_config=ObservationConfig(
                 cameras=[
-                    CameraConfig(name="head", rgb=True, depth=False, resolution=(224, 224)),
-                    CameraConfig(name="left_wrist", rgb=True, depth=False, resolution=(224, 224)),
-                    CameraConfig(name="right_wrist", rgb=True, depth=False, resolution=(224, 224)),
-                    # CameraConfig(
-                    #     name="external", rgb=True, depth=False,
-                    #     resolution=(480, 640),
-                    #     pos=np.array([2.0, 0, 1.5]),
-                    #     quat=np.array([0.5610, 0.4305, 0.4305, 0.5610]),
-                    # )
+                    CameraConfig(name=name, rgb=True, depth=False, resolution=(224, 224))
+                    for name in config.camera_names
                 ],
             ),
         )
@@ -401,11 +395,14 @@ class RoboevalWrapper(EnvironmentWrapper):
 
         return processed_obs
 
-    def _store_video_frame(self, obs: dict[str, Any]):
-        """Store frame for video recording from observation."""
-        # Try common image keys
-        self.last_frame = obs["rgb_head"]
-        # self.last_frame = obs["rgb_external"]
+    def _store_video_frame(self, obs: dict[str, Any]) -> None:
+        """Use the first available configured RGB view for the current frame."""
+        self.last_frame = None
+        for name in self.config.camera_names:
+            frame = obs.get(f"rgb_{name}")
+            if frame is not None:
+                self.last_frame = frame
+                break
 
     def reset(self, seed: int | None = None) -> tuple:
         """Reset the environment.

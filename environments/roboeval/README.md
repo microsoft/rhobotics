@@ -113,6 +113,11 @@ checkpoint. The checkpoint supplies the feature schema, preprocessing,
 normalization statistics, and dataset configuration; simulation evaluation
 does not require `RHO_DATA_DIR` or a local training dataset.
 
+`environment.camera_names` selects the RoboEval RGB cameras. The default order
+is `[head, left_wrist, right_wrist]`. Evaluation videos use the first available
+camera in that order. For a custom checkpoint, set the list and
+`observation_mapping` to match the cameras and image keys used in training.
+
 ### Standard benchmark (preferred)
 
 Use the multieval configuration for the standard end-effector benchmark:

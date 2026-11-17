@@ -14,7 +14,7 @@ from rho.environment import make_environment
 from rho.environment.env import evaluate_policy
 from rho.eval.eval_config import SimEvalConfig
 from rho.eval.policy_interface import PolicyInterface, PolicyInterfaceConfig
-from rho.policies import make_policy
+from rho.policies import RhoPolicy, make_policy
 from rho.utils import init_logging
 
 logger = logging.getLogger(__name__)
@@ -90,6 +90,8 @@ def log_eval_results(output_dir, results, cfg, wandb_logger: WandBLogger | None 
             f.write(f"Task suite: {cfg.environment.task_suite_name}\n")
         if hasattr(cfg.environment, "task_name"):
             f.write(f"Task: {cfg.environment.task_name}\n")
+        if "noise_sampler" in results:
+            f.write(f"Noise sampler: {results['noise_sampler']}\n")
         f.write(f"Episodes: {results['num_episodes']}\n")
         f.write(f"Max steps: {cfg.environment.max_episode_steps}\n")
         f.write(f"Mean success rate: {results['mean_success_rt']:.3f}\n")
@@ -264,6 +266,10 @@ def _evaluate_in_environment(cfg, env, wandb_logger) -> dict:
         inference_delay=cfg.inference_delay,
     )
 
+    if cfg.eval_mode == "standard" and isinstance(policy, RhoPolicy):
+        sampler = policy.model.flow_model.noise_policy
+        eval_metrics["noise_sampler"] = "gaussian" if sampler is None else policy.config.noise_policy
+
     # Extract step number from checkpoint filename for wandb logging
     step = None
     try:
@@ -431,6 +437,8 @@ def _run_multi_eval(cfg: SimEvalConfig) -> None:
             summary_results[task_name] = {
                 k: v for k, v in results.items() if k in EVAL_SCALAR_KEYS and isinstance(v, (int, float))
             }
+            if "noise_sampler" in results:
+                summary_results[task_name]["noise_sampler"] = results["noise_sampler"]
             summary_results[task_name]["status"] = "success"
             summary_results[task_name]["environment"] = eval_cfg_copy.environment.name
             for meta_key in EVAL_META_KEYS[1:]:

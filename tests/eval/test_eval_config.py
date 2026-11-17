@@ -10,6 +10,7 @@ import pytest
 from draccus.parsers.config_parsers import YAMLParser
 
 from rho.eval.eval import (
+    _evaluate_in_environment,
     _initialize_default_checkpoint,
     _make_multi_eval_config,
     _make_policy_interface_config,
@@ -196,7 +197,7 @@ def test_multi_eval_records_failures_and_raises(monkeypatch, tmp_path, failed_ta
         calls.append(entry.name)
         if failure_stage == "evaluation" and entry.name in failed_tasks:
             raise RuntimeError("suite failed")
-        return {"mean_success_rt": 0.5, "num_episodes": 2}
+        return {"mean_success_rt": 0.5, "num_episodes": 2, "noise_sampler": "vlm_direct"}
 
     monkeypatch.setattr("rho.eval.eval._make_multi_eval_config", configure)
     monkeypatch.setattr("rho.eval.eval._run_single_eval", evaluate)
@@ -214,6 +215,8 @@ def test_multi_eval_records_failures_and_raises(monkeypatch, tmp_path, failed_ta
     (summary_path,) = tmp_path.glob("multieval_summary_*.json")
     summary = json.loads(summary_path.read_text())
     assert set(summary["per_task"]) == {"a", "b"}
+    for name in {"a", "b"} - set(failed_tasks):
+        assert summary["per_task"][name]["noise_sampler"] == "vlm_direct"
     assert summary["aggregate"]["num_failed"] == len(failed_tasks)
     assert summary["aggregate"]["num_completed"] == 2 - len(failed_tasks)
     assert summary["aggregate"]["complete"] == (not failed_tasks)
@@ -236,6 +239,42 @@ def test_multi_eval_rejects_missing_or_duplicate_tasks(names, tmp_path):
     )
     with pytest.raises(ValueError, match="at least one evaluation and unique task names"):
         _run_multi_eval(cfg)
+
+
+@pytest.mark.parametrize(
+    ("eval_mode", "learned", "rho_policy", "expected"),
+    [
+        ("standard", True, True, "vlm_direct"),
+        ("standard", False, True, "gaussian"),
+        ("rtc", True, True, None),
+        ("standard", False, False, None),
+    ],
+)
+def test_eval_records_loaded_noise_sampler(tmp_path, monkeypatch, eval_mode, learned, rho_policy, expected):
+    from rho.environment.env import EvalMetrics
+    from rho.eval.eval_config import SimEvalConfig
+    from rho.policies import RhoPolicy
+
+    environment = SimpleNamespace(name="test", max_episode_steps=1)
+    cfg = SimEvalConfig(output_dir=str(tmp_path), eval_mode=eval_mode, environment=environment)
+    cfg.pretrained_checkpoint = tmp_path / "checkpoint_step_1"
+    policy = MagicMock(spec=RhoPolicy) if rho_policy else MagicMock()
+    policy.config = SimpleNamespace(noise_policy="vlm_direct")
+    policy.model = SimpleNamespace(flow_model=SimpleNamespace(noise_policy=object() if learned else None))
+    cfg._loaded_policy = policy
+    monkeypatch.setattr("rho.eval.eval.PolicyInterface", MagicMock())
+    monkeypatch.setattr("rho.eval.eval.evaluate_policy", lambda **kwargs: EvalMetrics().summary())
+
+    _evaluate_in_environment(cfg, MagicMock(), None)
+
+    results = json.loads((tmp_path / "evaluation_results.json").read_text())
+    text = (tmp_path / "evaluation_results.txt").read_text()
+    if expected is None:
+        assert "noise_sampler" not in results
+        assert "Noise sampler:" not in text
+    else:
+        assert results["noise_sampler"] == expected
+        assert f"Noise sampler: {expected}\n" in text
 
 
 def test_single_eval_closes_resources_on_failure(monkeypatch):

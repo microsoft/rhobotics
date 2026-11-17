@@ -18,6 +18,7 @@ from rho.eval.eval import (
 )
 from rho.eval.eval_config import (
     EvalConfig,
+    SimEvalConfig,
     _normalize_dataset_dict,
     _normalize_policy_dict,
     find_dataset_by_root_dir,
@@ -320,11 +321,38 @@ def test_libero_eval_configs_use_published_checkpoint_and_full_action_horizon(re
     assert config["execution_horizon"] == 16
 
 
+def test_metaworld_cli_can_disable_checkpoint_noise_policy(tmp_path):
+    import draccus
+    import torch
+
+    from environments.metaworld import env  # noqa: F401 - register the environment used by the preset
+    from rho.checkpoints import save_state_dict_bundle
+    from rho.policies.rho import RhoConfig
+
+    checkpoint = save_state_dict_bundle(
+        {"weight": torch.zeros(1)},
+        tmp_path / "adapted",
+        step=1,
+        policy_config=RhoConfig(noise_policy="vlm_direct", chunk_size=16, n_action_steps=16),
+        data_config={"type": "base"},
+    )
+    preset = Path(__file__).resolve().parents[2] / "environments/metaworld/configs/eval_metaworld_rho.yaml"
+    args = [f"--config_path={preset}", f"--pretrained_checkpoint={checkpoint}"]
+
+    baseline = draccus.parse(SimEvalConfig, args=[*args, "--force_gaussian_noise=true"])
+    adapted = draccus.parse(SimEvalConfig, args=args)
+
+    assert baseline.policy.noise_policy is None
+    assert adapted.policy.noise_policy == "vlm_direct"
+    assert baseline.policy.chunk_size == adapted.policy.chunk_size == 16
+
+
 def test_multi_eval_preserves_dataset_and_policy(monkeypatch, tmp_path):
     dataset = object()
     policy = object()
     environment = object()
     parent = SimpleNamespace(
+        force_gaussian_noise=True,
         eval_num_episodes=4,
         record_videos=False,
         device="cpu",
@@ -360,6 +388,7 @@ def test_multi_eval_preserves_dataset_and_policy(monkeypatch, tmp_path):
         "libero_spatial",
     )
 
+    assert result.force_gaussian_noise is True
     assert result.dataset is dataset
     assert result.policy is policy
     assert result.environment is environment
@@ -368,6 +397,7 @@ def test_multi_eval_preserves_dataset_and_policy(monkeypatch, tmp_path):
 
 def test_multi_eval_inherits_parent_execution_horizon_when_entry_is_unset(monkeypatch, tmp_path):
     parent = SimpleNamespace(
+        force_gaussian_noise=False,
         eval_num_episodes=4,
         record_videos=False,
         device="cpu",

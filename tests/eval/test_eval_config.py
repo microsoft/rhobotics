@@ -21,6 +21,7 @@ from rho.eval.eval_config import (
     _normalize_dataset_dict,
     _normalize_policy_dict,
     find_dataset_by_root_dir,
+    load_configs_from_checkpoint,
     load_configs_from_train_config,
     load_policy_config_from_json,
 )
@@ -82,6 +83,45 @@ def test_checkpoint_without_dataset_config_uses_provided_dataset(tmp_path):
 
     assert cfg.dataset is dataset
     assert cfg.policy_interface_cfg.data_config is dataset
+
+
+@pytest.mark.parametrize("layout", ["flat-json", "nested-json", "bundle"])
+@pytest.mark.parametrize(
+    ("settings", "physical_action"),
+    [
+        ({}, 1.0),
+        ({"normalization_mapping": None}, 1.0),
+        ({"normalization_mapping": {"action": "MEAN_STD"}}, 1.0),
+        ({"normalization_mapping": {"ACTION": "MEAN_STD"}}, 12.0),
+    ],
+    ids=["missing", "null", "old-feature-name", "feature-type"],
+)
+def test_checkpoint_preserves_action_scaling(tmp_path, layout, settings, physical_action):
+    import torch
+
+    from rho.checkpoints import save_state_dict_bundle
+
+    preprocessing = {
+        "features": {"action": {"type": "ACTION", "shape": [1]}},
+        "stats": {"action": {"mean": [10.0], "std": [2.0]}},
+        **settings,
+    }
+    dataset = {"type": "base", **preprocessing}
+    if layout == "bundle":
+        checkpoint = save_state_dict_bundle(
+            {"weight": torch.zeros(1)}, tmp_path / "bundle", step=1, data_config=dataset
+        )
+        _, config = load_configs_from_checkpoint(checkpoint)
+    else:
+        if layout == "nested-json":
+            dataset = {"type": "base", "features": preprocessing}
+        path = tmp_path / "train_config.json"
+        path.write_text(json.dumps({"dataset": dataset}))
+        _, config = load_configs_from_train_config(path)
+
+    assert config.normalization_mapping == (settings.get("normalization_mapping") or {})
+    result = config.get_action_denormalization()({"action": torch.ones(1)})
+    assert result["action"].item() == physical_action
 
 
 def test_server_base_exposes_action_type_for_websocket_metadata():
@@ -509,6 +549,7 @@ class TestNormalizeDatasetDict:
         d = {"repo_id": "lerobot/aloha", "type": "custom"}
         result = _normalize_dataset_dict(d)
         assert result["type"] == "custom"
+        assert "normalization_mapping" not in result
 
     def test_old_nested_features_migration(self):
         d = {

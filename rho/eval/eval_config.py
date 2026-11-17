@@ -25,7 +25,7 @@ from rho.checkpoints import (
     resolve_latest_checkpoint,
 )
 from rho.common.wandb_logging import WandBConfig
-from rho.datasets.data_config import DataConfig
+from rho.datasets.data_config import DataConfig, RobotDataConfig
 from rho.environment.env import EnvironmentConfig
 from rho.eval.policy_interface import PolicyInterfaceConfig
 from rho.models.schedule import migrate_legacy_scheduler_config
@@ -277,15 +277,15 @@ def _normalize_dataset_dict(
     # --- old nested-features migration ---
     if "features" in dataset_dict and isinstance(dataset_dict["features"], dict):
         features_dict = dataset_dict["features"]
-        if "normalization_mapping" in features_dict:
+        nested_features = features_dict.get("features")
+        if "normalization_mapping" in features_dict or (
+            "features" in features_dict and not {"type", "shape"}.issubset(nested_features or {})
+        ):
             logger.info("Detected old train_config.json format with nested features, migrating...")
-            dataset_dict["normalization_mapping"] = features_dict.get("normalization_mapping")
-            dataset_dict["features"] = features_dict.get("features")
-            dataset_dict["stats"] = features_dict.get("stats")
-            if "clip_values" in features_dict:
-                dataset_dict["clip_values"] = features_dict["clip_values"]
-            if "chunk_size" in features_dict:
-                dataset_dict["chunk_size"] = features_dict["chunk_size"]
+            dataset_dict = dict(dataset_dict, features=nested_features)
+            for key in ("normalization_mapping", "stats", "clip_values", "chunk_size"):
+                if features_dict.get(key) is not None:
+                    dataset_dict[key] = features_dict[key]
 
     # --- strip None values ---
     dataset_dict = {k: v for k, v in dataset_dict.items() if v is not None}
@@ -331,6 +331,12 @@ def _normalize_dataset_dict(
     if "type" not in dataset_dict and ("repo_id" in dataset_dict or "root_dir" in dataset_dict):
         dataset_dict["type"] = "lerobot"
         logger.info("Inferred dataset type='lerobot' from presence of repo_id/root_dir field")
+
+    # Older robot checkpoints without a saved mapping trained with identity scaling.
+    if "normalization_mapping" not in dataset_dict and issubclass(
+        _resolve_choice_config_class(DataConfig, dataset_dict), RobotDataConfig
+    ):
+        dataset_dict["normalization_mapping"] = {}
 
     return dataset_dict
 

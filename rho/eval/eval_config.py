@@ -9,6 +9,7 @@ and evaluates the policy in the cfg.environment using the EnvironmentWrapper
 import json
 import logging
 import os
+from copy import copy
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from types import UnionType
@@ -597,6 +598,7 @@ class SimEvalConfig(EvalConfig):
     # Multi-eval support: when populated, each entry defines a separate
     # evaluation environment.  The top-level pretrained_checkpoint is shared.
     eval_configs: list[EvalConfig] = field(default_factory=list)
+    force_gaussian_noise: bool = False  # Override the sampler saved in the checkpoint.
 
     def __post_init__(self):
         super().__post_init__()  # Call the parent post init to load checkpoint and configs
@@ -604,6 +606,12 @@ class SimEvalConfig(EvalConfig):
         # If parent returned early (template mode), skip checkpoint-dependent init
         if self.pretrained_checkpoint is None:
             return
+
+        if self.force_gaussian_noise:
+            if not hasattr(self.policy, "noise_policy"):
+                raise ValueError("force_gaussian_noise requires a policy with a configurable noise sampler")
+            self.policy = copy(self.policy)
+            self.policy.noise_policy = None
 
         train_config_path = Path(self.checkpoint_folder).parent / "train_config.json"
 

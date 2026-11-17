@@ -307,6 +307,7 @@ def _make_multi_eval_config(
         execution_horizon = cfg.execution_horizon
     return SimEvalConfig(
         pretrained_checkpoint=str(checkpoint),
+        force_gaussian_noise=cfg.force_gaussian_noise,
         eval_num_episodes=getattr(eval_cfg, "eval_num_episodes", cfg.eval_num_episodes),
         record_videos=getattr(eval_cfg, "record_videos", cfg.record_videos),
         output_dir=str(output_dir / task_name),

@@ -110,18 +110,16 @@ python environments/metaworld/eval.py \
     --pretrained_checkpoint=outputs/online_metaworld/checkpoint_step_0002000
 ```
 
-To measure the same checkpoint without its noise policy — the before/after comparison — clear
-the config field, and the flow model falls back to a Gaussian draw:
+To evaluate the Gaussian baseline, use the same checkpoint and force Gaussian noise at evaluation time:
 
 ```bash
 python environments/metaworld/eval.py \
     --config_path=environments/metaworld/configs/eval_metaworld_rho.yaml \
     --pretrained_checkpoint=outputs/online_metaworld/checkpoint_step_0002000 \
-    --policy.noise_policy=null
+    --force_gaussian_noise=true
 ```
 
-The folded tensors are dropped with a log line rather than failing the load, so this is a
-config change rather than a second checkpoint.
+Both commands load the same policy weights. The Gaussian run skips the saved noise sampler.
 
 ## Results
 

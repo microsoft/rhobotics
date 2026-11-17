@@ -9,6 +9,10 @@ import pytest
 import torch
 from torch import Tensor, nn
 
+from rho.checkpoints import save_state_dict_bundle
+from rho.common.types import FeatureType, NormalizationMode, PolicyFeature
+from rho.datasets.lerobot_dataset import LeRobotDatasetConfig
+from rho.eval.eval_config import load_configs_from_checkpoint
 from rho.eval.policy_interface import (
     PolicyInterface,
     PolicyInterfaceConfig,
@@ -1080,6 +1084,36 @@ class TestPolicyInterfaceWithDataConfig:
         assert pi.output_transforms is not None
         mock_data_config.get_transforms.assert_called_once_with(remap=False, training=False)
         mock_data_config.get_action_denormalization.assert_called_once()
+
+    def test_checkpoint_restores_state_and_action_scaling(self, tmp_path, mock_policy):
+        dataset = LeRobotDatasetConfig(
+            features={
+                "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(2,)),
+                "action": PolicyFeature(type=FeatureType.ACTION, shape=(2,)),
+            },
+            normalization_mapping={
+                FeatureType.STATE.value: NormalizationMode.MEAN_STD,
+                FeatureType.ACTION.value: NormalizationMode.MEAN_STD,
+            },
+            stats={
+                "observation.state": {"mean": [1.0, 4.0], "std": [2.0, 3.0]},
+                "action": {"mean": [10.0, 20.0], "std": [2.0, 4.0]},
+            },
+        )
+        checkpoint = save_state_dict_bundle(
+            mock_policy.state_dict(), tmp_path / "checkpoint", step=1, data_config=dataset.to_dict()
+        )
+        _, restored_dataset = load_configs_from_checkpoint(checkpoint)
+        mock_policy.sample_actions = MagicMock(return_value={"actions": torch.tensor([[[2.0, -1.0]]])})
+        interface = PolicyInterface(
+            PolicyInterfaceConfig(policy=mock_policy, data_config=restored_dataset, device="cpu")
+        )
+
+        action = interface.get_action_chunk({"observation.state": torch.tensor([[[5.0, 1.0]]])})
+
+        model_state = mock_policy.sample_actions.call_args.args[0]["observation.state"]
+        torch.testing.assert_close(model_state, torch.tensor([[[2.0, -1.0]]]))
+        torch.testing.assert_close(action, torch.tensor([[[14.0, 16.0]]]))
 
     def test_explicit_transforms_override_data_config(self):
         """When transforms are explicitly provided, data_config should not override them."""

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -7,13 +8,14 @@ import pytest
 import torch
 from torch import nn
 
-from rho.checkpoints import load_bundle_weights, save_state_dict_bundle
+from rho.checkpoints import load_bundle_weights, save_checkpoint_bundle, save_state_dict_bundle
 from rho.common.constants import ACTION, OBSERVATION_IMAGE, OBSERVATION_LANG, OBSERVATION_STATE
 from rho.common.transforms import ResizeWithPadding
 from rho.common.types import FeatureType, PolicyFeature
 from rho.policies import POLICY_REGISTRY, make_policy_from_checkpoint
 from rho.policies.base import PolicyConfig
 from rho.policies.rho import RhoConfig, RhoPolicy
+from rho.policies.rho.phi5.backbone import Phi5Backbone
 from rho.policies.rho.rho_model import FlowMatchingModel
 from rho.policies.rho.rho_processor import RhoProcessor
 
@@ -326,6 +328,67 @@ def test_make_policy_from_rho_bundle_uses_portable_metadata(tmp_path):
     assert isinstance(policy.config, RhoConfig)
     assert not hasattr(policy.config, "empty_cameras")
     assert torch.equal(policy.weight, torch.tensor([1.0, 2.0]))
+
+
+def test_folded_checkpoint_uses_learned_or_gaussian_noise(tmp_path, monkeypatch):
+    def tiny_backbone(adapter):
+        backbone = nn.Module()
+        backbone.config = SimpleNamespace(hidden_size=adapter.config.embed_dim)
+        backbone.model = nn.Module()
+        backbone.model.embed_tokens = nn.Identity()
+        backbone.model.layers = nn.ModuleList()
+        backbone.model.vision_tower = nn.Identity()
+        return backbone
+
+    monkeypatch.setattr(Phi5Backbone, "load_backbone", tiny_backbone)
+    monkeypatch.setattr(Phi5Backbone, "create_processor", lambda self: None)
+    config = RhoConfig(
+        device="cpu",
+        dtype=torch.float32,
+        feature_dict={},
+        embed_dim=16,
+        ff_dim=16,
+        num_blocks=1,
+        max_seq_len=8,
+        chunk_size=2,
+        n_action_steps=2,
+        max_state_dim=2,
+        max_action_dim=2,
+        num_steps=1,
+        noise_policy="vlm_direct",
+        noise_policy_kwargs={
+            "emb_dim": 16,
+            "state_dim": 2,
+            "hidden_dims": [],
+            "noise_steps": 2,
+            "noise_dim": 2,
+        },
+    )
+    source = RhoPolicy(config)
+    flow = source.model.flow_model
+    # This checkpoint predicts zero learned noise and a constant velocity of 0.25.
+    with torch.no_grad():
+        for parameter in flow.noise_policy.parameters():
+            parameter.zero_()
+        flow.action_head.weight.zero_()
+        flow.action_head.bias.fill_(0.25)
+    checkpoint = save_checkpoint_bundle(source, tmp_path / "folded", step=1)
+
+    def sample(policy):
+        state = torch.zeros(1, 1, 2)
+        prefix = (torch.zeros(1, 1, 16), torch.ones(1, 1, dtype=torch.bool))
+        return policy.eval().model.flow_model.sample_actions(
+            None, None, state, precomputed_hidden_state=prefix
+        )
+
+    learned = make_policy_from_checkpoint(str(checkpoint))
+    gaussian = make_policy_from_checkpoint(str(checkpoint), policy_cfg=replace(config, noise_policy=None))
+    torch.testing.assert_close(sample(learned), torch.full((1, 2, 2), -0.25))
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(42)
+        expected_noise = torch.randn(1, 2, 2)
+        torch.manual_seed(42)
+        torch.testing.assert_close(sample(gaussian), expected_noise - 0.25)
 
 
 @pytest.mark.gpu

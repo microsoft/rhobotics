@@ -10,7 +10,7 @@ import torch
 from draccus import ChoiceRegistry
 from torchvision.transforms import Compose
 
-from rho.common.constants import ACTION, OBSERVATION_ENVIRONMENT_STATE, OBSERVATION_IMAGE, OBSERVATION_STATE
+from rho.common.constants import ACTION, OBSERVATION_IMAGE, OBSERVATION_STATE
 from rho.common.normalize import Unnormalize
 from rho.common.registry import get_registered_choice_type
 from rho.common.serialization import fixup_feature_shapes, serialize_to_dict
@@ -248,14 +248,12 @@ class RobotDataConfig(DataConfig):
                     f"Multiple observation keys map to {ACTION}: {action_mappings}. Only one is allowed."
                 )
 
-        # create default normalization mapping if not provided,
-        # using common sense defaults based on feature type
         if self.normalization_mapping is None:
             self.normalization_mapping = {
-                OBSERVATION_IMAGE: NormalizationMode.IDENTITY,
-                OBSERVATION_ENVIRONMENT_STATE: NormalizationMode.MEAN_STD,
-                OBSERVATION_STATE: NormalizationMode.MEAN_STD,
-                ACTION: NormalizationMode.MEAN_STD,
+                FeatureType.VISUAL.value: NormalizationMode.IDENTITY,
+                FeatureType.ENV.value: NormalizationMode.MEAN_STD,
+                FeatureType.STATE.value: NormalizationMode.MEAN_STD,
+                FeatureType.ACTION.value: NormalizationMode.MEAN_STD,
             }
 
         # Process stats field (from FeatureConfig logic)

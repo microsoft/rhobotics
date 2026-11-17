@@ -2,6 +2,7 @@ import json
 
 import numpy as np
 import pytest
+import torch
 import yaml
 
 from rho.common.types import FeatureType, NormalizationMode, PolicyFeature
@@ -143,6 +144,44 @@ class TestDataConfig:
                 features=sample_features,
                 stats=str(stats_file),
             )
+
+    def test_default_normalization_uses_feature_types(self):
+        features = {
+            "action": PolicyFeature(FeatureType.ACTION, (2,)),
+            "observation.joints": PolicyFeature(FeatureType.STATE, (2,)),
+            "observation.target": PolicyFeature(FeatureType.ENV, (2,)),
+            "observation.camera": PolicyFeature(FeatureType.VISUAL, (3, 8, 8)),
+        }
+        physical = torch.tensor([12.0, 22.0])
+        stats = {
+            key: {"mean": [10.0, 20.0], "std": [2.0, 2.0]}
+            for key, feature in features.items()
+            if feature.type != FeatureType.VISUAL
+        }
+        config = DataConfig(features=features, stats=stats)
+        image = torch.full((3, 8, 8), 0.5)
+        batch = dict.fromkeys(stats, physical)
+        batch["observation.camera"] = image
+
+        normalized = config.get_input_transform()(batch)
+
+        for key in stats:
+            torch.testing.assert_close(normalized[key], torch.ones(2))
+        torch.testing.assert_close(normalized["observation.camera"], image)
+        restored = config.get_action_denormalization()({"action": normalized["action"]})
+        torch.testing.assert_close(restored["action"], physical)
+
+    @pytest.mark.parametrize("mapping", [{"ACTION": "IDENTITY"}, {}])
+    def test_explicit_identity_bypasses_default_normalization(self, mapping):
+        config = DataConfig(
+            features={"action": PolicyFeature(FeatureType.ACTION, (2,))},
+            stats={"action": {"mean": [10.0, 20.0], "std": [2.0, 2.0]}},
+            normalization_mapping=mapping,
+        )
+        batch = {"action": torch.tensor([12.0, 22.0])}
+
+        torch.testing.assert_close(config.get_input_transform()(batch)["action"], batch["action"])
+        torch.testing.assert_close(config.get_action_denormalization()(batch)["action"], batch["action"])
 
     def test_get_input_transform(self, sample_features, sample_normalization_mapping, sample_stats):
         """Test getting input transform for dataset processing."""

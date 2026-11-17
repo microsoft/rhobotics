@@ -113,6 +113,11 @@ The server uses the same `EvalConfig` structure as evaluation. A portable
 finetuned checkpoint supplies the policy configuration, feature schema,
 dataset configuration, and normalization statistics.
 
+To apply saved statistics, set `dataset.normalization_mapping` using feature
+types as keys, for example `STATE: MEAN_STD` and `ACTION: MEAN_STD`. Inference
+normalises observations before sampling and converts output actions back into
+physical units. Types omitted from the mapping use `IDENTITY`.
+
 Create `environments/my_robot/server.yaml`:
 
 ```yaml

@@ -127,6 +127,25 @@ def vector_stats():
     }
 
 
+@pytest.mark.parametrize("transform", [Normalize, Unnormalize])
+@pytest.mark.parametrize("mode", [mode for mode in NormalizationMode if mode != NormalizationMode.IDENTITY])
+def test_load_normalization_buffers_without_dataset_stats(transform, mode, vector_stats):
+    features = {ACTION: PolicyFeature(FeatureType.ACTION, (2,))}
+    modes = {FeatureType.ACTION: mode}
+    # Use different statistics at each step to catch a lost chunk dimension.
+    stats = dict(vector_stats)
+    for key, values in vector_stats.items():
+        stats[f"{key}_chunk50"] = [[(step + 1) * value for value in values] for step in range(50)]
+    reference = transform(features, modes, stats={ACTION: stats}, chunk_size=2)
+    restored = transform(features, modes, chunk_size=2)
+    values = {ACTION: torch.tensor([[[9.0, 18.0], [20.0, 40.0]]])}
+
+    with pytest.raises(AssertionError, match="is infinity"):
+        restored(values)
+    restored.load_state_dict(reference.state_dict())
+    torch.testing.assert_close(restored(values)[ACTION], reference(values)[ACTION])
+
+
 @pytest.mark.parametrize(
     "mode", [NormalizationMode.MEAN_STD, NormalizationMode.MIN_MAX, NormalizationMode.QUANTILE]
 )

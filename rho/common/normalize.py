@@ -69,30 +69,28 @@ def create_stats_buffers(
 
         assert isinstance(norm_mode, NormalizationMode)
 
-        # Read shape from stats data if available, otherwise use feature shape
         shape = tuple(ft.shape)
-
-        stat_data = stats[key]["mean"]
-        if isinstance(stat_data, (np.ndarray, torch.Tensor)):
-            dataset_shape = tuple(stat_data.shape)
-        elif isinstance(stat_data, list):
-            dataset_shape = (len(stat_data),)
-
-        action_chunk_norm_modes = [
+        chunk_modes = (
             NormalizationMode.ACTIONCHUNK_MEAN_STD,
             NormalizationMode.ACTIONCHUNK_MIN_MAX,
             NormalizationMode.ACTIONCHUNK_QUANTILE,
+        )
+        perdim_modes = (
             NormalizationMode.ACTIONCHUNK_PERDIM_MEAN_STD,
             NormalizationMode.ACTIONCHUNK_PERDIM_MIN_MAX,
             NormalizationMode.ACTIONCHUNK_PERDIM_QUANTILE,
-        ]
-
-        if shape != dataset_shape and norm_mode not in action_chunk_norm_modes:
-            shape = dataset_shape
-            logger.debug(f"Overriding shape for {key} from stats: {shape}")
-
-        if norm_mode in action_chunk_norm_modes:
+        )
+        if norm_mode in chunk_modes or norm_mode in perdim_modes:
+            if chunk_size is None:
+                raise ValueError(f"chunk_size must be provided for {norm_mode.value} normalization of {key}")
             assert chunk_size <= 50, f"chunk_size {chunk_size} too large for {key} normalization"
+            if norm_mode in chunk_modes:
+                shape = (chunk_size, *shape)
+        elif stats:
+            dataset_shape = tuple(np.shape(stats[key]["mean"]))
+            if shape != dataset_shape:
+                shape = dataset_shape
+                logger.debug(f"Overriding shape for {key} from stats: {shape}")
 
         if ft.type is FeatureType.VISUAL:
             # sanity checks
@@ -137,10 +135,6 @@ def create_stats_buffers(
                 }
             )
         elif norm_mode is NormalizationMode.ACTIONCHUNK_MEAN_STD:
-            if chunk_size is None:
-                raise ValueError(
-                    f"chunk_size must be provided for ACTIONCHUNK_MEAN_STD normalization of {key}"
-                )
             chunk_mean = torch.ones(shape, dtype=torch.float32) * torch.inf
             chunk_std = torch.ones(shape, dtype=torch.float32) * torch.inf
             buffer = nn.ParameterDict(
@@ -150,10 +144,6 @@ def create_stats_buffers(
                 }
             )
         elif norm_mode is NormalizationMode.ACTIONCHUNK_MIN_MAX:
-            if chunk_size is None:
-                raise ValueError(
-                    f"chunk_size must be provided for ACTIONCHUNK_MIN_MAX normalization of {key}"
-                )
             chunk_min = torch.ones(shape, dtype=torch.float32) * torch.inf
             chunk_max = torch.ones(shape, dtype=torch.float32) * torch.inf
             buffer = nn.ParameterDict(
@@ -163,10 +153,6 @@ def create_stats_buffers(
                 }
             )
         elif norm_mode is NormalizationMode.ACTIONCHUNK_QUANTILE:
-            if chunk_size is None:
-                raise ValueError(
-                    f"chunk_size must be provided for ACTIONCHUNK_QUANTILE normalization of {key}"
-                )
             chunk_q01 = torch.ones(shape, dtype=torch.float32) * torch.inf
             chunk_q99 = torch.ones(shape, dtype=torch.float32) * torch.inf
             buffer = nn.ParameterDict(

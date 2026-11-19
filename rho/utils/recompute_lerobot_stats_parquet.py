@@ -697,6 +697,7 @@ def compute_chunked_stats_from_parquet(
     chunk_quantiles: list[tuple[float, float]] | tuple[float, float] = ((0.01, 0.99),),
     use_absolute_grippers: bool = DeltaActions.use_absolute_grippers,
     action_to_absolute_idx_mapping: dict[str, list[int] | None] | None = None,
+    base_stats: dict | None = None,
 ) -> dict:
     """
     Compute chunked statistics directly from parquet files.
@@ -711,6 +712,7 @@ def compute_chunked_stats_from_parquet(
         output_path: Path to save output stats.
         chunk_quantiles: Lower and upper quantile pairs for chunk quantile stats.
         action_to_absolute_idx_mapping: Per-action absolute channels in the source representation.
+        base_stats: Stats to merge over dataset metadata before adding computed chunk stats.
 
     Returns:
         Dict of computed statistics.
@@ -742,6 +744,9 @@ def compute_chunked_stats_from_parquet(
 
     # Load existing stats
     existing_stats = load_dataset_stats(dataset_path)
+    if base_stats is not None:
+        for key, stat_dict in base_stats.items():
+            existing_stats.setdefault(key, {}).update(stat_dict)
 
     # ===== Compute per-timestep chunked statistics for each chunk size =====
     print("\n" + "=" * 60)
@@ -1235,7 +1240,7 @@ Examples:
         )
         combined_stats.update(quantile_stats)
 
-        # Save quantile stats so the chunk step loads the updated q01/q99
+        # Save quantile stats and pass them directly to the chunk step below.
         quantile_output_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"\nWriting quantile statistics to: {quantile_output_path}")
         with open(quantile_output_path, "w") as f:
@@ -1283,6 +1288,7 @@ Examples:
             chunk_quantiles=chunk_quantiles,
             use_absolute_grippers=args.use_absolute_grippers,
             action_to_absolute_idx_mapping=action_to_absolute_idx_mapping,
+            base_stats=combined_stats if args.stats_type == "both" else None,
         )
 
         # Merge chunk stats with combined stats

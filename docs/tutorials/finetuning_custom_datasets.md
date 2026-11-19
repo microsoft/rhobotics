@@ -68,7 +68,13 @@ python rho/utils/recompute_lerobot_stats_parquet.py \
     --output_path config/datasets/your_dataset_stats
 ```
 
-Once you have created a new stats file you can either overwrite the original stats file or save it in a separate directory. It is safe to overwrite the original stats file since all the original statistics are preserved — this script only appends new fields in the same format that is ignored by the standard LeRobot dataloader. If you save the statistics in a separate file you can use the `dataset.stats` parameter in your configuration file to load them separately.
+`--output_path` names a JSON file. Omitting it updates `meta/stats.json` in place.
+`quantile` refreshes ordinary `q01`/`q99`, `chunk` refreshes the requested chunk
+fields, and `both` retains the fresh ordinary quantiles while adding chunk
+statistics. Other existing fields are preserved. For chunk and combined output,
+fields in an existing destination take precedence over dataset metadata unless
+they are recomputed. A separate output leaves the source metadata unchanged.
+Use `dataset.stats` in your training configuration to load that output file.
 
 Chunk statistics preserve end-effector gripper channels as absolute values by
 default, matching `delta_actions.use_absolute_grippers: true`. For a dataset

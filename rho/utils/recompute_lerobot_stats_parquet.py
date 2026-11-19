@@ -713,6 +713,7 @@ def compute_chunked_stats_from_parquet(
         chunk_quantiles: Lower and upper quantile pairs for chunk quantile stats.
         action_to_absolute_idx_mapping: Per-action absolute channels in the source representation.
         base_stats: Stats to merge over dataset metadata before adding computed chunk stats.
+            Defaults to the existing output file when available.
 
     Returns:
         Dict of computed statistics.
@@ -744,6 +745,10 @@ def compute_chunked_stats_from_parquet(
 
     # Load existing stats
     existing_stats = load_dataset_stats(dataset_path)
+    if base_stats is None and output_path is not None and output_path.exists():
+        print(f"Loading existing output stats from {output_path}")
+        with open(output_path) as f:
+            base_stats = json.load(f)
     if base_stats is not None:
         for key, stat_dict in base_stats.items():
             existing_stats.setdefault(key, {}).update(stat_dict)

@@ -349,6 +349,41 @@ class PolicyInterface:
 
         return remapped_observation
 
+    def _append_observation_frames(self, obs: dict[str, torch.Tensor]) -> None:
+        """Append remapped observation frames, preserving batch and temporal axes."""
+        for key, values in obs.items():
+            if key not in self.obs_queue or values.ndim < 2:
+                continue
+
+            # Detect whether the incoming tensor carries an explicit temporal
+            # axis. A single frame is (batch, *feature_shape); with a temporal
+            # axis it is (batch, seq_len, *feature_shape). We disambiguate by
+            # comparing the tensor rank against the known per-frame feature
+            # rank. Some environments (e.g. TabletopSim) supply the temporal
+            # axis; others (e.g. UR5) supply a single current frame.
+            feature_rank = self._feature_ranks[key]
+            if values.ndim == feature_rank + 2:
+                # Append oldest first so the latest frame ends up at the end.
+                frames = [values[:, t : t + 1] for t in range(values.shape[1])]
+            else:
+                # Add the temporal axis for a single current frame.
+                frames = [values.unsqueeze(1)]
+
+            for frame in frames:
+                self.obs_queue[key].append(frame)  # (batch_size, 1, *obs_shape)
+
+    def observe(self, obs: dict[str, torch.Tensor]) -> None:
+        """Record an observation while executing actions from an existing chunk.
+
+        Call this once for each frame that does not trigger policy inference.
+        ``get_action_chunk`` records its own current frame. Only queued features
+        are moved to the policy device; transforms and action sampling run when
+        a new chunk is requested.
+        """
+        remapped = self.remap_observation(obs)
+        queued = {key: value.to(self.device) for key, value in remapped.items() if key in self.obs_queue}
+        self._append_observation_frames(queued)
+
     def process_obs_queue(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Convert dict of observation deques to a dict of concatenated tensors and merge with current obs.
 
@@ -368,35 +403,13 @@ class PolicyInterface:
             available history and is therefore filled with the oldest observation.
         """
 
+        self._append_observation_frames(obs)
+
         pad_updates: dict[str, torch.Tensor] = {}
         for key in obs:
             if key in self.obs_queue:
-                # first append current obs to the queues, preserving the batch dimension
-                values = obs[key]
-                if values.ndim < 2:
+                if obs[key].ndim < 2:
                     continue
-
-                # Detect whether the incoming tensor carries an explicit temporal
-                # axis. A single frame is (batch, *feature_shape); with a temporal
-                # axis it is (batch, seq_len, *feature_shape). We disambiguate by
-                # comparing the tensor rank against the known per-frame feature
-                # rank. Some environments (e.g. TabletopSim) supply the temporal
-                # axis; others (e.g. UR5) supply a single current frame.
-                feature_rank = self._feature_ranks[key]
-                if values.ndim == feature_rank + 2:
-                    # (batch, seq_len, *feature_shape): append each timestep,
-                    # oldest first so the latest ends up at the end of the queue.
-                    frames = [values[:, t : t + 1] for t in range(values.shape[1])]
-                else:
-                    # (batch, *feature_shape) with no temporal axis (or an
-                    # unexpected rank): treat as a single current frame and add
-                    # the temporal axis ourselves -> (batch, 1, *feature_shape).
-                    frames = [values.unsqueeze(1)]
-
-                for frame in frames:
-                    self.obs_queue[key].append(frame)  # (batch_size, 1, *obs_shape)
-
-                # then sample from the queue
                 delta_indices = self.delta_indices_dict[key]
 
                 buffer_list = list(self.obs_queue[key])

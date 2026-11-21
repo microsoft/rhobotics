@@ -153,6 +153,21 @@ beta: 10
 guidance_schedule: "paper"
 ```
 
+## Observation history in local rollouts
+
+Temporal observation offsets count environment frames. Simulation evaluation
+records intermediate frames while executing an action chunk in both standard
+and RTC modes. For example, offsets `[-1, 0]` at frame 4 select frames 3 and 4,
+even when the previous policy query was at frame 0.
+
+For custom local loops using `PolicyInterface`, call `get_action_chunk(obs)` on
+inference frames and `observe(obs)` on intervening frames. Each call records the
+current observation, so call only one of them for a given frame. `observe()`
+updates history without running input transforms or sampling actions. Reset
+the interface with `reset()` between episodes and discard any queued actions.
+This also clears the cached action chunk used by RTC. The simulator's
+`evaluate_policy()` loop handles this lifecycle automatically.
+
 ## Start the server
 
 The server binds to `127.0.0.1` by default and limits each incoming WebSocket

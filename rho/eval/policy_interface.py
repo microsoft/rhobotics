@@ -370,7 +370,8 @@ class PolicyInterface:
                 frames = [values.unsqueeze(1)]
 
             for frame in frames:
-                self.obs_queue[key].append(frame)  # (batch_size, 1, *obs_shape)
+                # Environments may overwrite the same buffer on their next step.
+                self.obs_queue[key].append(frame.clone())  # (batch_size, 1, *obs_shape)
 
     def observe(self, obs: dict[str, torch.Tensor]) -> None:
         """Record an observation while executing actions from an existing chunk.

@@ -105,7 +105,9 @@ The snapshot retains both the selected raw history and transformed inputs.
 Embedding, action sampling, and later inversion therefore use the same temporal
 context and padding masks without inserting the observation again. Prepare a
 new snapshot for every new query, even when the environment reuses a dictionary
-or returns unchanged values. The MetaWorld rollout handles these steps itself.
+or returns unchanged values. The MetaWorld rollout also records each intervening
+environment frame without running inference, so temporal offsets refer to consecutive
+frames rather than policy-query intervals.
 
 The run prints two diagnostic lines after the seed episodes:
 

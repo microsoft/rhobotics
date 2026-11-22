@@ -197,6 +197,16 @@ class OnlineAdapter:
         """Clear temporal state at the start of an adaptation/evaluation episode."""
         self.pi.reset()
 
+    def _record_history(self, obs: dict) -> dict:
+        raw = _copy_observation(obs)
+        raw = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in raw.items()}
+        return self.pi.process_obs_queue(self.pi.remap_observation(raw))
+
+    @torch.no_grad()
+    def observe(self, obs: dict) -> None:
+        """Record an intervening environment frame without sampling or transforming."""
+        self._record_history(obs)
+
     @torch.no_grad()
     def prepare_observation(self, obs: dict) -> AdaptationObservation:
         """Ingest an observation exactly once and retain its query conditioning.
@@ -205,9 +215,7 @@ class OnlineAdapter:
         and inversion. Raw history is kept separately so executed physical actions
         can be transformed against the same state later without advancing queues.
         """
-        raw = _copy_observation(obs)
-        raw = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in raw.items()}
-        history = self.pi.process_obs_queue(self.pi.remap_observation(raw))
+        history = self._record_history(obs)
         processed = self.pi.transform_observation(_copy_observation(history))
         return AdaptationObservation(history, processed)
 

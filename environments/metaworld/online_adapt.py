@@ -95,6 +95,9 @@ def run_episode(adapter, env, expert, schedule, seed, cfg, use_noise_policy):
             else:  # before the first update, serve the policy's own Gaussian draw
                 noise = np.random.randn(adapter.chunk, adapter.noise_dim).astype(np.float32)
             actions = adapter.act(chunk_obs, noise)
+        else:
+            # Temporal offsets count environment frames, including steps between queries.
+            adapter.observe(obs)
 
         intervening = schedule.intervening_at(t) if schedule is not None else False
         if intervening:

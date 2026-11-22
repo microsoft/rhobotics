@@ -164,14 +164,18 @@ def test_episode_ingests_each_query_once(
     expected = (
         [[0.1], [(1 + query_freq) / 10]]
         if history_steps == 1
-        else [[0.1, 0.1, 0.1], [0.1, 0.1, (1 + query_freq) / 10]]
+        else ([[0.1, 0.1, 0.1], [0.1, 0.1, 0.2]] if query_freq == 1 else [[0.1, 0.1, 0.1], [0.1, 0.2, 0.3]])
     )
     for actual, values in zip(policy.observations, expected, strict=True):
         torch.testing.assert_close(actual[STATE][0, :, 0], torch.tensor(values))
         torch.testing.assert_close(actual[IMAGE][0, :, 0, 0, 0], torch.tensor(values) / 10)
-    expected_masks = [[False], [False]] if history_steps == 1 else [[True, True, False], [True, False, False]]
+    expected_masks = (
+        [[False], [False]]
+        if history_steps == 1
+        else [[True, True, False], [True, False, False] if query_freq == 1 else [False, False, False]]
+    )
     assert [obs[f"{STATE}_is_pad"][0].tolist() for obs in policy.observations] == expected_masks
-    assert len(adapter.pi.obs_queue[STATE]) == min(history_steps, 2)
+    assert len(adapter.pi.obs_queue[STATE]) == min(history_steps, 2 * query_freq)
     if use_noise_policy:
         for actual, values in zip(policy.model.flow_model.noise_policy.seen_states, expected, strict=True):
             torch.testing.assert_close(actual[0, :, 0], torch.tensor(values))
@@ -182,6 +186,27 @@ def test_episode_ingests_each_query_once(
             torch.testing.assert_close(target, torch.full((1, 2, 2), (5.0 - current) / 2))
     else:
         assert not inversions
+
+
+def test_intervening_frames_only_advance_history(make_adapter):
+    adapter, policy, _ = make_adapter()
+    adapter.prepare_observation(_observation(1))
+    transforms = adapter.pi.input_transforms
+    transformed = []
+
+    def count_transforms(obs):
+        transformed.append(1)
+        return transforms(obs)
+
+    adapter.pi.input_transforms = count_transforms
+    adapter.observe(_observation(2))
+    adapter.observe(_observation(3))
+    assert transformed == []
+    assert policy.observations == []
+    query = adapter.prepare_observation(_observation(4))
+    assert len(transformed) == 1
+    torch.testing.assert_close(query.processed[STATE][0, :, 0], torch.tensor([0.2, 0.3, 0.4]))
+    assert query.processed[f"{STATE}_is_pad"][0].tolist() == [False, False, False]
 
 
 def test_episode_reset_clears_previous_query_history(make_adapter):

@@ -688,6 +688,9 @@ class MockPolicyInterface:
     def reset(self):
         pass
 
+    def observe(self, obs):
+        pass
+
     def get_action_chunk(self, obs):
         # Determine batch size from observation
         batch_size = 1

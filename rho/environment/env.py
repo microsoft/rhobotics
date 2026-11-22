@@ -693,6 +693,10 @@ def evaluate_policy(
                 actions_transposed = action_chunk.transpose(0, 1)
                 action_queue.extend(actions_transposed)
                 num_executed_since_inference = 0
+            else:
+                # Temporal offsets count environment frames, including steps
+                # that execute queued actions without requesting a new chunk.
+                policy_interface.observe(obs)
 
             # Pop next action from queue: (batch, action_dim)
             action = action_queue.popleft()

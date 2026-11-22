@@ -59,6 +59,7 @@ def run_episode(adapter, env, expert, schedule, seed, cfg, use_noise_policy):
     part of it.
     """
     obs, _ = env.reset(seed=seed)
+    adapter.reset()
     if schedule is not None:
         schedule.reset()
 
@@ -87,14 +88,16 @@ def run_episode(adapter, env, expert, schedule, seed, cfg, use_noise_policy):
     while t < cfg.max_timesteps:
         if t % cfg.query_freq == 0:
             finalize()
-            chunk_obs = {k: (v.clone() if isinstance(v, torch.Tensor) else v)
-                         for k, v in obs.items()}
+            chunk_obs = adapter.prepare_observation(obs)
             chunk_emb = adapter.embed_for_buffer(chunk_obs)
             if use_noise_policy:
                 noise = adapter.propose_noise(chunk_obs)
             else:  # before the first update, serve the policy's own Gaussian draw
                 noise = np.random.randn(adapter.chunk, adapter.noise_dim).astype(np.float32)
             actions = adapter.act(chunk_obs, noise)
+        else:
+            # Temporal offsets count environment frames, including steps between queries.
+            adapter.observe(obs)
 
         intervening = schedule.intervening_at(t) if schedule is not None else False
         if intervening:

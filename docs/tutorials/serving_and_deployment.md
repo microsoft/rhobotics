@@ -222,6 +222,22 @@ inference leaves the reset pending for retry. Also discard queued actions on
 the client and reset `num_actions_executed` to zero for the first request of
 the new episode. The response uses the singular `"action"` key.
 
+## Camera order and temporal history
+
+Rho uses the camera order in the checkpoint's feature configuration. Within
+each camera, frames run from oldest to newest. For cameras `wrist` and `head`
+with two observation steps, model inputs are ordered
+`[wrist_old, wrist_new, head_old, head_new]`. Each camera's `*_is_pad` mask
+follows the same temporal order; `True` marks a padded image.
+
+For direct `RhoPolicy.select_action()` calls, provide one current RGB frame
+per camera as `(batch, 3, height, width)` on every step, including steps that
+return a cached action. The policy maintains temporal history and returns one
+action per call. Call `policy.reset()` between episodes. Training and
+`sample_actions()` accept explicit per-camera histories shaped
+`(batch, n_obs_steps, 3, height, width)` with masks shaped
+`(batch, n_obs_steps)`.
+
 ## Deployment safety
 
 Before commanding a robot:

@@ -287,9 +287,10 @@ class RhoPolicy(PreTrainedPolicy):
         self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
 
         if len(self._queues["action"]) == 0:
+            # Match training order: each camera's history, oldest frame first.
             batch = {
-                OBS_IMAGES: torch.cat(list(self._queues[OBS_IMAGES]), dim=1),
-                OBS_IMAGES_IS_PAD: torch.cat(list(self._queues[OBS_IMAGES_IS_PAD]), dim=1),
+                OBS_IMAGES: torch.stack(list(self._queues[OBS_IMAGES]), dim=2).flatten(1, 2),
+                OBS_IMAGES_IS_PAD: torch.stack(list(self._queues[OBS_IMAGES_IS_PAD]), dim=2).flatten(1, 2),
                 OBS_ROBOT: torch.stack(list(self._queues[OBS_ROBOT]), dim=1),
                 OBS_TASK: self._queues[OBS_TASK][0],
             }
